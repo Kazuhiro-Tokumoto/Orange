@@ -146,6 +146,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "oag-store"
+version = "0.1.0"
+dependencies = [
+ "oag-chain",
+ "oag-consensus",
+ "oag-primitives",
+ "redb",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "ppv-lite86"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -217,6 +228,15 @@ dependencies = [
  "cmake",
  "libc",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "redb"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

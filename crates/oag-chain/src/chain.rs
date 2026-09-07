@@ -784,14 +784,14 @@ mod tests {
             })
             .collect();
         for out in &losing_outputs {
-            assert!(chain.utxo().contains(out), "リオーグ前は存在する");
+            assert!(chain.utxo().contains(out).unwrap(), "リオーグ前は存在する");
         }
 
         extend(&mut chain, fork, 3, 2);
         assert_eq!(chain.height(), 3);
         for out in &losing_outputs {
             assert!(
-                !chain.utxo().contains(out),
+                !chain.utxo().contains(out).unwrap(),
                 "取り消された枝のコインベース出力が残っている"
             );
         }

@@ -14,7 +14,7 @@ use crate::lock::Lock;
 use crate::params;
 use crate::sighash::{sighash, SighashError, SighashType};
 use crate::tx::{decode_coinbase_height, Transaction, TxOutput, LOCKTIME_THRESHOLD};
-use crate::utxo::{OverlayView, UtxoEntry, UtxoView};
+use crate::utxo::{OverlayView, UtxoEntry, UtxoError, UtxoView};
 use oag_primitives::address::VERSION_PUBKEY;
 use oag_primitives::{Amount, Hash, PublicKey, Signature};
 use std::collections::HashSet;
@@ -213,6 +213,13 @@ pub enum ValidationError {
     /// sighash を計算できなかった。
     #[error(transparent)]
     Sighash(#[from] SighashError),
+    /// UTXO セットの読み取りに失敗した。
+    ///
+    /// UTXO が存在しないこと ([`ValidationError::MissingUtxo`]) とは
+    /// 区別される。こちらは記憶装置の障害であり、ブロックが不正である
+    /// ことを意味しない。
+    #[error(transparent)]
+    Utxo(#[from] UtxoError),
     /// 支払い条件のペイロードが公開鍵として解釈できない。
     #[error("入力 {index} が参照する出力の公開鍵が不正")]
     BadLockPubkey {
@@ -292,7 +299,7 @@ pub fn validate_transaction(
     let mut spent_entries = Vec::with_capacity(tx.inputs.len());
     for input in &tx.inputs {
         let entry = utxo
-            .get(&input.prev_out)
+            .get(&input.prev_out)?
             .ok_or(ValidationError::MissingUtxo)?;
 
         if entry.is_coinbase {

@@ -1,0 +1,16 @@
+[package]
+name = "oag-store"
+description = "Orange (OAG) の永続化: ブロック・UTXO セット・チェーン状態"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+oag-chain.workspace = true
+oag-consensus.workspace = true
+oag-primitives.workspace = true
+redb.workspace = true
+thiserror.workspace = true

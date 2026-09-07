@@ -10,6 +10,7 @@
 //!
 //! 参照: `docs/SPEC.md` §10.3, §13.3
 
+use crate::codec::{write_varint, CodecError, Decode, Encode, Reader};
 use crate::tx::{OutPoint, Transaction, TxOutput};
 use std::collections::HashMap;
 
@@ -28,13 +29,85 @@ pub struct UtxoEntry {
 ///
 /// 永続化された実装に差し替えられるよう、所有権を返す。
 pub trait UtxoView {
-    /// 指定した参照先の UTXO を返す。使用済みまたは存在しない場合は `None`。
-    fn get(&self, outpoint: &OutPoint) -> Option<UtxoEntry>;
+    /// 指定した参照先の UTXO を返す。使用済みまたは存在しない場合は `Ok(None)`。
+    ///
+    /// # なぜ `Result` なのか
+    ///
+    /// 永続化された実装では読み取り自体が失敗しうる。これを `None`
+    /// (= UTXO が存在しない) と区別せずに扱うと、ディスクの不調が
+    /// 「そのトランザクションは無効」という判定に化ける。ノードは正当な
+    /// ブロックを拒否して静かにチェーンから外れることになる。
+    /// 記憶装置の障害と、UTXO が使用済みであることは、別の事実である。
+    fn get(&self, outpoint: &OutPoint) -> Result<Option<UtxoEntry>, UtxoError>;
 
     /// UTXO が存在するか。
-    fn contains(&self, outpoint: &OutPoint) -> bool {
-        self.get(outpoint).is_some()
+    fn contains(&self, outpoint: &OutPoint) -> Result<bool, UtxoError> {
+        Ok(self.get(outpoint)?.is_some())
     }
+}
+
+/// UTXO セットの変更。
+///
+/// メモリ上の実装と永続化された実装の双方が実装する。適用と巻き戻しの
+/// ロジックは [`apply_block_to`] と [`undo_block_from`] に一本化してあり、
+/// **背後の記憶装置によらず同じ手順が走る**。二重に実装すると、メモリ版と
+/// DB 版で挙動が食い違ったときに帳簿が分裂する。
+pub trait UtxoWrite: UtxoView {
+    /// UTXO を追加する。すでに存在する場合は誤りとする。
+    fn insert(&mut self, outpoint: OutPoint, entry: UtxoEntry) -> Result<(), UtxoError>;
+
+    /// UTXO を取り除き、その内容を返す。存在しない場合は誤りとする。
+    fn remove(&mut self, outpoint: &OutPoint) -> Result<UtxoEntry, UtxoError>;
+}
+
+/// ブロックを適用し、巻き戻し情報を返す。
+///
+/// 呼び出し側は事前に検証を済ませていなければならない。
+/// **途中で失敗した場合、`utxo` は中途半端な状態のまま残る。**
+/// 呼び出し側が巻き戻すか、書き込みトランザクションを破棄すること。
+pub fn apply_block_to(
+    utxo: &mut dyn UtxoWrite,
+    transactions: &[Transaction],
+    height: u64,
+) -> Result<UndoBlock, UtxoError> {
+    let mut undo = UndoBlock::default();
+    for tx in transactions {
+        let is_coinbase = tx.is_coinbase();
+        if !is_coinbase {
+            for input in &tx.inputs {
+                let entry = utxo.remove(&input.prev_out)?;
+                undo.spent.push((input.prev_out, entry));
+            }
+        }
+        let txid = tx.txid();
+        for (index, output) in tx.outputs.iter().enumerate() {
+            let outpoint = OutPoint::new(txid, index as u32);
+            utxo.insert(
+                outpoint,
+                UtxoEntry {
+                    output: output.clone(),
+                    height,
+                    is_coinbase,
+                },
+            )?;
+            undo.created.push(outpoint);
+        }
+    }
+    Ok(undo)
+}
+
+/// ブロックの適用を取り消す。
+pub fn undo_block_from(utxo: &mut dyn UtxoWrite, undo: &UndoBlock) -> Result<(), UtxoError> {
+    for outpoint in &undo.created {
+        utxo.remove(outpoint)?;
+    }
+    for (outpoint, entry) in &undo.spent {
+        if utxo.contains(outpoint)? {
+            return Err(UtxoError::UndoMismatch(*outpoint));
+        }
+        utxo.insert(*outpoint, entry.clone())?;
+    }
+    Ok(())
 }
 
 /// ブロックを適用した際の巻き戻し情報。
@@ -43,9 +116,9 @@ pub trait UtxoView {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UndoBlock {
     /// 消費された UTXO とその内容。復元に用いる。
-    spent: Vec<(OutPoint, UtxoEntry)>,
+    pub(crate) spent: Vec<(OutPoint, UtxoEntry)>,
     /// 生成された UTXO の参照。削除に用いる。
-    created: Vec<OutPoint>,
+    pub(crate) created: Vec<OutPoint>,
 }
 
 impl UndoBlock {
@@ -75,6 +148,11 @@ pub enum UtxoError {
     /// 巻き戻しで復元しようとした UTXO がすでに存在する。
     #[error("巻き戻しの整合性が取れない: {0:?}")]
     UndoMismatch(OutPoint),
+    /// 記憶装置の読み書きに失敗した。
+    ///
+    /// UTXO が存在しないこととは区別される。
+    #[error("記憶装置の操作に失敗した: {0}")]
+    Backend(String),
 }
 
 /// メモリ上の UTXO セット。
@@ -115,52 +193,17 @@ impl UtxoSet {
             .ok_or(UtxoError::MissingUtxo(*outpoint))
     }
 
-    /// トランザクション 1 件を適用する。
-    ///
-    /// 呼び出し側は事前に検証を済ませていなければならない。
-    fn apply_transaction(
-        &mut self,
-        tx: &Transaction,
-        height: u64,
-        undo: &mut UndoBlock,
-    ) -> Result<(), UtxoError> {
-        if !tx.is_coinbase() {
-            for input in &tx.inputs {
-                let entry = self.remove(&input.prev_out)?;
-                undo.spent.push((input.prev_out, entry));
-            }
-        }
-
-        let txid = tx.txid();
-        let is_coinbase = tx.is_coinbase();
-        for (index, output) in tx.outputs.iter().enumerate() {
-            let outpoint = OutPoint::new(txid, index as u32);
-            self.insert(
-                outpoint,
-                UtxoEntry {
-                    output: output.clone(),
-                    height,
-                    is_coinbase,
-                },
-            )?;
-            undo.created.push(outpoint);
-        }
-        Ok(())
-    }
-
     /// ブロックを適用し、巻き戻し情報を返す。
     ///
-    /// 途中で失敗した場合、セットは変更されないまま返る。
+    /// 途中で失敗した場合、セットは変更されないまま返る。作業用の複製に
+    /// 対して操作し、成功したときだけ差し替えるため。
     pub fn apply_block(
         &mut self,
         transactions: &[Transaction],
         height: u64,
     ) -> Result<UndoBlock, UtxoError> {
         let mut working = self.clone();
-        let mut undo = UndoBlock::default();
-        for tx in transactions {
-            working.apply_transaction(tx, height, &mut undo)?;
-        }
+        let undo = apply_block_to(&mut working, transactions, height)?;
         *self = working;
         Ok(undo)
     }
@@ -168,31 +211,29 @@ impl UtxoSet {
     /// ブロックの適用を取り消す。リオーグで用いる。
     pub fn undo_block(&mut self, undo: &UndoBlock) -> Result<(), UtxoError> {
         let mut working = self.clone();
-
-        // 生成された UTXO を消す。
-        for outpoint in &undo.created {
-            working.remove(outpoint)?;
-        }
-        // 消費された UTXO を戻す。
-        for (outpoint, entry) in &undo.spent {
-            if working.entries.contains_key(outpoint) {
-                return Err(UtxoError::UndoMismatch(*outpoint));
-            }
-            working.entries.insert(*outpoint, entry.clone());
-        }
-
+        undo_block_from(&mut working, undo)?;
         *self = working;
         Ok(())
     }
 }
 
-impl UtxoView for UtxoSet {
-    fn get(&self, outpoint: &OutPoint) -> Option<UtxoEntry> {
-        self.entries.get(outpoint).cloned()
+impl UtxoWrite for UtxoSet {
+    fn insert(&mut self, outpoint: OutPoint, entry: UtxoEntry) -> Result<(), UtxoError> {
+        UtxoSet::insert(self, outpoint, entry)
     }
 
-    fn contains(&self, outpoint: &OutPoint) -> bool {
-        self.entries.contains_key(outpoint)
+    fn remove(&mut self, outpoint: &OutPoint) -> Result<UtxoEntry, UtxoError> {
+        UtxoSet::remove(self, outpoint)
+    }
+}
+
+impl UtxoView for UtxoSet {
+    fn get(&self, outpoint: &OutPoint) -> Result<Option<UtxoEntry>, UtxoError> {
+        Ok(self.entries.get(outpoint).cloned())
+    }
+
+    fn contains(&self, outpoint: &OutPoint) -> Result<bool, UtxoError> {
+        Ok(self.entries.contains_key(outpoint))
     }
 }
 
@@ -228,14 +269,14 @@ impl<'a> OverlayView<'a> {
 }
 
 impl UtxoView for OverlayView<'_> {
-    fn get(&self, outpoint: &OutPoint) -> Option<UtxoEntry> {
+    fn get(&self, outpoint: &OutPoint) -> Result<Option<UtxoEntry>, UtxoError> {
         if self.spent.contains(outpoint) {
-            return None;
+            return Ok(None);
         }
-        self.created
-            .get(outpoint)
-            .cloned()
-            .or_else(|| self.base.get(outpoint))
+        match self.created.get(outpoint) {
+            Some(entry) => Ok(Some(entry.clone())),
+            None => self.base.get(outpoint),
+        }
     }
 }
 
@@ -287,11 +328,14 @@ mod tests {
             2,
             "コインベース 2 件目 + 送金先。元の 1 件は消費された"
         );
-        assert!(!set.contains(&cb_out));
+        assert!(!set.contains(&cb_out).unwrap());
 
         set.undo_block(&undo2).unwrap();
         assert_eq!(set.len(), after_first.len());
-        assert!(set.contains(&cb_out), "消費された UTXO が復元される");
+        assert!(
+            set.contains(&cb_out).unwrap(),
+            "消費された UTXO が復元される"
+        );
         assert_eq!(set.get(&cb_out), after_first.get(&cb_out));
 
         set.undo_block(&undo1).unwrap();
@@ -322,7 +366,7 @@ mod tests {
         let mut set = UtxoSet::new();
         let cb = coinbase(42);
         set.apply_block(std::slice::from_ref(&cb), 42).unwrap();
-        let entry = set.get(&OutPoint::new(cb.txid(), 0)).unwrap();
+        let entry = set.get(&OutPoint::new(cb.txid(), 0)).unwrap().unwrap();
         assert_eq!(entry.height, 42);
         assert!(entry.is_coinbase);
     }
@@ -357,7 +401,7 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(set.len(), snapshot.len());
-        assert!(set.contains(&OutPoint::new(cb.txid(), 0)));
+        assert!(set.contains(&OutPoint::new(cb.txid(), 0)).unwrap());
     }
 
     #[test]
@@ -368,10 +412,10 @@ mod tests {
 
         let mut overlay = OverlayView::new(&set);
         let base_out = OutPoint::new(cb.txid(), 0);
-        assert!(overlay.contains(&base_out));
+        assert!(overlay.contains(&base_out).unwrap());
 
         let fresh = OutPoint::new(oag_primitives::hash::txid(b"new"), 0);
-        assert!(!overlay.contains(&fresh));
+        assert!(!overlay.contains(&fresh).unwrap());
         overlay.add_created(
             fresh,
             UtxoEntry {
@@ -380,13 +424,128 @@ mod tests {
                 is_coinbase: false,
             },
         );
-        assert!(overlay.contains(&fresh), "同一ブロック内の出力が見える");
+        assert!(
+            overlay.contains(&fresh).unwrap(),
+            "同一ブロック内の出力が見える"
+        );
 
         assert!(overlay.mark_spent(fresh));
-        assert!(!overlay.contains(&fresh), "使用済みは見えなくなる");
+        assert!(!overlay.contains(&fresh).unwrap(), "使用済みは見えなくなる");
         assert!(!overlay.mark_spent(fresh), "二重使用は検出される");
 
         // 基底のセットは変更されない。
-        assert!(set.contains(&base_out));
+        assert!(set.contains(&base_out).unwrap());
+    }
+}
+
+// ━━━━━━━━ 永続化のためのシリアライズ ━━━━━━━━
+
+impl Encode for UtxoEntry {
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        self.output.encode_into(out);
+        write_varint(u128::from(self.height), out);
+        out.push(u8::from(self.is_coinbase));
+    }
+}
+
+impl Decode for UtxoEntry {
+    fn read_from(reader: &mut Reader<'_>) -> Result<UtxoEntry, CodecError> {
+        Ok(UtxoEntry {
+            output: TxOutput::read_from(reader)?,
+            height: reader.read_varint_u64("utxo.height")?,
+            is_coinbase: reader.read_u8()? != 0,
+        })
+    }
+}
+
+impl Encode for UndoBlock {
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        write_varint(self.spent.len() as u128, out);
+        for (outpoint, entry) in &self.spent {
+            outpoint.encode_into(out);
+            entry.encode_into(out);
+        }
+        write_varint(self.created.len() as u128, out);
+        for outpoint in &self.created {
+            outpoint.encode_into(out);
+        }
+    }
+}
+
+impl Decode for UndoBlock {
+    fn read_from(reader: &mut Reader<'_>) -> Result<UndoBlock, CodecError> {
+        let spent_count = reader.read_count("undo.spent")?;
+        let mut spent = Vec::with_capacity(spent_count);
+        for _ in 0..spent_count {
+            let outpoint = OutPoint::read_from(reader)?;
+            let entry = UtxoEntry::read_from(reader)?;
+            spent.push((outpoint, entry));
+        }
+        let created_count = reader.read_count("undo.created")?;
+        let mut created = Vec::with_capacity(created_count);
+        for _ in 0..created_count {
+            created.push(OutPoint::read_from(reader)?);
+        }
+        Ok(UndoBlock { spent, created })
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+    use crate::lock::Lock;
+    use oag_primitives::{Amount, SecretKey};
+
+    fn entry(height: u64, is_coinbase: bool) -> UtxoEntry {
+        UtxoEntry {
+            output: TxOutput::new(
+                Amount::from_oag(7).unwrap(),
+                Lock::pay_to_pubkey(&SecretKey::generate().public_key()),
+            ),
+            height,
+            is_coinbase,
+        }
+    }
+
+    #[test]
+    fn utxo_entry_round_trip() {
+        for (height, coinbase) in [(0u64, true), (1, false), (u32::MAX as u64, true)] {
+            let e = entry(height, coinbase);
+            assert_eq!(UtxoEntry::decode(&e.encode()).unwrap(), e);
+        }
+    }
+
+    #[test]
+    fn undo_block_round_trip() {
+        let undo = UndoBlock {
+            spent: vec![
+                (
+                    OutPoint::new(oag_primitives::hash::txid(b"a"), 0),
+                    entry(1, true),
+                ),
+                (
+                    OutPoint::new(oag_primitives::hash::txid(b"b"), 7),
+                    entry(2, false),
+                ),
+            ],
+            created: vec![
+                OutPoint::new(oag_primitives::hash::txid(b"c"), 0),
+                OutPoint::new(oag_primitives::hash::txid(b"c"), 1),
+            ],
+        };
+        assert_eq!(UndoBlock::decode(&undo.encode()).unwrap(), undo);
+    }
+
+    #[test]
+    fn an_empty_undo_round_trips() {
+        let undo = UndoBlock::default();
+        assert_eq!(UndoBlock::decode(&undo.encode()).unwrap(), undo);
+    }
+
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let mut bytes = entry(1, true).encode();
+        bytes.push(0);
+        assert_eq!(UtxoEntry::decode(&bytes), Err(CodecError::TrailingBytes(1)));
     }
 }
