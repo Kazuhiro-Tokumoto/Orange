@@ -6,6 +6,8 @@
 //! - [`tx`] — トランザクション
 //! - [`mod@sighash`] — BIP341 方式の署名対象
 //! - [`block`] — ブロックとブロックヘッダ
+//! - [`utxo`] — UTXO セット
+//! - [`validate`] — コンセンサスルールの検証
 //!
 //! すべての定数と規則は `docs/SPEC.md` に対応する。仕様書が正典であり、
 //! 本実装との差異は仕様書側を優先して解消する。
@@ -19,9 +21,13 @@ pub mod lock;
 pub mod params;
 pub mod sighash;
 pub mod tx;
+pub mod utxo;
+pub mod validate;
 
 pub use block::{Block, BlockHeader};
 pub use codec::{CodecError, Decode, Encode};
 pub use lock::Lock;
 pub use sighash::{sighash, SighashBase, SighashType};
 pub use tx::{OutPoint, Transaction, TxInput, TxOutput};
+pub use utxo::{UtxoEntry, UtxoSet, UtxoView};
+pub use validate::{validate_block, validate_transaction, BlockContext, ValidationError};

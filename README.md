@@ -38,7 +38,7 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 | 0 | ワークスペース、CI、仕様書 | 完了 |
 | 1 | 基本型 (金額・ハッシュ・アドレス・鍵) | 完了 |
 | 2 | トランザクション・ブロック・シリアライズ・sighash | 完了 |
-| 3 | 検証ロジック、UTXO セット | 未着手 |
+| 3 | 検証ロジック、UTXO セット | 完了 |
 | 4 | RandomX、難易度調整 (LWMA) | 未着手 |
 | 5 | チェーン状態、永続化、リオーグ | 未着手 |
 | 6 | mempool、手数料ポリシー | 未着手 |
@@ -52,7 +52,8 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 ```
 crates/
 ├── oag-primitives/   金額 (u128)・BLAKE3・マークル・varint・鍵・アドレス
-└── oag-consensus/    符号化・パラメータ・トランザクション・ブロック・sighash
+└── oag-consensus/    符号化・パラメータ・トランザクション・ブロック・
+                     sighash・UTXO セット・検証
 ```
 
 ## ビルド
