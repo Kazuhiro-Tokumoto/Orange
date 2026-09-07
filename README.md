@@ -44,8 +44,9 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 | 5b | 永続化 (redb)・チェーンとの接続 | 完了 |
 | 6 | mempool、手数料ポリシー | 完了 |
 | 7a | P2P プロトコル (枠組み・メッセージ・ハンドシェイク) | 完了 |
-| 7b | 同期ロジック、Compact Blocks | 未着手 |
-| 7c | TCP トランスポート | 未着手 |
+| 7b | ブロックロケータ、取り寄せの割り振り | 完了 |
+| 7c | Compact Blocks | 未着手 |
+| 7d | TCP トランスポート | 未着手 |
 | 8 | マイナー | 未着手 |
 | 9 | RPC、CLI ウォレット | 未着手 |
 | 10 | テストネット公開 | 未着手 |
@@ -62,7 +63,8 @@ crates/
 │                    記憶域の抽象 (ChainStore) とメモリ実装
 ├── oag-store/        永続化 (redb)
 ├── oag-mempool/      mempool・中継ポリシー
-└── oag-net/          P2P プロトコル (枠組み・メッセージ・ハンドシェイク)
+└── oag-net/          P2P プロトコル (枠組み・メッセージ・ハンドシェイク・
+                     ロケータ・取り寄せの割り振り)
 ```
 
 `oag-pow` の RandomX は feature `randomx` の背後にある。C++ 実装のビルドに
