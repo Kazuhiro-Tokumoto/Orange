@@ -372,6 +372,61 @@ impl Store {
     }
 }
 
+// ━━━━━━━━ ChainStore の実装 ━━━━━━━━
+
+impl oag_chain::store::ChainStore for Store {
+    type Error = StoreError;
+    type View<'a> = StoreView;
+
+    fn tip(&self) -> Result<Option<Hash>, StoreError> {
+        Store::tip(self)
+    }
+
+    fn height(&self) -> Result<Option<u64>, StoreError> {
+        Store::height(self)
+    }
+
+    fn hash_at_height(&self, height: u64) -> Result<Option<Hash>, StoreError> {
+        Store::hash_at_height(self, height)
+    }
+
+    fn block(&self, hash: &Hash) -> Result<Option<Block>, StoreError> {
+        Store::block(self, hash)
+    }
+
+    fn index_entry(&self, hash: &Hash) -> Result<Option<BlockIndexEntry>, StoreError> {
+        Store::index_entry(self, hash)
+    }
+
+    fn all_index_entries(&self) -> Result<Vec<BlockIndexEntry>, StoreError> {
+        Store::all_index_entries(self)
+    }
+
+    fn put_block(&self, block: &Block, entry: &BlockIndexEntry) -> Result<(), StoreError> {
+        Store::put_block(self, block, entry)
+    }
+
+    fn put_index_entry(&self, entry: &BlockIndexEntry) -> Result<(), StoreError> {
+        Store::put_index_entry(self, entry)
+    }
+
+    fn connect_block(&self, block: &Block) -> Result<UndoBlock, StoreError> {
+        Store::connect_block(self, block)
+    }
+
+    fn disconnect_tip(&self) -> Result<Hash, StoreError> {
+        Store::disconnect_tip(self)
+    }
+
+    fn utxo_view(&self) -> Result<StoreView, StoreError> {
+        Store::utxo_view(self)
+    }
+
+    fn utxo_count(&self) -> Result<u64, StoreError> {
+        Store::utxo_count(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

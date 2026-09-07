@@ -41,7 +41,7 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 | 3 | 検証ロジック、UTXO セット | 完了 |
 | 4 | RandomX、難易度調整 (LWMA) | 完了 |
 | 5 | チェーン状態、リオーグ | 完了 |
-| 5b | 永続化 (redb) | 完了 |
+| 5b | 永続化 (redb)・チェーンとの接続 | 完了 |
 | 6 | mempool、手数料ポリシー | 未着手 |
 | 7 | P2P、headers-first 同期、Compact Blocks | 未着手 |
 | 8 | マイナー | 未着手 |
@@ -57,6 +57,7 @@ crates/
 │                    sighash・UTXO セット・検証
 ├── oag-pow/          難易度・ターゲット・LWMA・シードエポック・RandomX
 ├── oag-chain/        ブロックインデックス・最良チェーン選択・リオーグ・ジェネシス
+│                    記憶域の抽象 (ChainStore) とメモリ実装
 └── oag-store/        永続化 (redb)
 ```
 
