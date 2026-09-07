@@ -46,7 +46,7 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 | 7a | P2P プロトコル (枠組み・メッセージ・ハンドシェイク) | 完了 |
 | 7b | ブロックロケータ、取り寄せの割り振り | 完了 |
 | 7c | Compact Blocks | 完了 |
-| 7d | TCP トランスポート | 未着手 |
+| 7d | TCP トランスポート | 完了 |
 | 8 | マイナー | 未着手 |
 | 9 | RPC、CLI ウォレット | 未着手 |
 | 10 | テストネット公開 | 未着手 |
@@ -64,7 +64,7 @@ crates/
 ├── oag-store/        永続化 (redb)
 ├── oag-mempool/      mempool・中継ポリシー
 └── oag-net/          P2P プロトコル (枠組み・メッセージ・ハンドシェイク・
-                     ロケータ・取り寄せの割り振り・Compact Blocks)
+                     ロケータ・取り寄せの割り振り・Compact Blocks・TCP)
 ```
 
 `oag-pow` の RandomX は feature `randomx` の背後にある。C++ 実装のビルドに
@@ -72,6 +72,13 @@ cmake と C++ コンパイラを要するため、既定では無効にしてあ
 
 ```sh
 cargo test -p oag-pow --features randomx
+```
+
+同様に `oag-net` の TCP を扱う層は feature `tokio` の背後にあります。
+プロトコルの規則そのものは feature なしで使えます。
+
+```sh
+cargo test -p oag-net --features tokio
 ```
 
 ## ビルド

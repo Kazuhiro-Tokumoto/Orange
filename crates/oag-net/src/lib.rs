@@ -7,10 +7,14 @@
 //! - [`compact`] — Compact Blocks
 //! - [`locator`] — ブロックロケータ
 //! - [`sync`] — ブロックの取り寄せの割り振り
+//! - `transport` — TCP の実体 (feature `tokio` が必要)
 //!
-//! 本クレートは **入出力を行わない**。バイト列とメッセージの相互変換と、
-//! 状態遷移の規則だけを扱う。実際の通信は上位の層が担う。この分離により、
-//! プロトコルの規則をネットワークなしで試験できる。
+//! **`transport` を除き、本クレートは入出力を行わない。** バイト列と
+//! メッセージの相互変換と、状態遷移の規則だけを扱う。この分離により、
+//! プロトコルの規則をネットワークなしで、決定的に試験できる。
+//!
+//! 実際にソケットに触れるのは [`transport`] だけであり、feature `tokio`
+//! が有効なときにのみ現れる。
 //!
 //! rust-libp2p は採用していない。PoW チェーンの P2P 要件は
 //! 「ブロックとトランザクションを撒く」ことに尽き、libp2p の DHT や
@@ -26,6 +30,9 @@ pub mod locator;
 pub mod magic;
 pub mod message;
 pub mod sync;
+
+#[cfg(feature = "tokio")]
+pub mod transport;
 
 pub use compact::{CompactBlock, CompactError, PartialBlock, ShortIdIndex};
 pub use frame::FrameError;

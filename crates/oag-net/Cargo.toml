@@ -8,8 +8,17 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# TCP の実体を扱う層。tokio を必要とするため既定では無効。
+# プロトコルの規則そのものは feature なしで使える。
+tokio = ["dep:tokio"]
+
 [dependencies]
 blake3.workspace = true
 oag-consensus.workspace = true
 oag-primitives.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time"] }
