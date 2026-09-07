@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/oag-primitives"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/Kazuhiro-Tokumoto/Orange"
+authors = ["Orange contributors"]
+
+[workspace.dependencies]
+bech32 = "0.12"
+blake3 = "1"
+hex = "0.4"
+secp256k1 = "0.33"
+thiserror = "2"
+
+[profile.release]
+# 静かに誤った金額を生成するより異常終了する方が被害が小さい (docs/SPEC.md §3)
+overflow-checks = true
+debug-assertions = false
+lto = "thin"
+codegen-units = 1

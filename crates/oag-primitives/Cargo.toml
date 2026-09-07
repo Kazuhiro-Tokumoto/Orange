@@ -1,0 +1,18 @@
+[package]
+name = "oag-primitives"
+description = "Orange (OAG) の基本型: 金額・ハッシュ・アドレス・鍵"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+bech32.workspace = true
+blake3.workspace = true
+hex.workspace = true
+secp256k1 = { workspace = true, features = ["std", "rand"] }
+thiserror.workspace = true
+
+[dev-dependencies]
