@@ -1,0 +1,7 @@
+# CI とローカルで同一のコンパイラ・lint 集合を使うためにバージョンを固定する。
+# 固定しない場合、新しい rustc で追加された lint が CI でのみ失敗する。
+# コンセンサスに関わる実装であるため、ビルドの再現性を優先する。
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

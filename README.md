@@ -57,12 +57,17 @@ crates/
 ## ビルド
 
 ```sh
-cargo test           # テスト
-cargo clippy --all-targets
-cargo fmt --all -- --check
+cargo test                    # テスト
+cargo clippy --all-targets    # lint
+cargo fmt --all -- --check    # 書式
 ```
 
-Rust 1.85 以降が必要です。
+ツールチェーンは `rust-toolchain.toml` で **1.98.0 に固定**しています。
+rustup が自動で該当バージョンを取得するため、追加の操作は不要です。
+固定しているのは、新しい rustc で追加された lint が CI でのみ失敗する事態を
+避けるためです。
+
+MSRV (最低必要バージョン) は **1.85** で、CI が毎回検証しています。
 
 ## ライセンス
 

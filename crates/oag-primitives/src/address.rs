@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn rejects_mixed_case() {
         let text = VECTORS[0].2;
-        let mixed = format!("{}{}", &text[..10].to_uppercase(), &text[10..]);
+        let mixed = format!("{}{}", text[..10].to_uppercase(), &text[10..]);
         assert!(Address::decode(&mixed).is_err());
     }
 
