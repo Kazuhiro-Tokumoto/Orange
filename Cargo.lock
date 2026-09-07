@@ -124,6 +124,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oag-mempool"
+version = "0.1.0"
+dependencies = [
+ "oag-consensus",
+ "oag-primitives",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "oag-pow"
 version = "0.1.0"
 dependencies = [

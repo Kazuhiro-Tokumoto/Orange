@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/oag-primitives", "crates/oag-consensus", "crates/oag-pow", "crates/oag-chain", "crates/oag-store"]
+members = ["crates/oag-primitives", "crates/oag-consensus", "crates/oag-pow", "crates/oag-chain", "crates/oag-store", "crates/oag-mempool"]
 
 [workspace.package]
 version = "0.1.0"
