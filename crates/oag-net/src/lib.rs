@@ -4,6 +4,7 @@
 //! - [`message`] — メッセージの型
 //! - [`frame`] — メッセージの枠組み
 //! - [`handshake`] — ハンドシェイクの状態機械
+//! - [`compact`] — Compact Blocks
 //! - [`locator`] — ブロックロケータ
 //! - [`sync`] — ブロックの取り寄せの割り振り
 //!
@@ -18,6 +19,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::all)]
 
+pub mod compact;
 pub mod frame;
 pub mod handshake;
 pub mod locator;
@@ -25,6 +27,7 @@ pub mod magic;
 pub mod message;
 pub mod sync;
 
+pub use compact::{CompactBlock, CompactError, PartialBlock, ShortIdIndex};
 pub use frame::FrameError;
 pub use handshake::{Handshake, HandshakeError};
 pub use locator::{build_locator, find_fork_height};

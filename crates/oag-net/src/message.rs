@@ -22,6 +22,9 @@ pub const MAX_HEADERS: usize = 2_000;
 /// `addr` に載せられるアドレス数の上限。
 pub const MAX_ADDRESSES: usize = 1_000;
 
+/// `getblocktxn` / `blocktxn` に載せられる件数の上限。
+pub const MAX_BLOCK_TXN: usize = crate::compact::MAX_BLOCK_TRANSACTIONS;
+
 /// `getheaders` のロケータに載せられるハッシュ数の上限。
 pub const MAX_LOCATOR: usize = 64;
 
@@ -268,6 +271,129 @@ impl Decode for VersionMessage {
     }
 }
 
+/// `getblocktxn` の中身。ブロックの一部の取引を番号で求める。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetBlockTxn {
+    /// 対象のブロック。
+    pub block_hash: Hash,
+    /// 欲しい取引の番号。ブロック内の位置である。
+    pub indices: Vec<u32>,
+}
+
+impl Encode for GetBlockTxn {
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.block_hash.as_bytes());
+        write_varint(self.indices.len() as u128, out);
+        // 番号は昇順に並ぶので差分で書く。
+        let mut previous: i64 = -1;
+        for index in &self.indices {
+            let diff = i64::from(*index) - previous - 1;
+            write_varint(diff.max(0) as u128, out);
+            previous = i64::from(*index);
+        }
+    }
+}
+
+impl Decode for GetBlockTxn {
+    fn read_from(reader: &mut Reader<'_>) -> Result<GetBlockTxn, CodecError> {
+        let block_hash = reader.read_hash()?;
+        let count = reader.read_count("getblocktxn.indices")?;
+        if count > MAX_BLOCK_TXN {
+            return Err(CodecError::LengthTooLarge {
+                field: "getblocktxn.indices",
+                actual: count as u128,
+                max: MAX_BLOCK_TXN,
+            });
+        }
+        let mut indices = Vec::with_capacity(count);
+        let mut previous: i64 = -1;
+        for _ in 0..count {
+            let diff = reader.read_varint_u32("getblocktxn.index")?;
+            let index = previous
+                .checked_add(i64::from(diff))
+                .and_then(|v| v.checked_add(1))
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or(CodecError::ValueOutOfRange {
+                    field: "getblocktxn.index",
+                    value: u128::from(diff),
+                })?;
+            previous = i64::from(index);
+            indices.push(index);
+        }
+        Ok(GetBlockTxn {
+            block_hash,
+            indices,
+        })
+    }
+}
+
+/// `blocktxn` の中身。求められた取引を返す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockTxn {
+    /// 対象のブロック。
+    pub block_hash: Hash,
+    /// 求められた順に並べた取引。
+    pub transactions: Vec<Transaction>,
+}
+
+impl Encode for BlockTxn {
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.block_hash.as_bytes());
+        write_varint(self.transactions.len() as u128, out);
+        for tx in &self.transactions {
+            tx.encode_into(out);
+        }
+    }
+}
+
+impl Decode for BlockTxn {
+    fn read_from(reader: &mut Reader<'_>) -> Result<BlockTxn, CodecError> {
+        let block_hash = reader.read_hash()?;
+        let count = reader.read_count("blocktxn.transactions")?;
+        if count > MAX_BLOCK_TXN {
+            return Err(CodecError::LengthTooLarge {
+                field: "blocktxn.transactions",
+                actual: count as u128,
+                max: MAX_BLOCK_TXN,
+            });
+        }
+        let mut transactions = Vec::with_capacity(count);
+        for _ in 0..count {
+            transactions.push(Transaction::read_from(reader)?);
+        }
+        Ok(BlockTxn {
+            block_hash,
+            transactions,
+        })
+    }
+}
+
+/// `sendcmpct` の中身。圧縮したブロックで知らせてほしいかを伝える。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SendCompact {
+    /// 真なら、こちらから先に `cmpctblock` を送ってよい。
+    /// 偽なら、`inv` で知らせてから求められたら送る。
+    pub high_bandwidth: bool,
+    /// Compact Blocks の版数。
+    pub version: u64,
+}
+
+impl Encode for SendCompact {
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        out.push(u8::from(self.high_bandwidth));
+        out.extend_from_slice(&self.version.to_le_bytes());
+    }
+}
+
+impl Decode for SendCompact {
+    fn read_from(reader: &mut Reader<'_>) -> Result<SendCompact, CodecError> {
+        Ok(SendCompact {
+            high_bandwidth: reader.read_u8()? != 0,
+            version: reader.read_u64()?,
+        })
+    }
+}
+
 /// `getheaders` の中身。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetHeaders {
@@ -345,6 +471,14 @@ pub enum Message {
     Tx(Box<Transaction>),
     /// mempool の中身を通知してほしい。
     Mempool,
+    /// 圧縮したブロックで知らせてほしいかを伝える。
+    SendCompact(SendCompact),
+    /// 圧縮したブロック。
+    CompactBlock(Box<crate::compact::CompactBlock>),
+    /// ブロックの一部の取引を求める。
+    GetBlockTxn(GetBlockTxn),
+    /// 求められた取引。
+    BlockTxn(Box<BlockTxn>),
 }
 
 impl Message {
@@ -365,6 +499,10 @@ impl Message {
             Message::Block(_) => "block",
             Message::Tx(_) => "tx",
             Message::Mempool => "mempool",
+            Message::SendCompact(_) => "sendcmpct",
+            Message::CompactBlock(_) => "cmpctblock",
+            Message::GetBlockTxn(_) => "getblocktxn",
+            Message::BlockTxn(_) => "blocktxn",
         }
     }
 
@@ -390,6 +528,10 @@ impl Message {
             Message::Headers(headers) => encode_list(headers, &mut out),
             Message::Block(block) => block.encode_into(&mut out),
             Message::Tx(tx) => tx.encode_into(&mut out),
+            Message::SendCompact(s) => s.encode_into(&mut out),
+            Message::CompactBlock(c) => c.encode_into(&mut out),
+            Message::GetBlockTxn(g) => g.encode_into(&mut out),
+            Message::BlockTxn(b) => b.encode_into(&mut out),
         }
         out
     }
@@ -420,6 +562,12 @@ impl Message {
             "headers" => Message::Headers(decode_list(payload, "headers", MAX_HEADERS)?),
             "block" => Message::Block(Box::new(Block::decode(payload)?)),
             "tx" => Message::Tx(Box::new(Transaction::decode(payload)?)),
+            "sendcmpct" => Message::SendCompact(SendCompact::decode(payload)?),
+            "cmpctblock" => {
+                Message::CompactBlock(Box::new(crate::compact::CompactBlock::decode(payload)?))
+            }
+            "getblocktxn" => Message::GetBlockTxn(GetBlockTxn::decode(payload)?),
+            "blocktxn" => Message::BlockTxn(Box::new(BlockTxn::decode(payload)?)),
             other => return Err(MessageError::UnknownCommand(other.to_owned())),
         };
         Ok(msg)
