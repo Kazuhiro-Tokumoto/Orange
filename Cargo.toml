@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/oag-primitives"]
+members = ["crates/oag-primitives", "crates/oag-consensus"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ repository = "https://github.com/Kazuhiro-Tokumoto/Orange"
 authors = ["Orange contributors"]
 
 [workspace.dependencies]
+oag-primitives = { path = "crates/oag-primitives", version = "0.1.0" }
 bech32 = "0.12"
 blake3 = "1"
 hex = "0.4"

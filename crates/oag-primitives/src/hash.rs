@@ -102,6 +102,31 @@ pub fn hash_with_domain(domain: Domain, data: &[u8]) -> Hash {
     Hash(*hasher.finalize().as_bytes())
 }
 
+/// タグ付きハッシュ。
+///
+/// 用途ごとに異なる `tag` を与えることで、ある文脈のハッシュを別の文脈で
+/// 再利用する攻撃を防ぐ。
+///
+/// BIP340 は `SHA256(SHA256(tag) || SHA256(tag) || msg)` という構成を用いるが、
+/// これは SHA-256 が長さ拡張攻撃を受けることへの対処である。BLAKE3 は
+/// 構造的に長さ拡張耐性を持つため、タグと NUL 区切りを前置するだけで
+/// 十分である。タグに NUL は含まれないため、この符号化は前置符号となり、
+/// 異なるタグが同じ入力列を生じることはない。
+///
+/// # Panics
+/// `tag` に NUL バイトが含まれる場合。
+pub fn tagged(tag: &str, data: &[u8]) -> Hash {
+    assert!(
+        !tag.as_bytes().contains(&0),
+        "タグに NUL を含めてはならない"
+    );
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(tag.as_bytes());
+    hasher.update(&[0x00]);
+    hasher.update(data);
+    Hash(*hasher.finalize().as_bytes())
+}
+
 /// シリアライズ済みトランザクションから txid を計算する。
 pub fn txid(serialized_tx: &[u8]) -> Hash {
     hash_with_domain(Domain::Txid, serialized_tx)
@@ -164,6 +189,20 @@ mod tests {
         let a = txid(b"a");
         let b = txid(b"b");
         assert_ne!(merkle_node(&a, &b), merkle_node(&b, &a));
+    }
+
+    #[test]
+    fn tagged_hashes_are_separated_by_tag() {
+        assert_ne!(tagged("a", b"x"), tagged("b", b"x"));
+        // タグと本文の境界が曖昧にならないこと。
+        assert_ne!(tagged("ab", b"c"), tagged("a", b"bc"));
+        assert_eq!(tagged("a", b"x"), tagged("a", b"x"));
+    }
+
+    #[test]
+    #[should_panic(expected = "タグに NUL")]
+    fn tagged_rejects_nul_in_tag() {
+        tagged("a\0b", b"x");
     }
 
     #[test]

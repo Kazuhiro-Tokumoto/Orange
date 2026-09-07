@@ -1,0 +1,16 @@
+[package]
+name = "oag-consensus"
+description = "Orange (OAG) のコンセンサス定義: トランザクション・ブロック・符号化・sighash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+oag-primitives.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
