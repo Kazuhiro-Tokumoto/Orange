@@ -1,0 +1,21 @@
+[package]
+name = "oag-chain"
+description = "Orange (OAG) のチェーン状態: ブロックインデックス・最良チェーン選択・リオーグ"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+randomx = ["oag-pow/randomx"]
+
+[dev-dependencies]
+hex.workspace = true
+
+[dependencies]
+oag-consensus.workspace = true
+oag-pow.workspace = true
+oag-primitives.workspace = true
+thiserror.workspace = true

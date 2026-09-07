@@ -37,8 +37,12 @@ impl PowVerifier for AcceptAnyPow {
     }
 }
 
-/// ブロックを検証するために必要な文脈。
-pub struct BlockContext<'a> {
+/// ヘッダだけを検証するために必要な文脈。
+///
+/// UTXO の状態を必要としないため、まだチェーンに繋がっていないブロック
+/// (サイドチェーン) に対しても適用できる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderContext {
     /// このブロックが取るべき高さ。
     pub expected_height: u64,
     /// 親ブロックのハッシュ。
@@ -49,6 +53,12 @@ pub struct BlockContext<'a> {
     pub expected_difficulty: u64,
     /// ノードの現在時刻 (Unix 秒)。
     pub now: i64,
+}
+
+/// ブロック全体を検証するために必要な文脈。
+pub struct BlockContext<'a> {
+    /// ヘッダの検証に必要な文脈。
+    pub header: HeaderContext,
     /// 親までを適用した UTXO の状態。
     pub utxo: &'a dyn UtxoView,
 }
@@ -394,17 +404,13 @@ pub struct BlockSummary {
     pub coinbase_value: Amount,
 }
 
-/// ブロックを検証する (SPEC §10.2)。
-///
-/// 検査は安価なものから順に行い、PoW を最後に置く (SPEC §10.4)。
-pub fn validate_block(
-    block: &Block,
-    ctx: &BlockContext<'_>,
+/// ヘッダを検証する (SPEC §10.2 の 2〜8)。
+pub fn validate_header(
+    header: &BlockHeader,
+    ctx: &HeaderContext,
     pow: &dyn PowVerifier,
-) -> Result<BlockSummary, ValidationError> {
-    let header = &block.header;
-
-    // ── 1. 整数比較のみで済む検査 ──
+) -> Result<(), ValidationError> {
+    // ── 整数比較のみで済む検査 ──
     if header.height != ctx.expected_height {
         return Err(ValidationError::BadHeight {
             actual: header.height,
@@ -437,7 +443,24 @@ pub fn validate_block(
         return Err(ValidationError::AuxPowNotEnabled);
     }
 
-    // ── 2. サイズ ──
+    // ── PoW。安価な検査をすべて通過した場合のみ行う (SPEC §10.4) ──
+    if !pow.verify(header) {
+        return Err(ValidationError::BadProofOfWork);
+    }
+    Ok(())
+}
+
+/// ブロックを検証する (SPEC §10.2)。
+///
+/// 検査は安価なものから順に行い、PoW を最後に置く (SPEC §10.4)。
+pub fn validate_block(
+    block: &Block,
+    ctx: &BlockContext<'_>,
+    pow: &dyn PowVerifier,
+) -> Result<BlockSummary, ValidationError> {
+    let header = &block.header;
+
+    // ── 1. サイズ。ヘッダ検証より前に行う (最も安価であるため) ──
     let size = block.size();
     if size > params::MAX_BLOCK_SIZE {
         return Err(ValidationError::BlockTooLarge {
@@ -446,10 +469,8 @@ pub fn validate_block(
         });
     }
 
-    // ── 3. PoW。ここまでの安価な検査をすべて通過した場合のみ行う ──
-    if !pow.verify(header) {
-        return Err(ValidationError::BadProofOfWork);
-    }
+    // ── 2〜3. ヘッダの検証と PoW ──
+    validate_header(header, &ctx.header, pow)?;
 
     // ── 4. 本体の構造 ──
     if block.transactions.is_empty() {
@@ -511,8 +532,13 @@ pub fn validate_block(
         }
 
         // (b) 使用前の状態で検証する。
-        let summary =
-            validate_transaction(tx, &overlay, header.height, ctx.median_time_past, index)?;
+        let summary = validate_transaction(
+            tx,
+            &overlay,
+            header.height,
+            ctx.header.median_time_past,
+            index,
+        )?;
 
         // (c) ビューへ反映する。
         for input in &tx.inputs {
@@ -685,11 +711,13 @@ mod tests {
     impl Fixture {
         fn context(&self) -> BlockContext<'_> {
             BlockContext {
-                expected_height: SPEND_HEIGHT,
-                expected_prev_hash: self.tip,
-                median_time_past: MTP,
-                expected_difficulty: DIFFICULTY,
-                now: NOW,
+                header: HeaderContext {
+                    expected_height: SPEND_HEIGHT,
+                    expected_prev_hash: self.tip,
+                    median_time_past: MTP,
+                    expected_difficulty: DIFFICULTY,
+                    now: NOW,
+                },
                 utxo: &self.utxo,
             }
         }

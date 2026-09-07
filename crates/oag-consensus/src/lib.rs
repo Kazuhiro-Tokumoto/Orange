@@ -30,4 +30,7 @@ pub use lock::Lock;
 pub use sighash::{sighash, SighashBase, SighashType};
 pub use tx::{OutPoint, Transaction, TxInput, TxOutput};
 pub use utxo::{UtxoEntry, UtxoSet, UtxoView};
-pub use validate::{validate_block, validate_transaction, BlockContext, ValidationError};
+pub use validate::{
+    validate_block, validate_header, validate_transaction, BlockContext, HeaderContext,
+    PowVerifier, ValidationError,
+};

@@ -78,7 +78,7 @@ pub enum UtxoError {
 }
 
 /// メモリ上の UTXO セット。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UtxoSet {
     entries: HashMap<OutPoint, UtxoEntry>,
 }
