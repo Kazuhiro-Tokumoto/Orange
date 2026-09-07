@@ -1,0 +1,15 @@
+[package]
+name = "oag-net"
+description = "Orange (OAG) の P2P プロトコル: 枠組み・メッセージ・ハンドシェイク"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+blake3.workspace = true
+oag-consensus.workspace = true
+oag-primitives.workspace = true
+thiserror.workspace = true
