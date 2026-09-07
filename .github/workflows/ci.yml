@@ -64,3 +64,21 @@ jobs:
 
       - name: MSRV でビルドできることを確認する
         run: cargo check --all-targets --all-features
+
+  default-features:
+    name: 既定 feature のみ (RandomX 無し)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust ツールチェーンを用意する
+        run: rustup show
+
+      # 主ジョブは --all-features で RandomX 込みを検査している。
+      # こちらは feature ゲートが正しく、RandomX 無しでも
+      # ワークスペース全体がビルドできることを確認する。
+      - name: feature 無しでビルドする
+        run: cargo check --workspace --all-targets
+
+      - name: feature 無しでテストする
+        run: cargo test --workspace

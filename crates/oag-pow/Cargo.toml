@@ -1,0 +1,23 @@
+[package]
+name = "oag-pow"
+description = "Orange (OAG) の Proof of Work: 難易度・ターゲット・LWMA・RandomX"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# RandomX (C++) への FFI。cmake と C++ コンパイラを必要とするため既定では無効。
+# 実際の採掘と検証にはこの feature が必須である。
+randomx = ["dep:randomx-rs"]
+
+[dependencies]
+oag-consensus.workspace = true
+oag-primitives.workspace = true
+thiserror.workspace = true
+randomx-rs = { version = "1.6", optional = true }
+
+[dev-dependencies]
+hex.workspace = true
