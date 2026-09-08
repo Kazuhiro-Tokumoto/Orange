@@ -17,13 +17,18 @@ name = "oag-wallet"
 path = "src/main.rs"
 
 [dependencies]
+argon2.workspace = true
+blake3.workspace = true
+chacha20poly1305.workspace = true
 clap.workspace = true
 oag-consensus.workspace = true
 oag-primitives.workspace = true
 oag-rpc.workspace = true
+rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 [dev-dependencies]

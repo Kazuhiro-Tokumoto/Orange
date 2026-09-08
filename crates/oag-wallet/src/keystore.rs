@@ -1,35 +1,79 @@
 //! 鍵の保管。
 //!
-//! # 平文で保管している
+//! 種 ([`crate::seed`]) を**パスフレーズで暗号化して**保管する。鍵は種から
+//! 導くため、ファイルに入っているのは種 1 つだけである。
 //!
-//! **このファイルを読めた者は資金を動かせる。** 暗号化していないため、
-//! ファイルの権限だけが守りである。所有者だけが読める権限で作り、
-//! 読むときも権限を確かめる。
+//! # 守り方
 //!
-//! パスフレーズによる暗号化は未実装である
-//! (`docs/SPEC.md` の未決事項)。中途半端な暗号化は、守られているという
-//! 誤解を与える分だけ、平文より危険になりうる。**守りが権限だけである
-//! ことを、隠さずに言う**方を選んだ。
+//! | 手立て | 何から守るか |
+//! | --- | --- |
+//! | Argon2id でパスフレーズを伸ばす | 総当たり。専用機を用いても割に合わなくする |
+//! | ChaCha20-Poly1305 で暗号化 | 中身を読まれること。改竄も検知する |
+//! | ファイルの権限 0600 | 同じ機械の他の利用者 |
+//! | 落ちるときに中身を消す | メモリやスワップに残ること |
+//!
+//! **控えは種 1 つで足りる。** アドレスをあとから何個増やしても、同じ
+//! 控えで復元できる。
+//!
+//! # 何から守れないか
+//!
+//! - **パスフレーズが弱ければ守れない。** Argon2id は総当たりの費用を
+//!   上げるだけであり、当てられる程度の合言葉を強くはしない
+//! - 動作中のプロセスのメモリを読める相手からは守れない。復号した種は
+//!   使っている間そこにある
+//! - `secp256k1` が内部に持つ鍵の複製までは消せない。消せる範囲は
+//!   こちらが持っているものに限られる
 //!
 //! # 形式
 //!
 //! ```json
 //! {
-//!   "version": 1,
+//!   "version": 2,
 //!   "network": "regtest",
-//!   "keys": ["<秘密鍵 32 バイトの 16 進>", ...]
+//!   "kdf": { "algorithm": "argon2id", "salt": "<16 進>",
+//!            "m_cost": 65536, "t_cost": 3, "p_cost": 1 },
+//!   "cipher": { "algorithm": "chacha20poly1305", "nonce": "<16 進>" },
+//!   "ciphertext": "<16 進>",
+//!   "accounts": 1
 //! }
 //! ```
 //!
-//! 鍵は作った順に並ぶ。最初の 1 個が既定の受取先である。
+//! 版数 1 (平文で鍵を並べたもの) は**読めない**。テストネット公開前で
+//! あり、移行すべき資金が存在しないためである。
 
+use crate::seed::{Seed, SeedError, SEED_LEN};
+use argon2::{Algorithm, Argon2, Params, Version};
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use oag_consensus::lock::Lock;
-use oag_primitives::{Address, Network, SecretKey};
+use oag_primitives::{fill_random, Address, Network, SecretKey};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroize;
 
-/// この実装が書き出す形式の版数。
-pub const FORMAT_VERSION: u32 = 1;
+/// この実装が読み書きする形式の版数。
+pub const FORMAT_VERSION: u32 = 2;
+
+/// ソルトの長さ。
+const SALT_LEN: usize = 16;
+/// ChaCha20-Poly1305 の nonce の長さ。
+const NONCE_LEN: usize = 12;
+
+/// Argon2id の使用メモリ (KiB)。64 MiB。
+///
+/// **総当たりの費用はここで決まる。** 大きいほど専用機で並列に試しにくい。
+/// 手元の機械で 1 回あたり 0.1 秒程度に収まる範囲で選んである。
+const ARGON_M_COST: u32 = 65_536;
+/// Argon2id の反復回数。
+const ARGON_T_COST: u32 = 3;
+/// Argon2id の並列度。
+const ARGON_P_COST: u32 = 1;
+
+/// パスフレーズの最短の長さ。
+///
+/// 短いものを黙って受け入れると、暗号化しているのに守られていない状態に
+/// なる。**守れないものは断る。**
+pub const MIN_PASSPHRASE_LEN: usize = 8;
 
 /// 鍵の保管で起きる失敗。
 #[derive(Debug, thiserror::Error)]
@@ -51,7 +95,10 @@ pub enum KeystoreError {
         message: String,
     },
     /// 知らない形式の版数。
-    #[error("{path} は版数 {found} である。この実装が読めるのは {FORMAT_VERSION} まで")]
+    #[error(
+        "{path} は版数 {found} である。この実装が読めるのは {FORMAT_VERSION} のみ。\n\
+         版数 1 (鍵を平文で並べたもの) は読めない。"
+    )]
     UnknownVersion {
         /// 対象のファイル。
         path: PathBuf,
@@ -66,6 +113,15 @@ pub enum KeystoreError {
         /// 開こうとしたネットワーク。
         asked: Network,
     },
+    /// パスフレーズが違う、またはファイルが改竄されている。
+    ///
+    /// **どちらであるかは区別しない。** 区別できると、改竄したものを
+    /// 投げ込んで反応を見る手掛かりになる。
+    #[error("復号できない。パスフレーズが違うか、ファイルが壊れている")]
+    CannotDecrypt,
+    /// パスフレーズが短すぎる。
+    #[error("パスフレーズは {MIN_PASSPHRASE_LEN} 文字以上であること")]
+    WeakPassphrase,
     /// 権限が緩い。
     #[error("{path} を所有者以外が読める ({mode:o})。chmod 600 で直すこと")]
     TooPermissive {
@@ -77,9 +133,18 @@ pub enum KeystoreError {
     /// すでに存在する。
     #[error("{0} はすでにある。消すか、別の名前を指定すること")]
     AlreadyExists(PathBuf),
-    /// 鍵が 1 個も無い。
-    #[error("鍵が 1 個も無い")]
-    Empty,
+    /// 鍵を導出できない。
+    #[error(transparent)]
+    Seed(#[from] SeedError),
+    /// 鍵の導出に失敗した。
+    #[error("パスフレーズから鍵を導出できない: {0}")]
+    Kdf(String),
+}
+
+/// 版数だけを読むための形。
+#[derive(Deserialize)]
+struct Versioned {
+    version: u32,
 }
 
 /// ファイルに書き出す形。
@@ -87,16 +152,48 @@ pub enum KeystoreError {
 struct Stored {
     version: u32,
     network: String,
-    keys: Vec<String>,
+    kdf: KdfParams,
+    cipher: CipherParams,
+    ciphertext: String,
+    accounts: u32,
 }
 
-/// 鍵の束。
+#[derive(Serialize, Deserialize)]
+struct KdfParams {
+    algorithm: String,
+    salt: String,
+    m_cost: u32,
+    t_cost: u32,
+    p_cost: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CipherParams {
+    algorithm: String,
+    nonce: String,
+}
+
+/// 開いたウォレット。
 ///
-/// `Debug` では鍵の中身を伏せる。
+/// 種を復号した状態で保持する。落ちるときに消える。
 pub struct Keystore {
     path: PathBuf,
     network: Network,
-    keys: Vec<SecretKey>,
+    seed: Seed,
+    /// 導出済みの鍵の数。
+    accounts: u32,
+    /// 保存し直すために、暗号化のやり直しに要るもの。
+    passphrase: Passphrase,
+}
+
+/// パスフレーズ。落ちるときに消す。
+#[derive(Clone)]
+struct Passphrase(Vec<u8>);
+
+impl Drop for Passphrase {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
 }
 
 impl std::fmt::Debug for Keystore {
@@ -104,47 +201,83 @@ impl std::fmt::Debug for Keystore {
         f.debug_struct("Keystore")
             .field("path", &self.path)
             .field("network", &self.network)
-            .field("keys", &format!("{} 個 (中身は伏せる)", self.keys.len()))
+            .field("accounts", &self.accounts)
+            .field("seed", &"<伏せ字>")
             .finish()
     }
 }
 
 impl Keystore {
-    /// 鍵を 1 個持つウォレットを新しく作る。
+    /// 新しいウォレットを作る。
     ///
-    /// すでにファイルがあれば断る。**黙って上書きすると、そこにあった鍵で
+    /// すでにファイルがあれば断る。**黙って上書きすると、そこにあった種で
     /// 守られていた資金を永久に失う。**
-    pub fn create(path: &Path, network: Network) -> Result<Keystore, KeystoreError> {
+    ///
+    /// 作った種を返す。呼び出し側はこれを控えとして示すこと。
+    pub fn create(
+        path: &Path,
+        network: Network,
+        passphrase: &[u8],
+    ) -> Result<(Keystore, Seed), KeystoreError> {
+        Keystore::restore(path, network, passphrase, Seed::generate())
+    }
+
+    /// 控えの種からウォレットを復元する。
+    pub fn restore(
+        path: &Path,
+        network: Network,
+        passphrase: &[u8],
+        seed: Seed,
+    ) -> Result<(Keystore, Seed), KeystoreError> {
         if path.exists() {
             return Err(KeystoreError::AlreadyExists(path.to_path_buf()));
         }
+        check_passphrase(passphrase)?;
+
+        let backup = seed.clone();
         let store = Keystore {
             path: path.to_path_buf(),
             network,
-            keys: vec![SecretKey::generate()],
+            seed,
+            accounts: 1,
+            passphrase: Passphrase(passphrase.to_vec()),
         };
         store.save()?;
-        Ok(store)
+        Ok((store, backup))
     }
 
     /// 既存のウォレットを開く。
-    pub fn open(path: &Path, network: Network) -> Result<Keystore, KeystoreError> {
+    pub fn open(
+        path: &Path,
+        network: Network,
+        passphrase: &[u8],
+    ) -> Result<Keystore, KeystoreError> {
         check_permissions(path)?;
-        let text = std::fs::read_to_string(path).map_err(|source| KeystoreError::Io {
+        let mut text = std::fs::read_to_string(path).map_err(|source| KeystoreError::Io {
             path: path.to_path_buf(),
             source,
         })?;
+        // **版数を先に読む。** 中身の形は版数ごとに違うため、丸ごと読んで
+        // から確かめると、古いファイルに対して「kdf が無い」といった
+        // 的外れな説明を返すことになる。
+        let probe: Versioned =
+            serde_json::from_str(&text).map_err(|e| KeystoreError::Malformed {
+                path: path.to_path_buf(),
+                message: e.to_string(),
+            })?;
+        if probe.version != FORMAT_VERSION {
+            text.zeroize();
+            return Err(KeystoreError::UnknownVersion {
+                path: path.to_path_buf(),
+                found: probe.version,
+            });
+        }
+
         let stored: Stored = serde_json::from_str(&text).map_err(|e| KeystoreError::Malformed {
             path: path.to_path_buf(),
             message: e.to_string(),
         })?;
-
-        if stored.version > FORMAT_VERSION {
-            return Err(KeystoreError::UnknownVersion {
-                path: path.to_path_buf(),
-                found: stored.version,
-            });
-        }
+        text.zeroize();
         let stored_network: Network =
             stored
                 .network
@@ -161,31 +294,67 @@ impl Keystore {
             });
         }
 
-        let mut keys = Vec::with_capacity(stored.keys.len());
-        for (n, hex) in stored.keys.iter().enumerate() {
-            keys.push(parse_key(hex).ok_or_else(|| KeystoreError::Malformed {
-                path: path.to_path_buf(),
-                message: format!("{n} 番目の鍵が読めない"),
-            })?);
+        let malformed = |what: &str| KeystoreError::Malformed {
+            path: path.to_path_buf(),
+            message: what.to_string(),
+        };
+        if stored.kdf.algorithm != "argon2id" {
+            return Err(malformed("知らない鍵導出方式"));
         }
-        if keys.is_empty() {
-            return Err(KeystoreError::Empty);
+        if stored.cipher.algorithm != "chacha20poly1305" {
+            return Err(malformed("知らない暗号方式"));
         }
+        let salt = from_hex(&stored.kdf.salt).ok_or_else(|| malformed("ソルトが読めない"))?;
+        let nonce = from_hex(&stored.cipher.nonce).ok_or_else(|| malformed("nonce が読めない"))?;
+        if nonce.len() != NONCE_LEN {
+            return Err(malformed("nonce の長さが違う"));
+        }
+        let ciphertext =
+            from_hex(&stored.ciphertext).ok_or_else(|| malformed("暗号文が読めない"))?;
+
+        // **保存されたパラメータで導出する。** 現在の既定値で導出すると、
+        // 古いファイルを開けなくなる。
+        let mut key = derive_key(
+            passphrase,
+            &salt,
+            stored.kdf.m_cost,
+            stored.kdf.t_cost,
+            stored.kdf.p_cost,
+        )?;
+        let aad = associated_data(&stored.network, stored.accounts);
+        let plaintext = decrypt(&key, &nonce, &ciphertext, &aad);
+        key.zeroize();
+
+        let mut plaintext = plaintext.ok_or(KeystoreError::CannotDecrypt)?;
+        if plaintext.len() != SEED_LEN {
+            plaintext.zeroize();
+            return Err(malformed("種の長さが違う"));
+        }
+        let mut bytes = [0u8; SEED_LEN];
+        bytes.copy_from_slice(&plaintext);
+        plaintext.zeroize();
+        let seed = Seed::from_bytes(bytes);
+        // `bytes` は Copy なので、渡したあとも手元に残る。消す。
+        bytes.zeroize();
 
         Ok(Keystore {
             path: path.to_path_buf(),
             network,
-            keys,
+            seed,
+            accounts: stored.accounts.max(1),
+            passphrase: Passphrase(passphrase.to_vec()),
         })
     }
 
     /// 鍵を 1 個増やし、そのアドレスを返す。
+    ///
+    /// 種は変わらない。**控えを取り直す必要はない。**
     pub fn add_key(&mut self) -> Result<Address, KeystoreError> {
-        let key = SecretKey::generate();
-        let address = Address::from_pubkey(self.network, &key.public_key());
-        self.keys.push(key);
+        let index = self.accounts;
+        let key = self.seed.derive(index)?;
+        self.accounts += 1;
         self.save()?;
-        Ok(address)
+        Ok(Address::from_pubkey(self.network, &key.public_key()))
     }
 
     /// ネットワーク。
@@ -193,77 +362,233 @@ impl Keystore {
         self.network
     }
 
-    /// 鍵の数。
+    /// 導出済みの鍵の数。
     pub fn len(&self) -> usize {
-        self.keys.len()
+        self.accounts as usize
     }
 
     /// 鍵が無いか。開けたウォレットでは常に偽である。
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.accounts == 0
+    }
+
+    /// すべての秘密鍵。
+    fn keys(&self) -> Result<Vec<SecretKey>, KeystoreError> {
+        Ok(self.seed.derive_many(self.accounts)?)
     }
 
     /// すべてのアドレス。
-    pub fn addresses(&self) -> Vec<Address> {
-        self.keys
+    pub fn addresses(&self) -> Result<Vec<Address>, KeystoreError> {
+        Ok(self
+            .keys()?
             .iter()
             .map(|k| Address::from_pubkey(self.network, &k.public_key()))
-            .collect()
+            .collect())
     }
 
-    /// 既定の受取先。最初に作った鍵のもの。
-    pub fn default_address(&self) -> Address {
-        Address::from_pubkey(self.network, &self.keys[0].public_key())
+    /// 既定の受取先。最初の鍵のもの。
+    pub fn default_address(&self) -> Result<Address, KeystoreError> {
+        let key = self.seed.derive(0)?;
+        Ok(Address::from_pubkey(self.network, &key.public_key()))
     }
 
     /// すべての支払い条件。
-    pub fn locks(&self) -> Vec<Lock> {
-        self.keys
+    pub fn locks(&self) -> Result<Vec<Lock>, KeystoreError> {
+        Ok(self
+            .keys()?
             .iter()
             .map(|k| Lock::pay_to_pubkey(&k.public_key()))
-            .collect()
+            .collect())
     }
 
     /// 支払い条件に対応する秘密鍵。
     pub fn key_for(&self, lock: &Lock) -> Option<SecretKey> {
-        self.keys
-            .iter()
+        self.keys()
+            .ok()?
+            .into_iter()
             .find(|k| Lock::pay_to_pubkey(&k.public_key()) == *lock)
-            .cloned()
     }
 
-    /// ファイルに書き出す。所有者だけが読める権限で作る。
+    /// 控えのための種。**表示する以外に使ってはならない。**
+    pub fn seed(&self) -> &Seed {
+        &self.seed
+    }
+
+    /// 暗号化して書き出す。
+    ///
+    /// ソルトと nonce は**保存のたびに作り直す**。同じ鍵と nonce で
+    /// 2 度暗号化すると、ChaCha20 の鍵流が再利用され、平文の差分が漏れる。
     fn save(&self) -> Result<(), KeystoreError> {
+        let mut salt = [0u8; SALT_LEN];
+        let mut nonce = [0u8; NONCE_LEN];
+        fill_random(&mut salt);
+        fill_random(&mut nonce);
+
+        let mut key = derive_key(
+            &self.passphrase.0,
+            &salt,
+            ARGON_M_COST,
+            ARGON_T_COST,
+            ARGON_P_COST,
+        )?;
+        let aad = associated_data(&self.network.to_string(), self.accounts);
+        let ciphertext = encrypt(&key, &nonce, self.seed.as_bytes(), &aad)?;
+        key.zeroize();
+
         let stored = Stored {
             version: FORMAT_VERSION,
             network: self.network.to_string(),
-            keys: self
-                .keys
-                .iter()
-                .map(|k| k.to_bytes().iter().map(|b| format!("{b:02x}")).collect())
-                .collect(),
+            kdf: KdfParams {
+                algorithm: "argon2id".to_string(),
+                salt: to_hex(&salt),
+                m_cost: ARGON_M_COST,
+                t_cost: ARGON_T_COST,
+                p_cost: ARGON_P_COST,
+            },
+            cipher: CipherParams {
+                algorithm: "chacha20poly1305".to_string(),
+                nonce: to_hex(&nonce),
+            },
+            ciphertext: to_hex(&ciphertext),
+            accounts: self.accounts,
         };
         let text = serde_json::to_string_pretty(&stored).expect("必ず JSON になる");
 
-        let io = |source| KeystoreError::Io {
-            path: self.path.clone(),
-            source,
-        };
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            // 権限は**作るときに**指定する。作ってから絞るのでは、その
-            // 隙に他の利用者に読まれうる。
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&self.path).map_err(io)?;
-        use std::io::Write;
-        file.write_all(text.as_bytes()).map_err(io)?;
-        file.flush().map_err(io)?;
-        Ok(())
+        write_atomically(&self.path, &text)
     }
+}
+
+/// ファイルを**丸ごと置き換える**。途中で終わらない。
+///
+/// # なぜ上書きではいけないか
+///
+/// 上書きは「切り詰めてから書く」である。**切り詰めた直後に電源が落ちると、
+/// 中身が空のウォレットが残る。** 種を失えば資金は取り戻せない。
+///
+/// 別名で書き切り、ディスクに届いたことを確かめてから、名前を付け替える。
+/// 名前の付け替えは不可分であり、どちらかの中身が必ず残る。
+fn write_atomically(path: &Path, text: &str) -> Result<(), KeystoreError> {
+    let temp = path.with_extension(format!("tmp{}", std::process::id()));
+    let io = |p: &Path| {
+        let p = p.to_path_buf();
+        move |source| KeystoreError::Io {
+            path: p.clone(),
+            source,
+        }
+    };
+
+    let mut options = std::fs::OpenOptions::new();
+    // **すでにあるものは使わない。** 他人が用意した名前に書かされると、
+    // その中身を上書きさせられる。
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        // 権限は**作るときに**指定する。作ってから絞るのでは、その隙に
+        // 他の利用者に読まれうる。
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    {
+        let mut file = options.open(&temp).map_err(io(&temp))?;
+        use std::io::Write;
+        file.write_all(text.as_bytes()).map_err(io(&temp))?;
+        // 名前を付け替える前に、中身がディスクに届いていること。
+        file.sync_all().map_err(io(&temp))?;
+    }
+
+    match std::fs::rename(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // 付け替えられなかったら、書きかけを残さない。
+            let _ = std::fs::remove_file(&temp);
+            Err(KeystoreError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })
+        }
+    }
+}
+
+/// パスフレーズが短すぎないか。
+fn check_passphrase(passphrase: &[u8]) -> Result<(), KeystoreError> {
+    if passphrase.len() < MIN_PASSPHRASE_LEN {
+        return Err(KeystoreError::WeakPassphrase);
+    }
+    Ok(())
+}
+
+/// パスフレーズから 32 バイトの鍵を導出する。
+fn derive_key(
+    passphrase: &[u8],
+    salt: &[u8],
+    m_cost: u32,
+    t_cost: u32,
+    p_cost: u32,
+) -> Result<[u8; 32], KeystoreError> {
+    let params = Params::new(m_cost, t_cost, p_cost, Some(32))
+        .map_err(|e| KeystoreError::Kdf(e.to_string()))?;
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0u8; 32];
+    argon
+        .hash_password_into(passphrase, salt, &mut key)
+        .map_err(|e| KeystoreError::Kdf(e.to_string()))?;
+    Ok(key)
+}
+
+/// 暗号文の外に置く項目を、認証の対象に含めるための文字列。
+///
+/// # なぜ要るのか
+///
+/// ネットワークとアドレスの数は暗号文の外にある。**書き換えられても
+/// 復号は通ってしまう。** 数を減らされれば、持っているはずのアドレスが
+/// 出てこなくなり、資金を失ったように見える。認証付きデータに含めれば、
+/// 書き換えた時点で復号が失敗する。
+fn associated_data(network: &str, accounts: u32) -> Vec<u8> {
+    format!("oag-wallet-v{FORMAT_VERSION}\n{network}\n{accounts}\n").into_bytes()
+}
+
+fn encrypt(
+    key: &[u8; 32],
+    nonce: &[u8],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, KeystoreError> {
+    let (cipher, nonce) = init(key, nonce)
+        .ok_or_else(|| KeystoreError::Kdf("鍵または nonce の長さが違う".to_string()))?;
+    cipher
+        .encrypt(
+            &nonce,
+            chacha20poly1305::aead::Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|_| KeystoreError::Kdf("暗号化に失敗した".to_string()))
+}
+
+/// 鍵と nonce から暗号を用意する。長さが違えば `None`。
+fn init(key: &[u8; 32], nonce: &[u8]) -> Option<(ChaCha20Poly1305, Nonce)> {
+    let key = Key::try_from(&key[..]).ok()?;
+    let nonce = Nonce::try_from(nonce).ok()?;
+    Some((ChaCha20Poly1305::new(&key), nonce))
+}
+
+/// 復号する。**失敗の理由は返さない。**
+///
+/// パスフレーズ違いと改竄を区別できると、改竄したものを投げ込んで
+/// 反応を見る手掛かりになる。
+fn decrypt(key: &[u8; 32], nonce: &[u8], ciphertext: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
+    let (cipher, nonce) = init(key, nonce)?;
+    cipher
+        .decrypt(
+            &nonce,
+            chacha20poly1305::aead::Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .ok()
 }
 
 /// 所有者以外が読めるなら断る。
@@ -288,20 +613,25 @@ fn check_permissions(path: &Path) -> Result<(), KeystoreError> {
     Ok(())
 }
 
-fn parse_key(hex: &str) -> Option<SecretKey> {
-    if hex.len() != 64 {
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn from_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
         return None;
     }
-    let mut bytes = [0u8; 32];
-    for (i, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    SecretKey::from_bytes(bytes).ok()
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PASS: &[u8] = b"correct horse battery staple";
 
     fn temp(tag: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -314,47 +644,167 @@ mod tests {
     }
 
     #[test]
-    fn a_new_wallet_has_one_key_and_reopens() {
+    fn a_new_wallet_reopens_with_the_passphrase() {
         let path = temp("new");
-        let store = Keystore::create(&path, Network::Regtest).unwrap();
-        assert_eq!(store.len(), 1);
-        let address = store.default_address();
+        let (store, _) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let address = store.default_address().unwrap();
 
-        let reopened = Keystore::open(&path, Network::Regtest).unwrap();
-        assert_eq!(reopened.len(), 1);
-        assert_eq!(reopened.default_address().to_string(), address.to_string());
-        std::fs::remove_file(&path).unwrap();
-    }
-
-    #[test]
-    fn adding_a_key_persists() {
-        let path = temp("add");
-        let mut store = Keystore::create(&path, Network::Regtest).unwrap();
-        let second = store.add_key().unwrap();
-        assert_eq!(store.len(), 2);
-
-        let reopened = Keystore::open(&path, Network::Regtest).unwrap();
-        assert_eq!(reopened.len(), 2);
-        assert!(reopened
-            .addresses()
-            .iter()
-            .any(|a| a.to_string() == second.to_string()));
-        // 既定の受取先は変わらない。増やすたびに変わると、以前に配った
-        // アドレスが「既定」でなくなり、案内が食い違う。
+        let reopened = Keystore::open(&path, Network::Regtest, PASS).unwrap();
         assert_eq!(
-            reopened.default_address().to_string(),
-            store.default_address().to_string()
+            reopened.default_address().unwrap().to_string(),
+            address.to_string()
         );
         std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
-    fn creating_over_an_existing_wallet_is_refused() {
-        // 黙って上書きすると、そこにあった鍵で守られていた資金を失う。
-        let path = temp("exists");
-        Keystore::create(&path, Network::Regtest).unwrap();
+    fn the_wrong_passphrase_is_refused() {
+        let path = temp("wrong");
+        Keystore::create(&path, Network::Regtest, PASS).unwrap();
         assert!(matches!(
-            Keystore::create(&path, Network::Regtest),
+            Keystore::open(&path, Network::Regtest, b"wrong passphrase"),
+            Err(KeystoreError::CannotDecrypt)
+        ));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn the_seed_is_not_in_the_file() {
+        // **これが漏れていたら、暗号化した意味がない。**
+        let path = temp("leak");
+        let (_, seed) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&seed.to_hex()), "種が平文で入っている");
+
+        // 導出される鍵も入っていないこと。
+        for i in 0..3 {
+            let key = seed.derive(i).unwrap();
+            let hex: String = key.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+            assert!(!text.contains(&hex), "{i} 番目の鍵が平文で入っている");
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_tampered_file_is_refused() {
+        // 認証付き暗号なので、1 バイト書き換えただけで復号に失敗する。
+        let path = temp("tamper");
+        Keystore::create(&path, Network::Regtest, PASS).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let mut ciphertext = stored["ciphertext"].as_str().unwrap().to_string();
+        // 先頭の 1 文字を別のものに変える。
+        let first = if ciphertext.starts_with('0') {
+            '1'
+        } else {
+            '0'
+        };
+        ciphertext.replace_range(0..1, &first.to_string());
+
+        let tampered = text.replace(stored["ciphertext"].as_str().unwrap(), &ciphertext);
+        std::fs::write(&path, tampered).unwrap();
+
+        assert!(matches!(
+            Keystore::open(&path, Network::Regtest, PASS),
+            Err(KeystoreError::CannotDecrypt)
+        ));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn saving_twice_uses_a_new_salt_and_nonce() {
+        // 同じ鍵と nonce で 2 度暗号化すると、鍵流が再利用され平文の
+        // 差分が漏れる。
+        let path = temp("nonce");
+        let (mut store, _) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let first: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        store.add_key().unwrap();
+        let second: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        assert_ne!(first["kdf"]["salt"], second["kdf"]["salt"], "ソルトが同じ");
+        assert_ne!(
+            first["cipher"]["nonce"], second["cipher"]["nonce"],
+            "nonce が同じ"
+        );
+        assert_ne!(
+            first["ciphertext"], second["ciphertext"],
+            "同じ種なのに暗号文まで同じ"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_restored_seed_gives_back_the_same_addresses() {
+        // **控えが効くことの確認である。** ここが通らなければ控えの意味がない。
+        let path = temp("restore-a");
+        let (mut store, seed) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        store.add_key().unwrap();
+        store.add_key().unwrap();
+        let expected: Vec<String> = store
+            .addresses()
+            .unwrap()
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        assert_eq!(expected.len(), 3);
+
+        // 控えの種だけから復元する。ファイルは持っていない。
+        let other = temp("restore-b");
+        let (mut restored, _) = Keystore::restore(
+            &other,
+            Network::Regtest,
+            PASS,
+            Seed::from_hex(&seed.to_hex()).unwrap(),
+        )
+        .unwrap();
+        // アドレスを増やした分は、増やし直せば同じものが出る。
+        restored.add_key().unwrap();
+        restored.add_key().unwrap();
+
+        let got: Vec<String> = restored
+            .addresses()
+            .unwrap()
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        assert_eq!(got, expected, "控えから復元したアドレスが違う");
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(&other).unwrap();
+    }
+
+    #[test]
+    fn adding_a_key_does_not_change_the_seed() {
+        // 種が変わるなら、控えを取り直さなければならなくなる。
+        let path = temp("stable");
+        let (mut store, seed) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        store.add_key().unwrap();
+        assert_eq!(store.seed().to_hex(), seed.to_hex());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_short_passphrase_is_refused() {
+        // 守れないものを黙って受け入れると、暗号化しているのに
+        // 守られていない状態になる。
+        let path = temp("weak");
+        assert!(matches!(
+            Keystore::create(&path, Network::Regtest, b"short"),
+            Err(KeystoreError::WeakPassphrase)
+        ));
+        assert!(!path.exists(), "断ったのにファイルができている");
+    }
+
+    #[test]
+    fn creating_over_an_existing_wallet_is_refused() {
+        let path = temp("exists");
+        Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        assert!(matches!(
+            Keystore::create(&path, Network::Regtest, PASS),
             Err(KeystoreError::AlreadyExists(_))
         ));
         std::fs::remove_file(&path).unwrap();
@@ -363,9 +813,9 @@ mod tests {
     #[test]
     fn opening_with_the_wrong_network_is_refused() {
         let path = temp("network");
-        Keystore::create(&path, Network::Regtest).unwrap();
+        Keystore::create(&path, Network::Regtest, PASS).unwrap();
         assert!(matches!(
-            Keystore::open(&path, Network::Testnet),
+            Keystore::open(&path, Network::Testnet, PASS),
             Err(KeystoreError::WrongNetwork { .. })
         ));
         std::fs::remove_file(&path).unwrap();
@@ -376,58 +826,152 @@ mod tests {
     fn a_world_readable_wallet_is_refused() {
         use std::os::unix::fs::PermissionsExt;
         let path = temp("perm");
-        Keystore::create(&path, Network::Regtest).unwrap();
+        Keystore::create(&path, Network::Regtest, PASS).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "作ったときの権限が緩い");
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(
-            Keystore::open(&path, Network::Regtest),
+            Keystore::open(&path, Network::Regtest, PASS),
             Err(KeystoreError::TooPermissive { .. })
         ));
         std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
-    fn a_future_format_version_is_refused() {
-        // 読めない形式を読めたことにすると、鍵を取りこぼしたまま
-        // 「残高 0」と表示しかねない。
-        let path = temp("version");
-        Keystore::create(&path, Network::Regtest).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        std::fs::write(&path, text.replace("\"version\": 1", "\"version\": 99")).unwrap();
+    fn the_plaintext_format_is_refused() {
+        // 版数 1 は鍵を平文で並べていた。読めるようにしておくと、
+        // 平文のまま使い続けられてしまう。
+        let path = temp("v1");
+        std::fs::write(&path, r#"{"version":1,"network":"regtest","keys":["00"]}"#).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         assert!(matches!(
-            Keystore::open(&path, Network::Regtest),
-            Err(KeystoreError::UnknownVersion { found: 99, .. })
+            Keystore::open(&path, Network::Regtest, PASS),
+            Err(KeystoreError::UnknownVersion { found: 1, .. })
         ));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn changing_the_account_count_is_detected() {
+        // アドレスの数は暗号文の外にある。認証の対象に含めていなければ、
+        // 書き換えられても復号が通ってしまう。数を減らされると、
+        // 持っているはずのアドレスが出てこなくなる。
+        let path = temp("aad-accounts");
+        let (mut store, _) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        store.add_key().unwrap();
+        store.add_key().unwrap();
+        assert_eq!(store.len(), 3);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("\"accounts\": 3", "\"accounts\": 1")).unwrap();
+
+        assert!(
+            matches!(
+                Keystore::open(&path, Network::Regtest, PASS),
+                Err(KeystoreError::CannotDecrypt)
+            ),
+            "アドレスの数を書き換えられても開けてしまう"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn changing_the_network_is_detected() {
+        // ネットワークも暗号文の外にある。
+        let path = temp("aad-network");
+        Keystore::create(&path, Network::Regtest, PASS).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("\"regtest\"", "\"testnet\"")).unwrap();
+
+        // ネットワークの食い違いとしてまず断られる。
+        assert!(matches!(
+            Keystore::open(&path, Network::Regtest, PASS),
+            Err(KeystoreError::WrongNetwork { .. })
+        ));
+        // 書き換えた側で開こうとしても、復号が通らない。
+        assert!(
+            matches!(
+                Keystore::open(&path, Network::Testnet, PASS),
+                Err(KeystoreError::CannotDecrypt)
+            ),
+            "ネットワークを書き換えられても開けてしまう"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_old_wallet_intact() {
+        // 書き換えは別名で書き切ってから名前を付け替える。途中で
+        // 終わっても、元の中身か新しい中身のどちらかが必ず残る。
+        let path = temp("atomic");
+        let (mut store, seed) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        store.add_key().unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_ne!(before, after, "書き換わっていない");
+
+        // 書きかけのファイルが残っていないこと。
+        let dir = path.parent().unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "書きかけが残っている: {leftovers:?}");
+
+        // 種は変わらず、開き直せる。
+        let reopened = Keystore::open(&path, Network::Regtest, PASS).unwrap();
+        assert_eq!(reopened.seed().to_hex(), seed.to_hex());
+        assert_eq!(reopened.len(), 2);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn two_wallets_do_not_share_a_seed() {
+        // 乱数源が壊れていれば、ここで気づく。
+        let a = temp("rand-a");
+        let b = temp("rand-b");
+        let (_, sa) = Keystore::create(&a, Network::Regtest, PASS).unwrap();
+        let (_, sb) = Keystore::create(&b, Network::Regtest, PASS).unwrap();
+        assert_ne!(
+            sa.to_hex(),
+            sb.to_hex(),
+            "違うウォレットが同じ種を持っている"
+        );
+        std::fs::remove_file(&a).unwrap();
+        std::fs::remove_file(&b).unwrap();
+    }
+
+    #[test]
+    fn the_seed_is_not_printed() {
+        let path = temp("debug");
+        let (store, seed) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let text = format!("{store:?}");
+        assert!(!text.contains(&seed.to_hex()), "種が漏れている: {text}");
         std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
     fn the_key_for_a_lock_is_found() {
         let path = temp("lookup");
-        let mut store = Keystore::create(&path, Network::Regtest).unwrap();
+        let (mut store, _) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
         store.add_key().unwrap();
 
-        for lock in store.locks() {
+        for lock in store.locks().unwrap() {
             let key = store.key_for(&lock).expect("自分の条件の鍵は引ける");
             assert_eq!(Lock::pay_to_pubkey(&key.public_key()), lock);
         }
         let stranger = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
         assert!(store.key_for(&stranger).is_none());
-        std::fs::remove_file(&path).unwrap();
-    }
-
-    #[test]
-    fn the_keys_are_not_printed() {
-        let path = temp("debug");
-        let store = Keystore::create(&path, Network::Regtest).unwrap();
-        let text = format!("{store:?}");
-        for key in &store.keys {
-            let hex: String = key.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-            assert!(!text.contains(&hex), "秘密鍵が漏れている: {text}");
-        }
         std::fs::remove_file(&path).unwrap();
     }
 }

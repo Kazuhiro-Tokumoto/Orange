@@ -25,6 +25,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -174,7 +175,7 @@ async fn serve_connection(
         };
 
         // 合言葉は一致しなければならない。**引く前に確かめる**。
-        if body.authorization.as_deref() != Some(credential) {
+        if !matches(body.authorization.as_deref(), credential) {
             write_refusal(&mut stream, Refusal::Unauthorized).await?;
             return Ok(());
         }
@@ -186,6 +187,24 @@ async fn serve_connection(
             return Ok(());
         }
     }
+}
+
+/// 合言葉を突き合わせる。**かかる時間が中身に依らないようにする。**
+///
+/// 素朴な比較は最初に違ったところで止まる。1 バイトずつ試して応答の
+/// 速さを測れば、合言葉を先頭から当てていける。ループバックに閉じて
+/// いても、同じ機械の別の利用者からは測れる。
+///
+/// 長さが違うことは隠さない。長さは秘密ではなく、隠そうとすると
+/// かえって扱いが込み入る。
+fn matches(given: Option<&str>, expected: &str) -> bool {
+    let Some(given) = given else {
+        return false;
+    };
+    if given.len() != expected.len() {
+        return false;
+    }
+    given.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 /// 要求の読み取りで起きうること。
@@ -337,4 +356,29 @@ async fn write_refusal(stream: &mut TcpStream, refusal: Refusal) -> Result<(), H
     stream.write_all(head.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_credential_must_match_exactly() {
+        assert!(matches(Some("Basic abc"), "Basic abc"));
+        assert!(!matches(Some("Basic abd"), "Basic abc"));
+        assert!(!matches(Some("Basic ab"), "Basic abc"));
+        assert!(!matches(Some("Basic abcd"), "Basic abc"));
+        assert!(!matches(None, "Basic abc"));
+        assert!(!matches(Some(""), "Basic abc"));
+    }
+
+    #[test]
+    fn a_prefix_of_the_credential_is_not_accepted() {
+        // 前方一致で通ってしまうと、1 文字ずつ延ばして当てられる。
+        let secret = "Basic dXNlcjpodW50ZXIy";
+        for n in 0..secret.len() {
+            assert!(!matches(Some(&secret[..n]), secret), "{n} 文字で通った");
+        }
+        assert!(matches(Some(secret), secret));
+    }
 }

@@ -16,7 +16,8 @@ use oag_primitives::{Address, Amount, Hash, Network};
 use oag_rpc::auth::read_cookie;
 use oag_rpc::client::Client;
 use oag_wallet::build::{build, sign, Coin, Spend};
-use oag_wallet::keystore::Keystore;
+use oag_wallet::keystore::{Keystore, MIN_PASSPHRASE_LEN};
+use oag_wallet::seed::Seed;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -44,12 +45,26 @@ struct Common {
     /// ノードの RPC の住所。既定はループバックの RPC ポート。
     #[arg(long, global = true)]
     rpc: Option<SocketAddr>,
+    /// パスフレーズを収めたファイル。
+    ///
+    /// 省略すると端末で尋ねる。**コマンドラインには渡せない。**
+    /// 引数はプロセス一覧から他の利用者に見えるためである。
+    #[arg(long, global = true, value_name = "パス")]
+    passphrase_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
 enum Command {
     /// 新しいウォレットを作る。
     New,
+    /// 控えの種からウォレットを復元する。
+    Restore {
+        /// 控えの種を収めたファイル。省略すると尋ねる。
+        #[arg(long, value_name = "パス")]
+        seed_file: Option<PathBuf>,
+    },
+    /// 控えの種を表示する。
+    Seed,
     /// 受取先アドレスを表示する。
     Address {
         /// 新しいアドレスを 1 つ増やして表示する。
@@ -96,6 +111,91 @@ fn main() {
     }
 }
 
+/// パスフレーズを得る。
+///
+/// ファイルが指定されていればそこから読み、なければ端末で尋ねる。
+/// **コマンドラインの引数からは受け取らない。** 引数はプロセス一覧から
+/// 同じ機械の他の利用者に見えるうえ、シェルの履歴にも残る。
+/// パスフレーズ。落ちるときに消す。
+///
+/// 生の `Vec<u8>` のまま持ち回すと、使い終わったあともメモリに残る。
+struct Secret(Vec<u8>);
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+
+impl std::ops::Deref for Secret {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+fn passphrase(file: &Option<PathBuf>, prompt: &str) -> Result<Secret, String> {
+    if let Some(path) = file {
+        let mut text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{} を読めない: {e}", path.display()))?;
+        // 末尾の改行は入力の一部ではない。
+        let secret = Secret(text.trim_end_matches(['\n', '\r']).as_bytes().to_vec());
+        use zeroize::Zeroize;
+        text.zeroize();
+        return Ok(secret);
+    }
+    Ok(Secret(
+        read_secret(prompt)
+            .map_err(|e| format!("パスフレーズを読めない: {e}"))?
+            .into_bytes(),
+    ))
+}
+
+/// 秘密を 1 行読む。
+///
+/// 端末なら伏せ字で尋ねる。端末でなければ標準入力から 1 行読む。
+/// **後者が要るのは、手で試すためだけでなく、自動で試験するためでもある。**
+/// 端末がないと動かないものは、試験されないまま腐る。
+fn read_secret(prompt: &str) -> std::io::Result<String> {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        rpassword::prompt_password(prompt)
+    } else {
+        rpassword::read_password()
+    }
+}
+
+/// 新しく決めるパスフレーズを、確認付きで尋ねる。
+fn new_passphrase(file: &Option<PathBuf>) -> Result<Secret, String> {
+    if file.is_some() {
+        return passphrase(file, "");
+    }
+    let first = passphrase(&None, "パスフレーズ: ")?;
+    let second = passphrase(&None, "もう一度: ")?;
+    if *first != *second {
+        return Err("パスフレーズが一致しない".to_string());
+    }
+    if first.len() < MIN_PASSPHRASE_LEN {
+        return Err(format!(
+            "パスフレーズは {MIN_PASSPHRASE_LEN} 文字以上であること"
+        ));
+    }
+    Ok(first)
+}
+
+/// 控えの取り方を伝える。
+fn print_backup(seed: &Seed) {
+    println!();
+    println!("控えの種 (これ 1 つですべてのアドレスを復元できる):");
+    println!();
+    println!("    {}", seed.to_hex());
+    println!();
+    println!("**紙に書き写して安全な場所に保管すること。**");
+    println!("この種を知る者は資金を動かせる。失えば資金は取り戻せない。");
+    println!("アドレスをあとから増やしても、この控えのままでよい。");
+}
+
 impl Common {
     fn network(&self) -> Result<Network, String> {
         self.network
@@ -121,34 +221,70 @@ async fn run() -> Result<(), String> {
 
     match cli.command {
         Command::New => {
-            let store = Keystore::create(&cli.common.wallet, network).map_err(|e| e.to_string())?;
+            let pass = new_passphrase(&cli.common.passphrase_file)?;
+            let (store, seed) =
+                Keystore::create(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
             println!("{} に新しいウォレットを作った", cli.common.wallet.display());
-            println!("受取先: {}", store.default_address());
+            println!(
+                "受取先: {}",
+                store.default_address().map_err(|e| e.to_string())?
+            );
+            print_backup(&seed);
+            Ok(())
+        }
+
+        Command::Restore { seed_file } => {
+            let text = match &seed_file {
+                Some(path) => std::fs::read_to_string(path)
+                    .map_err(|e| format!("{} を読めない: {e}", path.display()))?,
+                None => read_secret("控えの種 (16 進 64 文字): ")
+                    .map_err(|e| format!("種を読めない: {e}"))?,
+            };
+            let seed = Seed::from_hex(&text).map_err(|e| e.to_string())?;
+            let pass = new_passphrase(&cli.common.passphrase_file)?;
+
+            let (store, _) = Keystore::restore(&cli.common.wallet, network, &pass, seed)
+                .map_err(|e| e.to_string())?;
+            println!("{} に復元した", cli.common.wallet.display());
+            println!(
+                "受取先: {}",
+                store.default_address().map_err(|e| e.to_string())?
+            );
             println!();
-            println!("**このファイルを読めた者は資金を動かせる。** 暗号化して");
-            println!("いないため、ファイルの権限だけが守りである。失えば資金は");
-            println!("取り戻せない。控えを取っておくこと。");
+            println!("アドレスを 2 個以上使っていた場合は、`address --new` を");
+            println!("その数だけ繰り返すと同じものが出る。");
+            Ok(())
+        }
+
+        Command::Seed => {
+            let pass = passphrase(&cli.common.passphrase_file, "パスフレーズ: ")?;
+            let store =
+                Keystore::open(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
+            print_backup(store.seed());
             Ok(())
         }
 
         Command::Address { new, all } => {
+            let pass = passphrase(&cli.common.passphrase_file, "パスフレーズ: ")?;
             let mut store =
-                Keystore::open(&cli.common.wallet, network).map_err(|e| e.to_string())?;
+                Keystore::open(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
             if new {
                 let address = store.add_key().map_err(|e| e.to_string())?;
                 println!("{address}");
             } else if all {
-                for address in store.addresses() {
+                for address in store.addresses().map_err(|e| e.to_string())? {
                     println!("{address}");
                 }
             } else {
-                println!("{}", store.default_address());
+                println!("{}", store.default_address().map_err(|e| e.to_string())?);
             }
             Ok(())
         }
 
         Command::Balance { verbose } => {
-            let store = Keystore::open(&cli.common.wallet, network).map_err(|e| e.to_string())?;
+            let pass = passphrase(&cli.common.passphrase_file, "パスフレーズ: ")?;
+            let store =
+                Keystore::open(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
             let client = cli.common.client(network)?;
             let height = block_count(&client).await?;
             let scan = scan(&client, &store).await?;
@@ -202,7 +338,9 @@ async fn run() -> Result<(), String> {
             amount,
             dry_run,
         } => {
-            let store = Keystore::open(&cli.common.wallet, network).map_err(|e| e.to_string())?;
+            let pass = passphrase(&cli.common.passphrase_file, "パスフレーズ: ")?;
+            let store =
+                Keystore::open(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
             let to_address =
                 Address::decode_on(network, &to).map_err(|e| format!("宛先アドレスが不正: {e}"))?;
             let amount = amount
@@ -217,7 +355,7 @@ async fn run() -> Result<(), String> {
                 to: Lock::from_address(&to_address),
                 amount,
                 // おつりは既定の受取先へ戻す。
-                change_to: Lock::from_address(&store.default_address()),
+                change_to: Lock::from_address(&store.default_address().map_err(|e| e.to_string())?),
                 next_height: height + 1,
                 fee_rate: params::MIN_RELAY_FEE_RATE_PER_BYTE,
             };
@@ -281,7 +419,12 @@ async fn block_count(client: &Client) -> Result<u64, String> {
 /// 丸ごと走査する。応答が打ち切られていたら、残高を過少に見せない
 /// ように断る。
 async fn scan(client: &Client, store: &Keystore) -> Result<Vec<Coin>, String> {
-    let addresses: Vec<String> = store.addresses().iter().map(|a| a.to_string()).collect();
+    let addresses: Vec<String> = store
+        .addresses()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
     let result = client
         .call("scanutxos", json!([addresses]))
         .await
@@ -304,6 +447,7 @@ async fn scan(client: &Client, store: &Keystore) -> Result<Vec<Coin>, String> {
     // 署名できないのだから手持ちに数えない。
     let known: Vec<(String, Lock)> = store
         .addresses()
+        .map_err(|e| e.to_string())?
         .iter()
         .map(|a| (a.to_string(), Lock::from_address(a)))
         .collect();

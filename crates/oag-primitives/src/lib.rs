@@ -28,5 +28,5 @@ pub mod varint;
 pub use address::Address;
 pub use amount::Amount;
 pub use hash::Hash;
-pub use keys::{PublicKey, SecretKey, Signature};
+pub use keys::{fill_random, PublicKey, SecretKey, Signature};
 pub use network::Network;

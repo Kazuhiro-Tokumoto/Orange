@@ -53,6 +53,7 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 | 9b | ノードへの P2P 組み込み (2 台での同期) | 完了 |
 | 10a | JSON-RPC (ノード側) | 完了 |
 | 10b | CLI ウォレット (鍵・残高・送金) | 完了 |
+| 10c | 安全性の強化 (鍵の暗号化・種からの導出) | 完了 |
 | 11 | ジェネシス確定 → テストネット公開 | 未着手 |
 
 ## クレート構成
@@ -137,7 +138,7 @@ cargo build --release -p oag-node
 ```sh
 cargo build --release -p oag-wallet
 
-# ウォレットを作る
+# ウォレットを作る (パスフレーズを尋ねられ、控えの種が表示される)
 ./target/release/oag-wallet --wallet ./alice.json new
 ./target/release/oag-wallet --wallet ./bob.json new
 
@@ -164,8 +165,23 @@ curl -s --user "$(cat ./oag-data/.cookie)" -H 'content-type: application/json' \
   http://127.0.0.1:9445/
 ```
 
-> **鍵は平文で保管しています。** 暗号化は未実装で、ファイルの権限
-> (0600) だけが守りです。このファイルを読めた者は資金を動かせます。
+ウォレットは**種 1 つをパスフレーズで暗号化して**保管します
+(Argon2id + ChaCha20-Poly1305、ファイルの権限は 0600)。鍵は種から導くため、
+**控えは種 1 つで足ります** — アドレスをあとから何個増やしても、同じ控えで
+復元できます。
+
+```sh
+# 控えの種を表示する
+./target/release/oag-wallet --wallet ./alice.json seed
+
+# 控えの種から復元する
+./target/release/oag-wallet --wallet ./recovered.json restore
+```
+
+> **控えの種を知る者は資金を動かせます。** 紙に書き写して安全な場所に
+> 保管してください。パスフレーズが弱ければ暗号化は守ってくれません。
+> また、鍵の導出は BIP32/BIP39 とは互換ではありません
+> ([未決事項](docs/SPEC.md))。
 
 `oag-node` は RandomX を必ず使うため、ビルドに cmake と C++ コンパイラが
 必要です。

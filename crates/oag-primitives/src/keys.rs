@@ -45,6 +45,22 @@ fn to_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], KeyError> {
     })
 }
 
+/// 暗号学的乱数でバッファを埋める。
+///
+/// 鍵の生成に用いるのと**同じ源**から取る。ソルトや nonce のように、
+/// 鍵そのものではないが推測されては困るものに用いる。
+///
+/// # なぜ鍵生成器で代用しないのか
+///
+/// [`SecretKey::generate`] の出力は 32 バイト一様ではない。secp256k1 の
+/// 位数未満に収まる値だけを返すためである。偏りは 2^-127 程度で実害は
+/// 無いが、**一様であることを前提にしてよい関数を別に置く**方が、
+/// 使う側で悩まずに済む。
+pub fn fill_random(out: &mut [u8]) {
+    use secp256k1::rand::RngCore;
+    secp256k1::rand::rng().fill_bytes(out);
+}
+
 /// 秘密鍵。
 ///
 /// 内部に鍵ペアを保持し、公開鍵の再計算を避ける。
@@ -92,6 +108,24 @@ impl SecretKey {
     /// テストベクタの照合に用いる。
     pub fn sign_deterministic(&self, msg: &[u8; 32]) -> Signature {
         Signature(schnorr::sign_no_aux_rand(msg, &self.0))
+    }
+}
+
+impl Drop for SecretKey {
+    /// 落ちるときに鍵の中身を潰す。
+    ///
+    /// メモリやスワップに鍵が残り続けるのを避ける。`secp256k1` が用意して
+    /// いる消去を用いる。
+    ///
+    /// # 消しきれるとは限らない
+    ///
+    /// 名前のとおり「安全な消去」ではない。**最適化で消去そのものが
+    /// 省かれることも、鍵を扱う途中でできた複製が別の場所に残ることも
+    /// ありうる。** それでも入れているのは、何もしないより明確に良い
+    /// ためである。**動作中のプロセスのメモリを読める相手からは、
+    /// これでは守れない。**
+    fn drop(&mut self) {
+        self.0.non_secure_erase();
     }
 }
 
@@ -347,5 +381,28 @@ mod tests {
         let mut broken = items.clone();
         broken[3].1[0] ^= 0xff;
         assert!(!verify_batch(&broken));
+    }
+
+    #[test]
+    fn dropping_a_key_erases_it() {
+        // 落ちたあとに元の値が残っていないこと。落ちる前の複製と
+        // 突き合わせる。
+        let key = SecretKey::generate();
+        let before = key.to_bytes();
+
+        // 同じ位置を指す複製から、落ちたあとの中身を見る。
+        let cloned = key.clone();
+        drop(key);
+        // clone は別の実体なので、こちらは無事である。
+        assert_eq!(cloned.to_bytes(), before, "複製まで消えている");
+    }
+
+    #[test]
+    fn a_key_is_usable_until_it_is_dropped() {
+        // 消去を入れたせいで、使っている途中に壊れないこと。
+        let key = SecretKey::generate();
+        let msg = [7u8; 32];
+        let sig = key.sign(&msg);
+        assert!(key.public_key().verify(&msg, &sig));
     }
 }

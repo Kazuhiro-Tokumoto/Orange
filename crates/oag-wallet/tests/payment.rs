@@ -29,6 +29,9 @@ use std::time::Duration;
 
 const NETWORK: Network = Network::Regtest;
 
+/// 試験で用いるパスフレーズ。
+const PASS: &[u8] = b"correct horse battery staple";
+
 /// 使える残高を作るのに要る高さ。コインベースの成熟に 120 ブロック。
 const MINE_TO: u64 = params::COINBASE_MATURITY + 10;
 
@@ -81,7 +84,12 @@ async fn mine(handle: &NodeHandle, payout: &Address, blocks: u64) {
 
 /// ウォレットの手持ちを RPC で数える。ウォレットの CLI と同じ道を通る。
 async fn coins(client: &Client, store: &Keystore) -> Vec<Coin> {
-    let addresses: Vec<String> = store.addresses().iter().map(|a| a.to_string()).collect();
+    let addresses: Vec<String> = store
+        .addresses()
+        .unwrap()
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
     let result = client.call("scanutxos", json!([addresses])).await.unwrap();
     assert_eq!(
         result.get("truncated").and_then(Value::as_bool),
@@ -91,6 +99,7 @@ async fn coins(client: &Client, store: &Keystore) -> Vec<Coin> {
 
     let known: Vec<(String, Lock)> = store
         .addresses()
+        .unwrap()
         .iter()
         .map(|a| (a.to_string(), Lock::from_address(a)))
         .collect();
@@ -157,12 +166,12 @@ fn a_mined_coin_can_be_spent_to_another_wallet() {
     let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
     let handle = service.handle();
 
-    let alice = Keystore::create(&dir.0.join("alice.json"), NETWORK).unwrap();
-    let bob = Keystore::create(&dir.0.join("bob.json"), NETWORK).unwrap();
+    let (alice, _) = Keystore::create(&dir.0.join("alice.json"), NETWORK, PASS).unwrap();
+    let (bob, _) = Keystore::create(&dir.0.join("bob.json"), NETWORK, PASS).unwrap();
 
     runtime.block_on(async {
         let client = rpc(&handle, &dir.0).await;
-        mine(&handle, &alice.default_address(), MINE_TO).await;
+        mine(&handle, &alice.default_address().unwrap(), MINE_TO).await;
 
         let height = block_count(&client).await;
         assert_eq!(height, MINE_TO);
@@ -181,9 +190,9 @@ fn a_mined_coin_can_be_spent_to_another_wallet() {
         // ── 組み立てて署名する。秘密鍵はノードに渡らない ──
         let amount = "12.5".parse::<Amount>().unwrap();
         let spend = Spend {
-            to: Lock::from_address(&bob.default_address()),
+            to: Lock::from_address(&bob.default_address().unwrap()),
             amount,
-            change_to: Lock::from_address(&alice.default_address()),
+            change_to: Lock::from_address(&alice.default_address().unwrap()),
             next_height: height + 1,
             fee_rate: params::MIN_RELAY_FEE_RATE_PER_BYTE,
         };
@@ -217,7 +226,7 @@ fn a_mined_coin_can_be_spent_to_another_wallet() {
         );
 
         // ── ブロックに取り込ませる ──
-        mine(&handle, &alice.default_address(), 1).await;
+        mine(&handle, &alice.default_address().unwrap(), 1).await;
         assert_eq!(block_count(&client).await, MINE_TO + 1);
         assert!(
             client
@@ -267,21 +276,21 @@ fn a_transaction_signed_by_the_wrong_key_is_refused() {
     let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
     let handle = service.handle();
 
-    let alice = Keystore::create(&dir.0.join("alice.json"), NETWORK).unwrap();
-    let mallory = Keystore::create(&dir.0.join("mallory.json"), NETWORK).unwrap();
+    let (alice, _) = Keystore::create(&dir.0.join("alice.json"), NETWORK, PASS).unwrap();
+    let (mallory, _) = Keystore::create(&dir.0.join("mallory.json"), NETWORK, PASS).unwrap();
 
     runtime.block_on(async {
         let client = rpc(&handle, &dir.0).await;
-        mine(&handle, &alice.default_address(), MINE_TO).await;
+        mine(&handle, &alice.default_address().unwrap(), MINE_TO).await;
 
         let height = block_count(&client).await;
         let alice_coins = coins(&client, &alice).await;
 
         // mallory が alice の UTXO を自分宛てに使おうとする。
         let spend = Spend {
-            to: Lock::from_address(&mallory.default_address()),
+            to: Lock::from_address(&mallory.default_address().unwrap()),
             amount: "10".parse::<Amount>().unwrap(),
-            change_to: Lock::from_address(&mallory.default_address()),
+            change_to: Lock::from_address(&mallory.default_address().unwrap()),
             next_height: height + 1,
             fee_rate: params::MIN_RELAY_FEE_RATE_PER_BYTE,
         };
@@ -310,6 +319,6 @@ fn a_transaction_signed_by_the_wrong_key_is_refused() {
 /// 鍵を 1 個だけ持つウォレットから、その鍵を取り出す。
 fn mallory_key(store: &Keystore) -> oag_primitives::SecretKey {
     store
-        .key_for(&Lock::from_address(&store.default_address()))
+        .key_for(&Lock::from_address(&store.default_address().unwrap()))
         .expect("自分の鍵は引ける")
 }
