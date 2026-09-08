@@ -1159,6 +1159,67 @@ mod tests {
         );
     }
 
+    // ━━━━━━━━ 焼却 ━━━━━━━━
+
+    #[test]
+    fn an_output_locked_to_the_zero_key_cannot_be_spent() {
+        // ジェネシスのブロック報酬の行き先である (SPEC §14.4)。
+        // **ここが通ってしまうと、焼却したはずの 10 OAG を誰かが拾える。**
+        let mut utxo = UtxoSet::new();
+        let cb = coinbase(
+            1,
+            vec![TxOutput::new(params::BLOCK_REWARD, Lock::unspendable())],
+        );
+        utxo.apply_block(std::slice::from_ref(&cb), 1).unwrap();
+
+        let spend_to = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
+        let base = Transaction {
+            version: CURRENT_TX_VERSION,
+            inputs: vec![TxInput::new(OutPoint::new(cb.txid(), 0))],
+            outputs: vec![TxOutput::new(Amount::from_oag(9).unwrap(), spend_to)],
+            locktime: 0,
+        };
+
+        // 署名なし。未知の版数として誰でも使える扱いに落ちていないこと。
+        let mut empty = base.clone();
+        empty.inputs[0].signature = Vec::new();
+        assert_eq!(
+            validate_transaction(&empty, &utxo, SPEND_HEIGHT, MTP, 1),
+            Err(ValidationError::BadSignatureLength(0)),
+            "署名なしで使えてしまった"
+        );
+
+        // 何らかの 64 バイトを付けた場合。鍵として読めない時点で断る。
+        let mut forged = base.clone();
+        forged.inputs[0].signature = vec![0x11; 64];
+        assert_eq!(
+            validate_transaction(&forged, &utxo, SPEND_HEIGHT, MTP, 1),
+            Err(ValidationError::BadLockPubkey { index: 0 }),
+            "0 の鍵に対して署名の検証まで進んでいる"
+        );
+
+        // 自分の鍵で正しく署名した場合。これも通ってはならない。
+        let key = SecretKey::generate();
+        let mut signed = base;
+        let spent = [TxOutput::new(params::BLOCK_REWARD, Lock::unspendable())];
+        sign(&mut signed, &spent, &[&key]);
+        assert_eq!(
+            validate_transaction(&signed, &utxo, SPEND_HEIGHT, MTP, 1),
+            Err(ValidationError::BadLockPubkey { index: 0 }),
+            "自分の鍵で署名して使えてしまった"
+        );
+    }
+
+    #[test]
+    fn the_zero_key_is_not_a_valid_public_key() {
+        // 上の試験が拠って立つ前提。曲線上に x = 0 の点が無い。
+        assert!(oag_primitives::PublicKey::from_slice(&[0u8; 32]).is_err());
+        assert_eq!(Lock::unspendable().to_pubkey(), None);
+        // **版数 0 であること。** 未知の版数なら誰でも使える (SPEC §10.4)。
+        assert_eq!(Lock::unspendable().version(), VERSION_PUBKEY);
+        assert!(Lock::unspendable().is_known_version());
+    }
+
     // ━━━━━━━━ locktime ━━━━━━━━
 
     #[test]

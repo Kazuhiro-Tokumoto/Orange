@@ -3,11 +3,11 @@
 //! ジェネシスはチェーンの定義そのものであり、一度確定させたら変更できない。
 //! ハッシュが変われば別のチェーンになる。
 //!
-//! # まだ確定していない
+//! # ここにあるのは構築の手段だけである
 //!
-//! mainnet のジェネシスに刻む内容 (タイムスタンプ、コインベースのメッセージ、
-//! 報酬の受取先) は未定である。`docs/SPEC.md` の未決事項を参照。
-//! 本モジュールは構築の手段だけを提供する。
+//! 各ネットワークに実際に刻む値は
+//! [`oag_node::genesis`](../../oag_node/genesis/index.html) が持つ
+//! (SPEC §14.4)。確定済みであり、変更できない。
 
 use oag_consensus::codec::Encode;
 use oag_consensus::lock::Lock;
@@ -44,6 +44,28 @@ impl GenesisSpec {
             timestamp,
             message: message.to_vec(),
             outputs: Vec::new(),
+        }
+    }
+
+    /// ブロック報酬を**焼却する**ジェネシスを定義する。
+    ///
+    /// 10 OAG は発行されるが、誰にも使えない支払い条件
+    /// ([`Lock::unspendable`]) に結び付けられる。受け取らない
+    /// ([`GenesisSpec::without_reward`]) との違いは、**発行された事実が
+    /// 台帳に残る**ことである。UTXO セットに 1 件残り、エクスプローラでは
+    /// 焼却先アドレス (`oag1qqqq…`) に 10 OAG が置かれたまま見える。
+    ///
+    /// 発行総量の 0.000001 % にすぎないが、「誰も取っていない」ことが
+    /// 見える形で示される。
+    pub fn with_burned_reward(network: Network, timestamp: i64, message: &[u8]) -> GenesisSpec {
+        GenesisSpec {
+            network,
+            timestamp,
+            message: message.to_vec(),
+            outputs: vec![TxOutput::new(
+                oag_consensus::params::BLOCK_REWARD,
+                Lock::unspendable(),
+            )],
         }
     }
 

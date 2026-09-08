@@ -54,9 +54,6 @@ pub enum NodeError {
     /// 作業スレッドを起こせない、あるいは落ちた。
     #[error("ノードの作業スレッド: {0}")]
     Thread(String),
-    /// ジェネシスが確定していない。
-    #[error(transparent)]
-    Genesis(#[from] crate::genesis::GenesisUndecided),
     /// 掘ったブロックが受理されなかった。
     #[error("自分で掘ったブロックが受理されなかった: {0:?}")]
     SelfMinedRejected(AcceptOutcome),
@@ -122,9 +119,7 @@ pub struct Node {
 impl Node {
     /// 記憶域を開き、必要ならジェネシスで初期化する。
     pub fn open(network: Network, data_dir: &Path) -> Result<Node, NodeError> {
-        // ジェネシスを先に決める。確定していないネットワークで空の
-        // データベースを作ってしまわないようにするためである。
-        let genesis = crate::genesis::genesis_for(network)?;
+        let genesis = crate::genesis::genesis_for(network);
         std::fs::create_dir_all(data_dir)
             .map_err(|e| StoreError::Io(format!("{} を作れない: {e}", data_dir.display())))?;
         let store = Store::open(data_dir.join("chain.redb"))?;

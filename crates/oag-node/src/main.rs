@@ -83,7 +83,7 @@ enum Command {
 
 #[derive(clap::Args)]
 struct Common {
-    /// 対象ネットワーク。現在起動できるのは regtest のみ。
+    /// 対象ネットワーク。mainnet / testnet / regtest。
     #[arg(long, default_value = "regtest")]
     network: String,
     /// データを置くディレクトリ。

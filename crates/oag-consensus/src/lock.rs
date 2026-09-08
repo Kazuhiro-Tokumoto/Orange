@@ -51,6 +51,31 @@ impl Lock {
         }
     }
 
+    /// **誰にも使えない**支払い条件 (版数 0、ペイロードは 32 バイトの 0)。
+    ///
+    /// 資金を焼却するために用いる。ジェネシスのブロック報酬がこれである
+    /// (SPEC §14.4)。
+    ///
+    /// # なぜ使えないのか
+    ///
+    /// 32 バイトすべて 0 は secp256k1 の x-only 公開鍵として無効である
+    /// (x = 0 に対応する曲線上の点が無い)。使おうとすると署名の検証手前で
+    /// `PublicKey::from_slice` が失敗し、[`ValidationError::BadLockPubkey`]
+    /// で断られる。
+    ///
+    /// **未知の版数として扱われるわけではない。** 未知の版数は誰でも使える
+    /// (SPEC §10.4) ので、そちらに落ちていたら焼却にならない。版数 0 で
+    /// あることが重要である。試験
+    /// `an_output_locked_to_the_zero_key_cannot_be_spent` で確かめている。
+    ///
+    /// [`ValidationError::BadLockPubkey`]: crate::validate::ValidationError::BadLockPubkey
+    pub fn unspendable() -> Lock {
+        Lock {
+            version: VERSION_PUBKEY,
+            payload: vec![0u8; PUBKEY_PAYLOAD_LEN],
+        }
+    }
+
     /// アドレスから作る。
     pub fn from_address(address: &Address) -> Lock {
         Lock {
