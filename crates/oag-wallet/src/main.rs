@@ -15,12 +15,13 @@ use oag_consensus::TxOutput;
 use oag_primitives::{Address, Amount, Hash, Network};
 use oag_rpc::auth::read_cookie;
 use oag_rpc::client::Client;
+use oag_wallet::bip39::Mnemonic;
 use oag_wallet::build::{build, sign, Coin, Spend};
 use oag_wallet::keystore::{Keystore, MIN_PASSPHRASE_LEN};
-use oag_wallet::seed::Seed;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Parser)]
 #[command(name = "oag-wallet", about = "Orange (OAG) のウォレット", version)]
@@ -53,17 +54,64 @@ struct Common {
     passphrase_file: Option<PathBuf>,
 }
 
+/// BIP39 の追加パスフレーズの受け取り方。
+///
+/// **既定は空文字列である。** 使わないのが普通であり、使うと決めた者だけが
+/// 明示する。
+#[derive(clap::Args)]
+struct MnemonicPassphrase {
+    /// BIP39 の追加パスフレーズを端末で尋ねる。
+    #[arg(long)]
+    mnemonic_passphrase: bool,
+    /// BIP39 の追加パスフレーズを収めたファイル。
+    #[arg(long, value_name = "パス", conflicts_with = "mnemonic_passphrase")]
+    mnemonic_passphrase_file: Option<PathBuf>,
+}
+
+impl MnemonicPassphrase {
+    /// 追加パスフレーズを得る。
+    ///
+    /// `confirm` が真なら 2 度尋ねて突き合わせる。**打ち間違えても失敗
+    /// として現れない**ため、作るときは必ず確かめる。
+    fn get(&self, confirm: bool) -> Result<Zeroizing<String>, String> {
+        if let Some(path) = &self.mnemonic_passphrase_file {
+            let mut text = std::fs::read_to_string(path)
+                .map_err(|e| format!("{} を読めない: {e}", path.display()))?;
+            let value = Zeroizing::new(text.trim_end_matches(['\n', '\r']).to_string());
+            text.zeroize();
+            return Ok(value);
+        }
+        if !self.mnemonic_passphrase {
+            return Ok(Zeroizing::new(String::new()));
+        }
+        let first =
+            Zeroizing::new(read_secret("BIP39 の追加パスフレーズ: ").map_err(|e| e.to_string())?);
+        if confirm {
+            let second = Zeroizing::new(read_secret("もう一度: ").map_err(|e| e.to_string())?);
+            if *first != *second {
+                return Err("追加パスフレーズが一致しない".to_string());
+            }
+        }
+        Ok(first)
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// 新しいウォレットを作る。
-    New,
-    /// 控えの種からウォレットを復元する。
-    Restore {
-        /// 控えの種を収めたファイル。省略すると尋ねる。
-        #[arg(long, value_name = "パス")]
-        seed_file: Option<PathBuf>,
+    New {
+        #[command(flatten)]
+        mnemonic_passphrase: MnemonicPassphrase,
     },
-    /// 控えの種を表示する。
+    /// 控えの語からウォレットを復元する。
+    Restore {
+        /// 控えの語を収めたファイル。省略すると尋ねる。
+        #[arg(long, value_name = "パス")]
+        mnemonic_file: Option<PathBuf>,
+        #[command(flatten)]
+        mnemonic_passphrase: MnemonicPassphrase,
+    },
+    /// 控えの語を表示する。
     Seed,
     /// 受取先アドレスを表示する。
     Address {
@@ -213,15 +261,30 @@ fn new_passphrase(file: &Option<PathBuf>) -> Result<Secret, String> {
 }
 
 /// 控えの取り方を伝える。
-fn print_backup(seed: &Seed) {
+fn print_backup(mnemonic: &Mnemonic, used_passphrase: bool) {
+    let words = mnemonic.words();
     println!();
-    println!("控えの種 (これ 1 つですべてのアドレスを復元できる):");
+    println!("控えの語 (これだけですべてのアドレスを復元できる):");
     println!();
-    println!("    {}", seed.to_hex());
+    // 番号を付けて 4 語ずつ並べる。書き写す先の紙でも順序を保てる。
+    for (row, line) in words.chunks(4).enumerate() {
+        let cells: Vec<String> = line
+            .iter()
+            .enumerate()
+            .map(|(col, word)| format!("{:2}. {word:<10}", row * 4 + col + 1))
+            .collect();
+        println!("    {}", cells.join(" "));
+    }
     println!();
     println!("**紙に書き写して安全な場所に保管すること。**");
-    println!("この種を知る者は資金を動かせる。失えば資金は取り戻せない。");
+    println!("この語を知る者は資金を動かせる。失えば資金は取り戻せない。");
     println!("アドレスをあとから増やしても、この控えのままでよい。");
+    if used_passphrase {
+        println!();
+        println!("**追加パスフレーズも要る。** 語だけでは復元できない。");
+        println!("そして打ち間違えても失敗としては現れない。別のパスフレーズは");
+        println!("残高 0 の別のウォレットを作るだけで、どこにも誤りは出ない。");
+    }
 }
 
 impl Common {
@@ -248,30 +311,39 @@ async fn run() -> Result<(), String> {
     let network = cli.common.network()?;
 
     match cli.command {
-        Command::New => {
+        Command::New {
+            mnemonic_passphrase,
+        } => {
+            let extra = mnemonic_passphrase.get(true)?;
             let pass = new_passphrase(&cli.common.passphrase_file)?;
-            let (store, seed) =
-                Keystore::create(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
+            let (store, mnemonic) = Keystore::create(&cli.common.wallet, network, &pass, &extra)
+                .map_err(|e| e.to_string())?;
             println!("{} に新しいウォレットを作った", cli.common.wallet.display());
             println!(
                 "受取先: {}",
                 store.default_address().map_err(|e| e.to_string())?
             );
-            print_backup(&seed);
+            print_backup(&mnemonic, !extra.is_empty());
             Ok(())
         }
 
-        Command::Restore { seed_file } => {
-            let text = match &seed_file {
+        Command::Restore {
+            mnemonic_file,
+            mnemonic_passphrase,
+        } => {
+            let mut text = match &mnemonic_file {
                 Some(path) => std::fs::read_to_string(path)
                     .map_err(|e| format!("{} を読めない: {e}", path.display()))?,
-                None => read_secret("控えの種 (16 進 64 文字): ")
-                    .map_err(|e| format!("種を読めない: {e}"))?,
+                None => read_secret("控えの語 (空白区切り): ")
+                    .map_err(|e| format!("控えの語を読めない: {e}"))?,
             };
-            let seed = Seed::from_hex(&text).map_err(|e| e.to_string())?;
+            let mnemonic = Mnemonic::parse(&text);
+            text.zeroize();
+            let mnemonic = mnemonic.map_err(|e| e.to_string())?;
+            let extra = mnemonic_passphrase.get(false)?;
             let pass = new_passphrase(&cli.common.passphrase_file)?;
 
-            let (store, _) = Keystore::restore(&cli.common.wallet, network, &pass, seed)
+            let store = Keystore::restore(&cli.common.wallet, network, &pass, &mnemonic, &extra)
                 .map_err(|e| e.to_string())?;
             println!("{} に復元した", cli.common.wallet.display());
             println!(
@@ -288,7 +360,7 @@ async fn run() -> Result<(), String> {
             let pass = passphrase(&cli.common.passphrase_file, "パスフレーズ: ")?;
             let store =
                 Keystore::open(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
-            print_backup(store.seed());
+            print_backup(store.mnemonic(), false);
             Ok(())
         }
 

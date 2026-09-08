@@ -58,7 +58,8 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 | 11b | ジェネシス確定 (3 ネットワークすべて) | 完了 |
 | 11c | RandomX の fast モード (採掘) | 完了 |
 | 11d | ピア発見 (アドレス帳・`addr`・シードノード) | 完了 |
-| 11e | テストネット公開 | 未着手 |
+| 11e | BIP39 / BIP32 / BIP44 (控えの語) | 完了 |
+| 11f | テストネット公開 | 未着手 |
 
 ## クレート構成
 
@@ -184,7 +185,7 @@ mainnet と testnet では、繋ぎ先を指定しなければ自動で探しま
 ```sh
 cargo build --release -p oag-wallet
 
-# ウォレットを作る (パスフレーズを尋ねられ、控えの種が表示される)
+# ウォレットを作る (パスフレーズを尋ねられ、控えの 12 語が表示される)
 ./target/release/oag-wallet --wallet ./alice.json new
 ./target/release/oag-wallet --wallet ./bob.json new
 
@@ -217,18 +218,30 @@ curl -s --user "$(cat ./oag-data/.cookie)" -H 'content-type: application/json' \
 復元できます。
 
 ```sh
-# 控えの種を表示する
+# 控えの語を表示する
 ./target/release/oag-wallet --wallet ./alice.json seed
 
-# 控えの種から復元する
+# 控えの語から復元する
 ./target/release/oag-wallet --wallet ./recovered.json restore
 ```
 
-> **控えの種を知る者は資金を動かせます。** 紙に書き写して安全な場所に
+控えは **BIP39 の 12 語**です。鍵の導出は BIP32 / BIP44 に従います。
+
+```
+m / 44' / <coin_type>' / 0' / 0 / <index>
+```
+
+> **控えの語を知る者は資金を動かせます。** 紙に書き写して安全な場所に
 > 保管してください。パスフレーズが弱ければ暗号化は守ってくれません。
-> また、現在の鍵の導出は BIP32/BIP39 とは互換ではありません。
-> BIP39 の 12 語ニーモニックと BIP32/BIP44 へ移すことは決定済みで、
-> テストネット公開前に実装します ([決定済み・未実装](docs/SPEC.md))。
+
+> **mainnet のウォレットはまだ作れません。** SLIP-0044 のコインタイプ番号が
+> 未登録で、導出経路が確定しないためです。暫定の番号で運用すると、登録された
+> 番号へ移した時点で同じ控えから導かれる鍵が変わります。testnet と regtest は
+> 予約番号 1 を使うため、いま使えます ([SPEC §6.6](docs/SPEC.md))。
+
+BIP39 の追加パスフレーズを使う場合は `--mnemonic-passphrase` を渡します。
+**打ち間違えても失敗としては現れません。** 別のパスフレーズは残高 0 の別の
+ウォレットを作るだけで、どこにも誤りは表示されません。
 
 `oag-node` は RandomX を必ず使うため、ビルドに cmake と C++ コンパイラが
 必要です。

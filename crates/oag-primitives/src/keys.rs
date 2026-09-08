@@ -95,6 +95,33 @@ impl SecretKey {
         self.0.secret_key().to_secret_bytes()
     }
 
+    /// 圧縮形式 (SEC1) の公開鍵。先頭 1 バイトが y の偶奇を表す。
+    ///
+    /// **BIP340 の x-only 公開鍵とは別物である。** 署名にはこちらを使わない。
+    /// BIP32 の非強化導出が、親の公開鍵をこの形式で HMAC に食わせることを
+    /// 要求するために用意している。y の偶奇を捨てると、他の実装と違う
+    /// 子鍵が出る。
+    pub fn public_key_compressed(&self) -> [u8; 33] {
+        self.0.public_key().serialize()
+    }
+
+    /// 秘密鍵にスカラーを足す。BIP32 の子鍵の導出に用いる。
+    ///
+    /// `tweak` はビッグエンディアンの 256 ビット整数として解釈する。
+    /// 曲線の位数以上であるか、足した結果が 0 になる場合は
+    /// [`KeyError::InvalidSecretKey`] を返す。**どちらも 2^-127 程度の
+    /// 事象だが、黙って別の値を返すよりは断る。**
+    pub fn add_tweak(&self, tweak: &[u8; 32]) -> Result<SecretKey, KeyError> {
+        let scalar =
+            secp256k1::Scalar::from_be_bytes(*tweak).map_err(|_| KeyError::InvalidSecretKey)?;
+        let sum = self
+            .0
+            .secret_key()
+            .add_tweak(&scalar)
+            .map_err(|_| KeyError::InvalidSecretKey)?;
+        Ok(SecretKey(sum.keypair()))
+    }
+
     /// 32 バイトのメッセージに BIP340 署名を行う。
     ///
     /// 補助乱数を用いるため、同じメッセージでも毎回異なる署名となる
@@ -404,5 +431,47 @@ mod tests {
         let msg = [7u8; 32];
         let sig = key.sign(&msg);
         assert!(key.public_key().verify(&msg, &sig));
+    }
+
+    #[test]
+    fn a_secret_key_survives_a_round_trip_even_when_its_point_has_odd_y() {
+        // **BIP32 の導出はここに乗っている。** BIP340 は y が奇数の点を
+        // 使わないため、実装によっては鍵を格納する時点で n - d に
+        // 置き換える。そうなると `to_bytes` が入れたものと違う値を返し、
+        // BIP32 の子鍵が他の実装とずれる。
+        let mut odd = 0;
+        for seed in 1u8..64 {
+            let bytes = [seed; SECRET_KEY_LEN];
+            let key = SecretKey::from_bytes(bytes).unwrap();
+            assert_eq!(key.to_bytes(), bytes, "秘密鍵が書き換えられている");
+            if key.public_key_compressed()[0] == 0x03 {
+                odd += 1;
+            }
+        }
+        // y が奇数になる鍵を 1 つも踏んでいないなら、上の確認は意味がない。
+        assert!(odd > 0, "y が奇数の鍵を試せていない");
+    }
+
+    #[test]
+    fn the_compressed_public_key_carries_the_parity() {
+        let key = SecretKey::from_bytes([9u8; SECRET_KEY_LEN]).unwrap();
+        let compressed = key.public_key_compressed();
+        assert!(compressed[0] == 0x02 || compressed[0] == 0x03);
+        // 残り 32 バイトは x-only 公開鍵そのものである。
+        assert_eq!(compressed[1..], key.public_key().to_bytes());
+    }
+
+    #[test]
+    fn adding_a_tweak_moves_the_key() {
+        let key = SecretKey::from_bytes([5u8; SECRET_KEY_LEN]).unwrap();
+        let moved = key.add_tweak(&[1u8; 32]).unwrap();
+        assert_ne!(key.to_bytes(), moved.to_bytes());
+        // 0 を足しても変わらない。
+        assert_eq!(
+            key.add_tweak(&[0u8; 32]).unwrap().to_bytes(),
+            key.to_bytes()
+        );
+        // 曲線の位数以上の値は断る。
+        assert!(key.add_tweak(&[0xffu8; 32]).is_err());
     }
 }

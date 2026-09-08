@@ -166,8 +166,8 @@ fn a_mined_coin_can_be_spent_to_another_wallet() {
     let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
     let handle = service.handle();
 
-    let (alice, _) = Keystore::create(&dir.0.join("alice.json"), NETWORK, PASS).unwrap();
-    let (bob, _) = Keystore::create(&dir.0.join("bob.json"), NETWORK, PASS).unwrap();
+    let (alice, _) = Keystore::create(&dir.0.join("alice.json"), NETWORK, PASS, "").unwrap();
+    let (bob, _) = Keystore::create(&dir.0.join("bob.json"), NETWORK, PASS, "").unwrap();
 
     runtime.block_on(async {
         let client = rpc(&handle, &dir.0).await;
@@ -276,8 +276,8 @@ fn a_transaction_signed_by_the_wrong_key_is_refused() {
     let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
     let handle = service.handle();
 
-    let (alice, _) = Keystore::create(&dir.0.join("alice.json"), NETWORK, PASS).unwrap();
-    let (mallory, _) = Keystore::create(&dir.0.join("mallory.json"), NETWORK, PASS).unwrap();
+    let (alice, _) = Keystore::create(&dir.0.join("alice.json"), NETWORK, PASS, "").unwrap();
+    let (mallory, _) = Keystore::create(&dir.0.join("mallory.json"), NETWORK, PASS, "").unwrap();
 
     runtime.block_on(async {
         let client = rpc(&handle, &dir.0).await;

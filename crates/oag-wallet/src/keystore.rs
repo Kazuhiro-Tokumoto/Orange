@@ -28,7 +28,7 @@
 //!
 //! ```json
 //! {
-//!   "version": 2,
+//!   "version": 3,
 //!   "network": "regtest",
 //!   "kdf": { "algorithm": "argon2id", "salt": "<16 進>",
 //!            "m_cost": 65536, "t_cost": 3, "p_cost": 1 },
@@ -38,9 +38,19 @@
 //! }
 //! ```
 //!
-//! 版数 1 (平文で鍵を並べたもの) は**読めない**。テストネット公開前で
-//! あり、移行すべき資金が存在しないためである。
+//! 暗号文の中身は `エントロピーの長さ (1 バイト) ‖ エントロピー ‖ 種 (64)`
+//! である。エントロピーを残すのは、控えの語をあとから表示し直すためである。
+//! 種だけでは語に戻せない (BIP39 の種は PBKDF2 の出力である)。
+//!
+//! **版数 1 (平文で鍵を並べたもの) と版数 2 (独自導出の 32 バイトの種) は
+//! 読めない。** BIP39 / BIP32 へ移す際、移行経路は用意しないと決めた
+//! ([`docs/SPEC.md`] の §16.3)。移行前のウォレットは、秘密鍵を書き出して
+//! 新しいウォレットへ送金し直すこと。テストネット公開前であり、
+//! 守るべき資金が存在しない間に済ませる。
+//!
+//! [`docs/SPEC.md`]: https://github.com/Kazuhiro-Tokumoto/Orange/blob/main/docs/SPEC.md
 
+use crate::bip39::{Bip39Error, Mnemonic};
 use crate::seed::{Seed, SeedError, SEED_LEN};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -52,7 +62,7 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroize;
 
 /// この実装が読み書きする形式の版数。
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// ソルトの長さ。
 const SALT_LEN: usize = 16;
@@ -97,7 +107,9 @@ pub enum KeystoreError {
     /// 知らない形式の版数。
     #[error(
         "{path} は版数 {found} である。この実装が読めるのは {FORMAT_VERSION} のみ。\n\
-         版数 1 (鍵を平文で並べたもの) は読めない。"
+         版数 1 (鍵を平文で並べたもの) と版数 2 (独自導出の種) は読めない。\n\
+         BIP39 / BIP32 へ移す際に移行経路は用意しないと決めている。\n\
+         古いウォレットの資金は、そちらの実装で送り出してから作り直すこと。"
     )]
     UnknownVersion {
         /// 対象のファイル。
@@ -136,6 +148,9 @@ pub enum KeystoreError {
     /// 鍵を導出できない。
     #[error(transparent)]
     Seed(#[from] SeedError),
+    /// 控えの語を読めない。
+    #[error(transparent)]
+    Mnemonic(#[from] Bip39Error),
     /// 鍵の導出に失敗した。
     #[error("パスフレーズから鍵を導出できない: {0}")]
     Kdf(String),
@@ -179,6 +194,8 @@ struct CipherParams {
 pub struct Keystore {
     path: PathBuf,
     network: Network,
+    /// 控えの語。**表示し直すためだけに持つ。**
+    mnemonic: Mnemonic,
     seed: Seed,
     /// 導出済みの鍵の数。
     accounts: u32,
@@ -213,37 +230,48 @@ impl Keystore {
     /// すでにファイルがあれば断る。**黙って上書きすると、そこにあった種で
     /// 守られていた資金を永久に失う。**
     ///
-    /// 作った種を返す。呼び出し側はこれを控えとして示すこと。
+    /// 作った控えの語を返す。呼び出し側はこれを控えとして示すこと。
+    ///
+    /// `mnemonic_passphrase` は BIP39 の任意パスフレーズである。既定は
+    /// 空文字列。**打ち間違えても失敗として現れない。**
     pub fn create(
         path: &Path,
         network: Network,
         passphrase: &[u8],
-    ) -> Result<(Keystore, Seed), KeystoreError> {
-        Keystore::restore(path, network, passphrase, Seed::generate())
+        mnemonic_passphrase: &str,
+    ) -> Result<(Keystore, Mnemonic), KeystoreError> {
+        let mnemonic = Mnemonic::generate();
+        let store = Keystore::restore(path, network, passphrase, &mnemonic, mnemonic_passphrase)?;
+        Ok((store, mnemonic))
     }
 
-    /// 控えの種からウォレットを復元する。
+    /// 控えの語からウォレットを復元する。
     pub fn restore(
         path: &Path,
         network: Network,
         passphrase: &[u8],
-        seed: Seed,
-    ) -> Result<(Keystore, Seed), KeystoreError> {
+        mnemonic: &Mnemonic,
+        mnemonic_passphrase: &str,
+    ) -> Result<Keystore, KeystoreError> {
         if path.exists() {
             return Err(KeystoreError::AlreadyExists(path.to_path_buf()));
         }
         check_passphrase(passphrase)?;
 
-        let backup = seed.clone();
         let store = Keystore {
             path: path.to_path_buf(),
             network,
-            seed,
+            seed: Seed::from_mnemonic(mnemonic, mnemonic_passphrase),
+            mnemonic: mnemonic.clone(),
             accounts: 1,
             passphrase: Passphrase(passphrase.to_vec()),
         };
+        // 経路が確定しないネットワークでは、鍵を 1 本も導けない。
+        // **ファイルを作る前に断る。** 作ってしまうと、開くたびに失敗する
+        // ウォレットが残る。
+        store.seed.derive(network, 0)?;
         store.save()?;
-        Ok((store, backup))
+        Ok(store)
     }
 
     /// 既存のウォレットを開く。
@@ -326,20 +354,14 @@ impl Keystore {
         key.zeroize();
 
         let mut plaintext = plaintext.ok_or(KeystoreError::CannotDecrypt)?;
-        if plaintext.len() != SEED_LEN {
-            plaintext.zeroize();
-            return Err(malformed("種の長さが違う"));
-        }
-        let mut bytes = [0u8; SEED_LEN];
-        bytes.copy_from_slice(&plaintext);
+        let unpacked = unpack(&plaintext);
         plaintext.zeroize();
-        let seed = Seed::from_bytes(bytes);
-        // `bytes` は Copy なので、渡したあとも手元に残る。消す。
-        bytes.zeroize();
+        let (mnemonic, seed) = unpacked?;
 
         Ok(Keystore {
             path: path.to_path_buf(),
             network,
+            mnemonic,
             seed,
             accounts: stored.accounts.max(1),
             passphrase: Passphrase(passphrase.to_vec()),
@@ -351,7 +373,7 @@ impl Keystore {
     /// 種は変わらない。**控えを取り直す必要はない。**
     pub fn add_key(&mut self) -> Result<Address, KeystoreError> {
         let index = self.accounts;
-        let key = self.seed.derive(index)?;
+        let key = self.seed.derive(self.network, index)?;
         self.accounts += 1;
         self.save()?;
         Ok(Address::from_pubkey(self.network, &key.public_key()))
@@ -374,7 +396,7 @@ impl Keystore {
 
     /// すべての秘密鍵。
     fn keys(&self) -> Result<Vec<SecretKey>, KeystoreError> {
-        Ok(self.seed.derive_many(self.accounts)?)
+        Ok(self.seed.derive_many(self.network, self.accounts)?)
     }
 
     /// すべてのアドレス。
@@ -388,7 +410,7 @@ impl Keystore {
 
     /// 既定の受取先。最初の鍵のもの。
     pub fn default_address(&self) -> Result<Address, KeystoreError> {
-        let key = self.seed.derive(0)?;
+        let key = self.seed.derive(self.network, 0)?;
         Ok(Address::from_pubkey(self.network, &key.public_key()))
     }
 
@@ -409,9 +431,9 @@ impl Keystore {
             .find(|k| Lock::pay_to_pubkey(&k.public_key()) == *lock)
     }
 
-    /// 控えのための種。**表示する以外に使ってはならない。**
-    pub fn seed(&self) -> &Seed {
-        &self.seed
+    /// 控えの語。**表示する以外に使ってはならない。**
+    pub fn mnemonic(&self) -> &Mnemonic {
+        &self.mnemonic
     }
 
     /// 暗号化して書き出す。
@@ -432,8 +454,11 @@ impl Keystore {
             ARGON_P_COST,
         )?;
         let aad = associated_data(&self.network.to_string(), self.accounts);
-        let ciphertext = encrypt(&key, &nonce, self.seed.as_bytes(), &aad)?;
+        let mut payload = pack(&self.mnemonic, &self.seed);
+        let ciphertext = encrypt(&key, &nonce, &payload, &aad);
+        payload.zeroize();
         key.zeroize();
+        let ciphertext = ciphertext?;
 
         let stored = Stored {
             version: FORMAT_VERSION,
@@ -456,6 +481,42 @@ impl Keystore {
 
         write_atomically(&self.path, &text)
     }
+}
+
+/// 暗号文に収める平文を組み立てる。
+///
+/// `エントロピーの長さ (1 バイト) ‖ エントロピー ‖ 種 (64 バイト)`。
+///
+/// **エントロピーも収める。** 種だけでは控えの語に戻せない。BIP39 の種は
+/// PBKDF2 の出力であり、一方向である。
+fn pack(mnemonic: &Mnemonic, seed: &Seed) -> Vec<u8> {
+    let entropy = mnemonic.entropy();
+    let mut out = Vec::with_capacity(1 + entropy.len() + SEED_LEN);
+    out.push(entropy.len() as u8);
+    out.extend_from_slice(entropy);
+    out.extend_from_slice(seed.as_bytes());
+    out
+}
+
+/// [`pack`] の逆。
+fn unpack(plaintext: &[u8]) -> Result<(Mnemonic, Seed), KeystoreError> {
+    let bad = |what: &str| KeystoreError::Malformed {
+        path: PathBuf::new(),
+        message: what.to_string(),
+    };
+    let (&len, rest) = plaintext.split_first().ok_or_else(|| bad("暗号文が空"))?;
+    let len = usize::from(len);
+    if rest.len() != len + SEED_LEN {
+        return Err(bad("復号した中身の長さが違う"));
+    }
+    let (entropy, seed) = rest.split_at(len);
+    let mnemonic = Mnemonic::from_entropy(entropy)?;
+    let mut bytes = [0u8; SEED_LEN];
+    bytes.copy_from_slice(seed);
+    let seed = Seed::from_bytes(bytes);
+    // `bytes` は Copy なので、渡したあとも手元に残る。消す。
+    bytes.zeroize();
+    Ok((mnemonic, seed))
 }
 
 /// ファイルを**丸ごと置き換える**。途中で終わらない。
@@ -646,7 +707,7 @@ mod tests {
     #[test]
     fn a_new_wallet_reopens_with_the_passphrase() {
         let path = temp("new");
-        let (store, _) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let (store, _) = Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
         let address = store.default_address().unwrap();
 
         let reopened = Keystore::open(&path, Network::Regtest, PASS).unwrap();
@@ -660,7 +721,7 @@ mod tests {
     #[test]
     fn the_wrong_passphrase_is_refused() {
         let path = temp("wrong");
-        Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
         assert!(matches!(
             Keystore::open(&path, Network::Regtest, b"wrong passphrase"),
             Err(KeystoreError::CannotDecrypt)
@@ -672,13 +733,17 @@ mod tests {
     fn the_seed_is_not_in_the_file() {
         // **これが漏れていたら、暗号化した意味がない。**
         let path = temp("leak");
-        let (_, seed) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let (_, mnemonic) = Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
+        let seed = Seed::from_mnemonic(&mnemonic, "");
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains(&seed.to_hex()), "種が平文で入っている");
+        assert!(
+            !text.contains(&*mnemonic.phrase()),
+            "控えの語が平文で入っている"
+        );
 
         // 導出される鍵も入っていないこと。
         for i in 0..3 {
-            let key = seed.derive(i).unwrap();
+            let key = seed.derive(Network::Regtest, i).unwrap();
             let hex: String = key.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
             assert!(!text.contains(&hex), "{i} 番目の鍵が平文で入っている");
         }
@@ -689,7 +754,7 @@ mod tests {
     fn a_tampered_file_is_refused() {
         // 認証付き暗号なので、1 バイト書き換えただけで復号に失敗する。
         let path = temp("tamper");
-        Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         let stored: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -717,7 +782,7 @@ mod tests {
         // 同じ鍵と nonce で 2 度暗号化すると、鍵流が再利用され平文の
         // 差分が漏れる。
         let path = temp("nonce");
-        let (mut store, _) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let (mut store, _) = Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
         let first: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
 
@@ -741,7 +806,7 @@ mod tests {
     fn a_restored_seed_gives_back_the_same_addresses() {
         // **控えが効くことの確認である。** ここが通らなければ控えの意味がない。
         let path = temp("restore-a");
-        let (mut store, seed) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let (mut store, mnemonic) = Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
         store.add_key().unwrap();
         store.add_key().unwrap();
         let expected: Vec<String> = store
@@ -752,15 +817,10 @@ mod tests {
             .collect();
         assert_eq!(expected.len(), 3);
 
-        // 控えの種だけから復元する。ファイルは持っていない。
+        // 控えの語だけから復元する。ファイルは持っていない。
         let other = temp("restore-b");
-        let (mut restored, _) = Keystore::restore(
-            &other,
-            Network::Regtest,
-            PASS,
-            Seed::from_hex(&seed.to_hex()).unwrap(),
-        )
-        .unwrap();
+        let mut restored =
+            Keystore::restore(&other, Network::Regtest, PASS, &mnemonic, "").unwrap();
         // アドレスを増やした分は、増やし直せば同じものが出る。
         restored.add_key().unwrap();
         restored.add_key().unwrap();
@@ -781,10 +841,24 @@ mod tests {
     fn adding_a_key_does_not_change_the_seed() {
         // 種が変わるなら、控えを取り直さなければならなくなる。
         let path = temp("stable");
-        let (mut store, seed) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let (mut store, mnemonic) = Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
         store.add_key().unwrap();
-        assert_eq!(store.seed().to_hex(), seed.to_hex());
+        assert_eq!(store.mnemonic().phrase(), mnemonic.phrase());
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_mainnet_wallet_cannot_be_made_yet() {
+        // mainnet のコインタイプ番号は SLIP-0044 に未登録であり、
+        // 導出経路が確定しない (SPEC §6.6)。**ファイルを作る前に断る。**
+        // 作ってしまうと、開くたびに失敗するウォレットが残る。
+        let path = temp("mainnet");
+        let err = Keystore::create(&path, Network::Mainnet, PASS, "").unwrap_err();
+        assert!(
+            matches!(err, KeystoreError::Seed(SeedError::CoinTypeUnregistered)),
+            "{err:?}"
+        );
+        assert!(!path.exists(), "断ったのにファイルが残っている");
     }
 
     #[test]
@@ -793,7 +867,7 @@ mod tests {
         // 守られていない状態になる。
         let path = temp("weak");
         assert!(matches!(
-            Keystore::create(&path, Network::Regtest, b"short"),
+            Keystore::create(&path, Network::Regtest, b"short", ""),
             Err(KeystoreError::WeakPassphrase)
         ));
         assert!(!path.exists(), "断ったのにファイルができている");
@@ -802,9 +876,9 @@ mod tests {
     #[test]
     fn creating_over_an_existing_wallet_is_refused() {
         let path = temp("exists");
-        Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
         assert!(matches!(
-            Keystore::create(&path, Network::Regtest, PASS),
+            Keystore::create(&path, Network::Regtest, PASS, ""),
             Err(KeystoreError::AlreadyExists(_))
         ));
         std::fs::remove_file(&path).unwrap();
@@ -813,7 +887,7 @@ mod tests {
     #[test]
     fn opening_with_the_wrong_network_is_refused() {
         let path = temp("network");
-        Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
         assert!(matches!(
             Keystore::open(&path, Network::Testnet, PASS),
             Err(KeystoreError::WrongNetwork { .. })
@@ -826,7 +900,7 @@ mod tests {
     fn a_world_readable_wallet_is_refused() {
         use std::os::unix::fs::PermissionsExt;
         let path = temp("perm");
-        Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "作ったときの権限が緩い");
@@ -863,7 +937,7 @@ mod tests {
         // 書き換えられても復号が通ってしまう。数を減らされると、
         // 持っているはずのアドレスが出てこなくなる。
         let path = temp("aad-accounts");
-        let (mut store, _) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let (mut store, _) = Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
         store.add_key().unwrap();
         store.add_key().unwrap();
         assert_eq!(store.len(), 3);
@@ -885,7 +959,7 @@ mod tests {
     fn changing_the_network_is_detected() {
         // ネットワークも暗号文の外にある。
         let path = temp("aad-network");
-        Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, text.replace("\"regtest\"", "\"testnet\"")).unwrap();
@@ -911,7 +985,7 @@ mod tests {
         // 書き換えは別名で書き切ってから名前を付け替える。途中で
         // 終わっても、元の中身か新しい中身のどちらかが必ず残る。
         let path = temp("atomic");
-        let (mut store, seed) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let (mut store, mnemonic) = Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
 
         store.add_key().unwrap();
@@ -930,7 +1004,7 @@ mod tests {
 
         // 種は変わらず、開き直せる。
         let reopened = Keystore::open(&path, Network::Regtest, PASS).unwrap();
-        assert_eq!(reopened.seed().to_hex(), seed.to_hex());
+        assert_eq!(reopened.mnemonic().phrase(), mnemonic.phrase());
         assert_eq!(reopened.len(), 2);
         std::fs::remove_file(&path).unwrap();
     }
@@ -940,11 +1014,11 @@ mod tests {
         // 乱数源が壊れていれば、ここで気づく。
         let a = temp("rand-a");
         let b = temp("rand-b");
-        let (_, sa) = Keystore::create(&a, Network::Regtest, PASS).unwrap();
-        let (_, sb) = Keystore::create(&b, Network::Regtest, PASS).unwrap();
+        let (_, sa) = Keystore::create(&a, Network::Regtest, PASS, "").unwrap();
+        let (_, sb) = Keystore::create(&b, Network::Regtest, PASS, "").unwrap();
         assert_ne!(
-            sa.to_hex(),
-            sb.to_hex(),
+            sa.phrase(),
+            sb.phrase(),
             "違うウォレットが同じ種を持っている"
         );
         std::fs::remove_file(&a).unwrap();
@@ -954,16 +1028,19 @@ mod tests {
     #[test]
     fn the_seed_is_not_printed() {
         let path = temp("debug");
-        let (store, seed) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let (store, mnemonic) = Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
         let text = format!("{store:?}");
-        assert!(!text.contains(&seed.to_hex()), "種が漏れている: {text}");
+        assert!(
+            !text.contains(&*mnemonic.phrase()),
+            "控えの語が漏れている: {text}"
+        );
         std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
     fn the_key_for_a_lock_is_found() {
         let path = temp("lookup");
-        let (mut store, _) = Keystore::create(&path, Network::Regtest, PASS).unwrap();
+        let (mut store, _) = Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
         store.add_key().unwrap();
 
         for lock in store.locks().unwrap() {

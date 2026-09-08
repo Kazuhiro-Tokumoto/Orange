@@ -11,10 +11,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::all)]
 
+pub mod bip32;
+pub mod bip39;
 pub mod build;
 pub mod keystore;
 pub mod seed;
 
+pub use bip39::{Bip39Error, Mnemonic};
 pub use build::{build, sign, BuildError, Coin, Draft, Spend};
 pub use keystore::{Keystore, KeystoreError};
 pub use seed::{Seed, SeedError};

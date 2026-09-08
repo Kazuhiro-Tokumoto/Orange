@@ -174,6 +174,37 @@ mod tests {
     }
 
     #[test]
+    fn a_version_above_thirty_one_is_refused() {
+        // アドレスの版数は bech32m の 5 ビット領域に載るため 0〜31 しか
+        // 表現できない。32 以上は**いかなるアドレスからも到達できない**
+        // ので、anyone-can-spend として扱う面積をそこまで広げる理由が無い
+        // (SPEC §10.4)。
+        assert!(matches!(
+            Lock::new(32, vec![0xab; 20]),
+            Err(AddressError::VersionOutOfRange(32))
+        ));
+        assert!(matches!(
+            Lock::new(255, vec![0xab; 20]),
+            Err(AddressError::VersionOutOfRange(255))
+        ));
+
+        // 構築だけでなく**復号でも断る**。ここが通ると、ネットワークから
+        // 来たブロックの中に 32 以上の版数が入り込む。
+        let mut raw = vec![32u8, 20];
+        raw.extend_from_slice(&[0xab; 20]);
+        assert!(matches!(
+            Lock::decode(&raw),
+            Err(CodecError::ValueOutOfRange {
+                field: "lock.version",
+                value: 32,
+            })
+        ));
+
+        // 境界の内側は通る。
+        assert!(Lock::new(31, vec![0xab; 20]).is_ok());
+    }
+
+    #[test]
     fn unknown_version_is_decodable_but_not_known() {
         // 前方互換性: 版数を知らなくても読み飛ばせる (SPEC §6.3)。
         let lock = Lock::new(7, vec![0xab; 20]).unwrap();

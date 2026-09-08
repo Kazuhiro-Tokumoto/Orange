@@ -4,54 +4,46 @@
 //!
 //! 鍵を 1 個ずつ作って並べる方式では、**アドレスを増やすたびに控えが
 //! 古くなる**。増やしたあとに控えから復元すると、新しいアドレスの資金が
-//! 見えない。種から導けば、控えは種 1 つで済み、あとから何個増やしても
+//! 見えない。種から導けば、控えは 1 つで済み、あとから何個増やしても
 //! 同じ控えで復元できる。
 //!
-//! # 導出
+//! # 経路
+//!
+//! BIP44 に従う ([`docs/SPEC.md`] の §6.6)。
 //!
 //! ```text
-//! 鍵[i] = BLAKE3_derive_key("Orange wallet key v1", 種 ‖ i) を
-//!         secp256k1 の秘密鍵として解釈する
+//! m / 44' / <coin_type>' / 0' / 0 / <index>
 //! ```
 //!
-//! `i` は 8 バイトのリトルエンディアン。BLAKE3 の鍵導出用の様式を用いる
-//! ため、同じ種でも別の用途に使う値とは決して衝突しない。
-//!
-//! 導出した 32 バイトが secp256k1 の秘密鍵として無効になる確率は
-//! 2^-128 程度である。**それでも起こりうる以上、無視せず次の番号へ
-//! 進む。** 黙って失敗すると鍵の並びが食い違う。
-//!
-//! # これは暫定である
-//!
-//! 独自の導出であり、BIP32 / BIP39 とは互換でない。**BIP39 の 12 語
-//! ニーモニックと BIP32 / BIP44 の導出へ移すことは決定済みで、まだ
-//! 実装していない** ([`docs/SPEC.md`] の §6.6 と §16.3)。ここでは
-//! **控えが 1 度で済む**という肝心の性質だけを先に確保している。
-//!
-//! 移行すると同じ種から導かれる鍵が変わる。**テストネットを公開する前に
-//! 済ませること。** 公開後に変えれば、利用者の控えが指す資金が見えなく
-//! なる。
+//! 控えは BIP39 の 12 語であり、そこから BIP39 の 64 バイトの種を作り、
+//! BIP32 でこの経路をたどる。
 //!
 //! [`docs/SPEC.md`]: https://github.com/Kazuhiro-Tokumoto/Orange/blob/main/docs/SPEC.md
 
-use oag_primitives::SecretKey;
+use crate::bip32::{Bip32Error, ExtendedKey, HARDENED};
+use crate::bip39::Mnemonic;
+use oag_primitives::{Network, SecretKey};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// 種の長さ。
-pub const SEED_LEN: usize = 32;
+/// BIP39 の種の長さ。
+pub const SEED_LEN: usize = crate::bip39::SEED_LEN;
 
-/// 鍵導出の用途を表す文字列。
+/// BIP44 の用途番号。
+const PURPOSE: u32 = 44;
+
+/// テストネット用のコインタイプ番号。
 ///
-/// BLAKE3 の鍵導出はこの文字列で領域を分ける。**変えたら別の鍵になる。**
-const DERIVE_CONTEXT: &str = "Orange (OAG) wallet key derivation v1";
+/// SLIP-0044 が**全コインのテストネット用に予約している**番号である。
+/// 登録は要らない。regtest もこれを用いる。
+const COIN_TYPE_TESTNET: u32 = 1;
 
-/// 1 つの番号で試す上限。
-///
-/// 導出結果が secp256k1 の秘密鍵として無効だった場合に次を試す。
-/// 2^-128 の事象であり、ここに達することは実際にはない。
-const MAX_TWEAKS: u32 = 256;
+/// 使う口座番号。いまは 1 つだけ。
+const ACCOUNT: u32 = 0;
 
-/// ウォレットの種。
+/// 受取用の枝。1 はお釣り用だが、いまは使っていない。
+const CHANGE_RECEIVE: u32 = 0;
+
+/// ウォレットの種。BIP39 の 64 バイト。
 ///
 /// 落ちるときに中身を消す。`Debug` でも中身を出さない。
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
@@ -66,9 +58,14 @@ impl std::fmt::Debug for Seed {
 /// 種の扱いで起きる失敗。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SeedError {
-    /// 16 進として読めない、または長さが違う。
-    #[error("種は {SEED_LEN} バイト (16 進 {} 文字) であること", SEED_LEN * 2)]
-    Malformed,
+    /// mainnet のコインタイプ番号がまだ決まっていない。
+    #[error(
+        "mainnet のコインタイプ番号は SLIP-0044 に未登録であり、導出経路を確定できない。\n\
+         暫定の番号で運用すると、登録された番号へ移した時点で同じ控えから導かれる鍵が\n\
+         変わる。それは資金が消えたのと区別がつかない。\n\
+         testnet または regtest を使うこと (--network testnet)。"
+    )]
+    CoinTypeUnregistered,
     /// 鍵を導出できなかった。
     #[error("{index} 番目の鍵を導出できない")]
     Underivable {
@@ -77,39 +74,35 @@ pub enum SeedError {
     },
 }
 
+impl From<Bip32Error> for SeedError {
+    fn from(e: Bip32Error) -> SeedError {
+        match e {
+            Bip32Error::Underivable { index } => SeedError::Underivable { index },
+            // 種の長さは常に 64 バイトであり、ここへは来ない。
+            Bip32Error::BadSeedLength { .. } => SeedError::Underivable { index: 0 },
+        }
+    }
+}
+
+/// ネットワークのコインタイプ番号。
+///
+/// mainnet は未登録である。**暫定の番号を返さない。**
+pub fn coin_type(network: Network) -> Result<u32, SeedError> {
+    match network {
+        Network::Testnet | Network::Regtest => Ok(COIN_TYPE_TESTNET),
+        Network::Mainnet => Err(SeedError::CoinTypeUnregistered),
+    }
+}
+
 impl Seed {
-    /// 暗号学的乱数から新しい種を作る。
-    ///
-    /// 鍵と同じ乱数源から取る。**ここが読めれば、この種から導かれる
-    /// すべての鍵が読める。**
-    pub fn generate() -> Seed {
-        let mut bytes = [0u8; SEED_LEN];
-        oag_primitives::fill_random(&mut bytes);
-        Seed(bytes)
+    /// ニーモニックと追加パスフレーズから作る。
+    pub fn from_mnemonic(mnemonic: &Mnemonic, passphrase: &str) -> Seed {
+        Seed(*mnemonic.to_seed(passphrase))
     }
 
-    /// バイト列から作る。
+    /// バイト列から作る。保存したものを読み戻すために用いる。
     pub fn from_bytes(bytes: [u8; SEED_LEN]) -> Seed {
         Seed(bytes)
-    }
-
-    /// 16 進から作る。控えからの復元に用いる。
-    pub fn from_hex(text: &str) -> Result<Seed, SeedError> {
-        let text = text.trim();
-        if text.len() != SEED_LEN * 2 {
-            return Err(SeedError::Malformed);
-        }
-        let mut bytes = [0u8; SEED_LEN];
-        for (i, byte) in bytes.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16)
-                .map_err(|_| SeedError::Malformed)?;
-        }
-        Ok(Seed(bytes))
-    }
-
-    /// 16 進に直す。**控えを取る以外に使ってはならない。**
-    pub fn to_hex(&self) -> String {
-        self.0.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// バイト列。暗号化して保存するために用いる。
@@ -118,118 +111,135 @@ impl Seed {
     }
 
     /// `index` 番目の鍵を導出する。
-    pub fn derive(&self, index: u32) -> Result<SecretKey, SeedError> {
-        for tweak in 0..MAX_TWEAKS {
-            let mut material = Vec::with_capacity(SEED_LEN + 8);
-            material.extend_from_slice(&self.0);
-            material.extend_from_slice(&index.to_le_bytes());
-            material.extend_from_slice(&tweak.to_le_bytes());
-
-            let mut derived = blake3::derive_key(DERIVE_CONTEXT, &material);
-            material.zeroize();
-
-            // 導出結果が秘密鍵として無効なことがまれにありうる。
-            // 黙って飛ばさず、次の値を試す。
-            let key = SecretKey::from_bytes(derived);
-            // 鍵になったかどうかに関わらず、素材は手元に残さない。
-            derived.zeroize();
-            if let Ok(key) = key {
-                return Ok(key);
-            }
-        }
-        Err(SeedError::Underivable { index })
+    pub fn derive(&self, network: Network, index: u32) -> Result<SecretKey, SeedError> {
+        let path = [
+            PURPOSE | HARDENED,
+            coin_type(network)? | HARDENED,
+            ACCOUNT | HARDENED,
+            CHANGE_RECEIVE,
+            index,
+        ];
+        let node = ExtendedKey::master(&self.0)?.derive_path(&path)?;
+        Ok(node.secret_key().clone())
     }
 
     /// 先頭から `count` 個の鍵を導出する。
-    pub fn derive_many(&self, count: u32) -> Result<Vec<SecretKey>, SeedError> {
-        (0..count).map(|i| self.derive(i)).collect()
+    pub fn derive_many(&self, network: Network, count: u32) -> Result<Vec<SecretKey>, SeedError> {
+        // 経路の途中までは共通である。1 個ずつ主鍵から辿ると、鍵の数だけ
+        // HMAC を繰り返すことになる。
+        let branch = [
+            PURPOSE | HARDENED,
+            coin_type(network)? | HARDENED,
+            ACCOUNT | HARDENED,
+            CHANGE_RECEIVE,
+        ];
+        let node = ExtendedKey::master(&self.0)?.derive_path(&branch)?;
+        (0..count)
+            .map(|i| Ok(node.derive_child(i)?.secret_key().clone()))
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bip39::Mnemonic;
 
     fn seed() -> Seed {
-        Seed::from_bytes([7u8; SEED_LEN])
+        let mnemonic = Mnemonic::from_entropy(&[7u8; 16]).unwrap();
+        Seed::from_mnemonic(&mnemonic, "")
+    }
+
+    #[test]
+    fn mainnet_has_no_coin_type_yet() {
+        // **暫定の番号を返してはならない。** 返してしまうと、登録された
+        // 番号へ移した時点で同じ控えから別の鍵が出る。
+        assert_eq!(
+            coin_type(Network::Mainnet).unwrap_err(),
+            SeedError::CoinTypeUnregistered
+        );
+        assert_eq!(
+            seed().derive(Network::Mainnet, 0).unwrap_err(),
+            SeedError::CoinTypeUnregistered
+        );
+        assert_eq!(
+            seed().derive_many(Network::Mainnet, 3).unwrap_err(),
+            SeedError::CoinTypeUnregistered
+        );
+    }
+
+    #[test]
+    fn the_test_networks_use_the_reserved_number() {
+        // SLIP-0044 が全コインのテストネット用に 1 を予約している。
+        assert_eq!(coin_type(Network::Testnet).unwrap(), COIN_TYPE_TESTNET);
+        assert_eq!(coin_type(Network::Regtest).unwrap(), COIN_TYPE_TESTNET);
     }
 
     #[test]
     fn the_same_seed_derives_the_same_keys() {
         // ここが揺らぐと、控えから復元しても資金が見えない。
-        let a = seed().derive_many(5).unwrap();
-        let b = seed().derive_many(5).unwrap();
+        let a = seed().derive_many(Network::Testnet, 5).unwrap();
+        let b = seed().derive_many(Network::Testnet, 5).unwrap();
         for (x, y) in a.iter().zip(&b) {
             assert_eq!(x.to_bytes(), y.to_bytes());
         }
     }
 
     #[test]
+    fn deriving_many_agrees_with_deriving_one() {
+        // derive_many は経路の途中までを使い回す近道である。**近道が
+        // 本道と食い違えば、アドレスの一覧と実際の鍵がずれる。**
+        let seed = seed();
+        let many = seed.derive_many(Network::Testnet, 4).unwrap();
+        for (i, key) in many.iter().enumerate() {
+            let one = seed.derive(Network::Testnet, i as u32).unwrap();
+            assert_eq!(key.to_bytes(), one.to_bytes(), "{i} 番目");
+        }
+    }
+
+    #[test]
+    fn the_path_is_the_one_bip44_defines() {
+        // 経路を手で組み立てたものと突き合わせる。定数を書き換えたら
+        // ここで落ちる。
+        let seed = seed();
+        let expected = ExtendedKey::master(seed.as_bytes())
+            .unwrap()
+            .derive_path(&[44 | HARDENED, 1 | HARDENED, HARDENED, 0, 3])
+            .unwrap();
+        assert_eq!(
+            seed.derive(Network::Testnet, 3).unwrap().to_bytes(),
+            expected.secret_key().to_bytes()
+        );
+    }
+
+    #[test]
     fn different_indices_give_different_keys() {
         let seed = seed();
-        let keys: Vec<[u8; 32]> = (0..16)
-            .map(|i| seed.derive(i).unwrap().to_bytes())
+        let keys: Vec<[u8; 32]> = (0..8)
+            .map(|i| seed.derive(Network::Testnet, i).unwrap().to_bytes())
             .collect();
         for (i, a) in keys.iter().enumerate() {
             for (j, b) in keys.iter().enumerate() {
                 if i != j {
-                    assert_ne!(a, b, "{i} 番目と {j} 番目が同じ鍵");
+                    assert_ne!(a, b, "{i} 番と {j} 番が同じ");
                 }
             }
         }
     }
 
     #[test]
-    fn different_seeds_give_different_keys() {
-        let a = Seed::from_bytes([1u8; SEED_LEN]).derive(0).unwrap();
-        let b = Seed::from_bytes([2u8; SEED_LEN]).derive(0).unwrap();
-        assert_ne!(a.to_bytes(), b.to_bytes());
-    }
-
-    #[test]
-    fn a_single_bit_change_in_the_seed_changes_the_key() {
-        let mut bytes = [0u8; SEED_LEN];
-        let a = Seed::from_bytes(bytes).derive(0).unwrap();
-        bytes[SEED_LEN - 1] = 1;
-        let b = Seed::from_bytes(bytes).derive(0).unwrap();
-        assert_ne!(a.to_bytes(), b.to_bytes());
-    }
-
-    #[test]
-    fn the_derivation_is_fixed() {
-        // 変えたら、既存の控えから復元できなくなる。値を固定しておく。
-        let key = Seed::from_bytes([0u8; SEED_LEN]).derive(0).unwrap();
-        let hex: String = key.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(
-            hex, "5a3262aa98305ef72bc477e6f34f7e841da89fab492d034f026964e7a90c0d20",
-            "導出が変わっている。既存の控えから復元できなくなる"
+    fn the_bip39_passphrase_changes_every_key() {
+        let mnemonic = Mnemonic::from_entropy(&[7u8; 16]).unwrap();
+        let plain = Seed::from_mnemonic(&mnemonic, "");
+        let salted = Seed::from_mnemonic(&mnemonic, "x");
+        assert_ne!(
+            plain.derive(Network::Testnet, 0).unwrap().to_bytes(),
+            salted.derive(Network::Testnet, 0).unwrap().to_bytes()
         );
     }
 
     #[test]
-    fn hex_round_trips() {
-        let original = seed();
-        let restored = Seed::from_hex(&original.to_hex()).unwrap();
-        assert_eq!(restored.as_bytes(), original.as_bytes());
-    }
-
-    #[test]
-    fn short_or_invalid_hex_is_refused() {
-        // 黙って受け入れると、別の種で復元したことになる。
-        for bad in [
-            "",
-            "00",
-            "zz".repeat(32).as_str(),
-            &"0".repeat(63),
-            &"0".repeat(65),
-        ] {
-            assert!(Seed::from_hex(bad).is_err(), "{bad:?} が通った");
-        }
-    }
-
-    #[test]
     fn the_seed_is_not_printed() {
-        let text = format!("{:?}", seed());
-        assert!(!text.contains("07"), "種が漏れている: {text}");
+        assert_eq!(format!("{:?}", seed()), "Seed(<伏せ字>)");
     }
 }
