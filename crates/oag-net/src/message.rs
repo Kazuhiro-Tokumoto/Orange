@@ -1,6 +1,6 @@
 //! P2P メッセージ。
 //!
-//! 参照: `docs/SPEC.md` §14.4
+//! 参照: `docs/SPEC.md` §14.5
 
 use oag_consensus::codec::{write_var_bytes, write_varint, CodecError, Decode, Encode, Reader};
 use oag_consensus::{Block, BlockHeader, Transaction};

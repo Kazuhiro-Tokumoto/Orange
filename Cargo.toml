@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/oag-primitives", "crates/oag-consensus", "crates/oag-pow", "crates/oag-chain", "crates/oag-store", "crates/oag-mempool", "crates/oag-net", "crates/oag-miner"]
+members = ["crates/oag-primitives", "crates/oag-consensus", "crates/oag-pow", "crates/oag-chain", "crates/oag-store", "crates/oag-mempool", "crates/oag-net", "crates/oag-miner", "crates/oag-node"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,7 +16,11 @@ oag-consensus = { path = "crates/oag-consensus", version = "0.1.0" }
 oag-pow = { path = "crates/oag-pow", version = "0.1.0" }
 oag-chain = { path = "crates/oag-chain", version = "0.1.0" }
 oag-mempool = { path = "crates/oag-mempool", version = "0.1.0" }
+oag-miner = { path = "crates/oag-miner", version = "0.1.0" }
+oag-net = { path = "crates/oag-net", version = "0.1.0" }
+oag-store = { path = "crates/oag-store", version = "0.1.0" }
 bech32 = "0.12"
+clap = { version = "4", features = ["derive"] }
 blake3 = "1"
 hex = "0.4"
 secp256k1 = "0.33"

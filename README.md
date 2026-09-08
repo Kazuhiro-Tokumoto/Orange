@@ -2,7 +2,8 @@
 
 RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロックチェーン。
 
-> **状態: 開発初期。** 動作するチェーンはまだ存在しません。
+> **状態: 開発初期。** regtest では実際にブロックが積み上がりますが、
+> mainnet と testnet のジェネシスは未確定で、起動できません。
 > 通貨としての価値はなく、テストネットも稼働していません。
 
 | 項目 | 内容 |
@@ -48,7 +49,8 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 | 7c | Compact Blocks | 完了 |
 | 7d | TCP トランスポート | 完了 |
 | 8 | マイナー | 完了 |
-| 9 | ノード (oag-node) — 全部を繋いだデーモン | 未着手 |
+| 9a | ノード (oag-node) — 記憶域・チェーン・採掘・CLI | 完了 |
+| 9b | ノードへの P2P 組み込み (2 台での同期) | 未着手 |
 | 10 | RPC、CLI ウォレット | 未着手 |
 | 11 | ジェネシス確定 → テストネット公開 | 未着手 |
 
@@ -66,7 +68,8 @@ crates/
 ├── oag-mempool/      mempool・中継ポリシー
 ├── oag-net/          P2P プロトコル (枠組み・メッセージ・ハンドシェイク・
 │                    ロケータ・取り寄せの割り振り・Compact Blocks・TCP)
-└── oag-miner/        ブロックテンプレートの組み立てと nonce の探索
+├── oag-miner/        ブロックテンプレートの組み立てと nonce の探索
+└── oag-node/         実行ファイル (oag-node) — 全部を繋いだノード
 ```
 
 `oag-pow` の RandomX は feature `randomx` の背後にある。C++ 実装のビルドに
@@ -82,6 +85,33 @@ cargo test -p oag-pow --features randomx
 ```sh
 cargo test -p oag-net --features tokio
 ```
+
+## 動かす
+
+現在起動できるのは **regtest のみ**です (mainnet と testnet の
+ジェネシスが未確定のため)。regtest の難易度は 1 なので、1 台ですぐに
+ブロックが積み上がります。
+
+```sh
+cargo build --release -p oag-node
+
+# 受取先アドレスを作る
+./target/release/oag-node keygen --network regtest --out regtest.key
+
+# 5 ブロック掘る (--blocks を省くと止まらない)
+./target/release/oag-node run --network regtest --datadir ./oag-data \
+    --mine --payout <上で出たアドレス> --blocks 5
+
+# 今の状態を見る
+./target/release/oag-node info --network regtest --datadir ./oag-data
+
+# block/<高さ>/<ブロックハッシュ>.dat の形で書き出す
+./target/release/oag-node export-blocks --network regtest \
+    --datadir ./oag-data --out ./block
+```
+
+`oag-node` は RandomX を必ず使うため、ビルドに cmake と C++ コンパイラが
+必要です。
 
 ## ビルド
 

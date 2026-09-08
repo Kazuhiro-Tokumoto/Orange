@@ -14,7 +14,7 @@
 //! ため、新しい側を細かく、古い側を粗くする。**高さ 1 億のチェーンでも
 //! 64 個以内に収まる**ので、`getheaders` が肥大しない。
 //!
-//! 参照: `docs/SPEC.md` §14.4
+//! 参照: `docs/SPEC.md` §14.5
 
 use crate::message::MAX_LOCATOR;
 use oag_primitives::Hash;
