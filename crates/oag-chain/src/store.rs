@@ -72,6 +72,11 @@ pub trait ChainStore {
 /// メモリ上の記憶域。
 ///
 /// 試験と、永続化を必要としない用途に用いる。プロセスが終われば消える。
+///
+/// **大きなチェーンには向かない。** [`utxo_view`](MemoryStore::utxo_view)
+/// が UTXO セット全体を複製するため、1 ブロック接続するたびに
+/// UTXO 件数に比例した費用がかかる。永続化実装は読み取りトランザクション
+/// を返すのでこの費用を持たない。
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     inner: std::cell::RefCell<MemoryInner>,

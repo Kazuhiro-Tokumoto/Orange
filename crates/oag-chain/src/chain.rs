@@ -27,7 +27,7 @@
 //! たどる操作を高速にするための写しである。**先端や高さを二重に持つことは
 //! しない**。二重に持つと、誤りの経路で食い違いうる。
 
-use crate::index::{BlockIndexEntry, BlockStatus};
+use crate::index::{BlockIndex, BlockIndexEntry, BlockStatus};
 use crate::store::ChainStore;
 use oag_consensus::params;
 use oag_consensus::validate::{
@@ -37,7 +37,6 @@ use oag_consensus::validate::{
 use oag_consensus::{Block, BlockHeader};
 use oag_pow::lwma::{self, LwmaError};
 use oag_primitives::Hash;
-use std::collections::HashMap;
 
 /// 難易度調整を行うか。
 ///
@@ -152,7 +151,7 @@ struct ConnectFailure {
 pub struct Chain<S: ChainStore> {
     store: S,
     /// ブロックインデックスの写し。祖先をたどる操作を高速にするために持つ。
-    index: HashMap<Hash, BlockIndexEntry>,
+    index: BlockIndex,
     genesis_difficulty: u64,
     retarget: Retarget,
 }
@@ -177,7 +176,7 @@ impl<S: ChainStore> Chain<S> {
 
         let mut chain = Chain {
             store,
-            index: HashMap::new(),
+            index: BlockIndex::new(),
             genesis_difficulty,
             retarget,
         };
@@ -198,11 +197,11 @@ impl<S: ChainStore> Chain<S> {
                     .store
                     .connect_block(&genesis)
                     .map_err(Self::store_err)?;
-                chain.index.insert(genesis_hash, entry);
+                chain.index.insert(entry);
             }
             Some(_) => {
                 for entry in chain.store.all_index_entries().map_err(Self::store_err)? {
-                    chain.index.insert(entry.hash, entry);
+                    chain.index.insert(entry);
                 }
                 let stored_genesis = chain
                     .store
@@ -252,7 +251,7 @@ impl<S: ChainStore> Chain<S> {
 
     /// このハッシュのブロックを知っているか。
     pub fn contains(&self, hash: &Hash) -> bool {
-        self.index.contains_key(hash)
+        self.index.contains(hash)
     }
 
     /// インデックスの 1 件を引く。
@@ -366,7 +365,7 @@ impl<S: ChainStore> Chain<S> {
         self.store
             .put_block(&block, &entry)
             .map_err(Self::store_err)?;
-        self.index.insert(hash, entry);
+        self.index.insert(entry);
 
         self.activate_best_chain(pow, now)
     }
@@ -398,7 +397,7 @@ impl<S: ChainStore> Chain<S> {
         self.store
             .put_index_entry(&entry)
             .map_err(Self::store_err)?;
-        self.index.insert(hash, entry);
+        self.index.insert(entry);
         Ok(HeaderOutcome::New)
     }
 
@@ -475,19 +474,18 @@ impl<S: ChainStore> Chain<S> {
 
             // 作業量の多い順に、経路がそろっているものを探す。
             // 同点なら現先端を保つ。最初に受け取ったチェーンを優先する。
-            let mut candidates: Vec<(u128, Hash)> = self
+            //
+            // **走るのは現先端を上回る候補だけである。** 先端を 1 個
+            // 伸ばしただけなら 1 件で止まる。全件を走査すると、ブロック
+            // 1 個あたり O(n)、初期同期の全体では O(n²) になる。
+            let candidates: Vec<Hash> = self
                 .index
-                .values()
-                .filter(|e| e.is_candidate() && e.cumulative_work > tip_work)
-                .map(|e| (e.cumulative_work, e.hash))
+                .candidates_above(tip_work)
+                .map(|e| e.hash)
                 .collect();
-            candidates.sort_by(|a, b| {
-                b.0.cmp(&a.0)
-                    .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
-            });
 
             let mut best = None;
-            for (_, hash) in candidates {
+            for hash in candidates {
                 if self.path_has_all_bodies(&hash)? {
                     best = Some(hash);
                     break;
@@ -637,8 +635,7 @@ impl<S: ChainStore> Chain<S> {
 
         self.store.connect_block(&block).map_err(Self::store_err)?;
 
-        if let Some(entry) = self.index.get_mut(&hash) {
-            entry.status = BlockStatus::FullyValid;
+        if let Some(entry) = self.index.set_status(&hash, BlockStatus::FullyValid) {
             let snapshot = entry.clone();
             self.store
                 .put_index_entry(&snapshot)
@@ -654,13 +651,7 @@ impl<S: ChainStore> Chain<S> {
     /// headers-first では、ヘッダの先端が本体の先端よりずっと先を行く。
     pub fn best_header(&self) -> Result<BlockIndexEntry, ChainError> {
         self.index
-            .values()
-            .filter(|e| e.is_valid_header())
-            .max_by(|a, b| {
-                a.cumulative_work
-                    .cmp(&b.cumulative_work)
-                    .then_with(|| b.hash.as_bytes().cmp(a.hash.as_bytes()))
-            })
+            .best_header()
             .cloned()
             .ok_or(ChainError::BadGenesis("インデックスが空である"))
     }
@@ -759,20 +750,18 @@ impl<S: ChainStore> Chain<S> {
         let mut frontier = vec![*hash];
         let mut changed = Vec::new();
         while let Some(current) = frontier.pop() {
-            if let Some(entry) = self.index.get_mut(&current) {
-                if entry.status == BlockStatus::Invalid {
-                    continue;
-                }
-                entry.status = BlockStatus::Invalid;
+            match self.index.get(&current) {
+                // すでに印が付いている。子孫にも付いているので、たどらない。
+                Some(entry) if entry.status == BlockStatus::Invalid => continue,
+                Some(_) => {}
+                None => continue,
+            }
+            if let Some(entry) = self.index.set_status(&current, BlockStatus::Invalid) {
                 changed.push(entry.clone());
             }
-            let children: Vec<Hash> = self
-                .index
-                .values()
-                .filter(|e| e.prev_hash() == current && e.height() != 0)
-                .map(|e| e.hash)
-                .collect();
-            frontier.extend(children);
+            // 子は親から引く。全件を走査すると、印を広げるだけで
+            // インデックス全体を何度も舐めることになる。
+            frontier.extend_from_slice(self.index.children_of(&current));
         }
         for entry in &changed {
             self.store.put_index_entry(entry).map_err(Self::store_err)?;

@@ -20,5 +20,5 @@ pub mod store;
 
 pub use chain::{AcceptOutcome, Chain, ChainError, Reorg};
 pub use genesis::GenesisSpec;
-pub use index::{BlockIndexEntry, BlockStatus};
+pub use index::{BlockIndex, BlockIndexEntry, BlockStatus};
 pub use store::{ChainStore, MemoryStore};
