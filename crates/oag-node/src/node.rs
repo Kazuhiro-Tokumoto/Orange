@@ -14,7 +14,7 @@
 //! なり、中途半端な状態は残らない。信号を捕まえる仕掛けを置いていないのは
 //! そのためである。
 
-use oag_chain::chain::{AcceptOutcome, Chain, ChainError, HeaderOutcome};
+use oag_chain::chain::{AcceptOutcome, Chain, ChainError, HeaderOutcome, Retarget};
 use oag_consensus::lock::Lock;
 use oag_consensus::params;
 use oag_consensus::{Block, BlockHeader};
@@ -128,7 +128,12 @@ impl Node {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| StoreError::Io(format!("{} を作れない: {e}", data_dir.display())))?;
         let store = Store::open(data_dir.join("chain.redb"))?;
-        let chain = Chain::open(store, genesis, network.genesis_difficulty())?;
+        let retarget = if network.retargets() {
+            Retarget::Enabled
+        } else {
+            Retarget::Disabled
+        };
+        let chain = Chain::open(store, genesis, network.genesis_difficulty(), retarget)?;
         Ok(Node {
             chain,
             mempool: Mempool::new(),
@@ -140,6 +145,16 @@ impl Node {
     /// チェーン。
     pub fn chain(&self) -> &Chain<Store> {
         &self.chain
+    }
+
+    /// mempool。
+    pub fn mempool(&self) -> &Mempool {
+        &self.mempool
+    }
+
+    /// mempool (書き換え可能)。
+    pub fn mempool_mut(&mut self) -> &mut Mempool {
+        &mut self.mempool
     }
 
     /// 現在の様子。

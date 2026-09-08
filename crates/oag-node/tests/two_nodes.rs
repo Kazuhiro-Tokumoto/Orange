@@ -54,9 +54,9 @@ fn payout() -> Lock {
 }
 
 /// ノードを 1 台起こす。
-fn start(tag: &str, mine_limit: Option<u64>) -> (TempDir, NodeService) {
+fn start(tag: &str) -> (TempDir, NodeService) {
     let dir = TempDir::new(tag);
-    let service = NodeService::start(NETWORK, &dir.0, mine_limit).expect("ノードを起こせる");
+    let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
     (dir, service)
 }
 
@@ -113,14 +113,14 @@ fn a_new_node_catches_up_with_an_existing_chain() {
         .build()
         .unwrap();
 
-    let (_dir_a, service_a) = start("a-src", Some(5));
-    let (_dir_b, service_b) = start("a-dst", None);
+    let (_dir_a, service_a) = start("a-src");
+    let (_dir_b, service_b) = start("a-dst");
     let a = service_a.handle();
     let b = service_b.handle();
 
     runtime.block_on(async {
         // A に 5 ブロック積む。この時点で B は繋がっていない。
-        a.start_mining(payout()).await.unwrap();
+        a.start_mining(payout(), Some(5)).await.unwrap();
         wait_for_mining(&a, 5).await;
         assert_eq!(b.status().await.unwrap().height, 0, "B はまだ空のはず");
 
@@ -144,8 +144,8 @@ fn a_block_mined_while_connected_reaches_the_peer() {
         .build()
         .unwrap();
 
-    let (_dir_a, service_a) = start("b-src", Some(3));
-    let (_dir_b, service_b) = start("b-dst", None);
+    let (_dir_a, service_a) = start("b-src");
+    let (_dir_b, service_b) = start("b-dst");
     let a = service_a.handle();
     let b = service_b.handle();
 
@@ -159,7 +159,7 @@ fn a_block_mined_while_connected_reaches_the_peer() {
         assert_eq!(a.status().await.unwrap().height, 0);
         assert_eq!(b.status().await.unwrap().height, 0);
 
-        a.start_mining(payout()).await.unwrap();
+        a.start_mining(payout(), Some(3)).await.unwrap();
         wait_for_mining(&a, 3).await;
 
         wait_for_height(&b, 3, "中継").await;
@@ -179,13 +179,13 @@ fn a_synced_node_rebuilds_the_utxo_set_itself() {
         .build()
         .unwrap();
 
-    let (_dir_a, service_a) = start("c-src", Some(4));
-    let (_dir_b, service_b) = start("c-dst", None);
+    let (_dir_a, service_a) = start("c-src");
+    let (_dir_b, service_b) = start("c-dst");
     let a = service_a.handle();
     let b = service_b.handle();
 
     runtime.block_on(async {
-        a.start_mining(payout()).await.unwrap();
+        a.start_mining(payout(), Some(4)).await.unwrap();
         wait_for_mining(&a, 4).await;
 
         let addr = listen(a.clone()).await;

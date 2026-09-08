@@ -2,6 +2,7 @@
 
 use oag_chain::index::BlockIndexEntry;
 use oag_consensus::codec::{CodecError, Decode, Encode};
+use oag_consensus::lock::Lock;
 use oag_consensus::tx::OutPoint;
 use oag_consensus::utxo::{
     apply_block_to, undo_block_from, UndoBlock, UtxoEntry, UtxoError, UtxoView, UtxoWrite,
@@ -222,6 +223,46 @@ impl Store {
         let txn = self.db.begin_read().map_err(db_err)?;
         let table = txn.open_table(UTXO).map_err(db_err)?;
         table.len().map_err(db_err)
+    }
+
+    /// 支払い条件が一致する UTXO を集める。
+    ///
+    /// # なぜ全件走査なのか
+    ///
+    /// 支払い条件から UTXO を引く索引を持っていないためである
+    /// (`docs/SPEC.md` の未決事項)。ウォレットが自分の残高を知るには、
+    /// **UTXO セットを丸ごと見て自分のものを拾う**しかない。
+    /// bitcoind の `scantxoutset` と同じ方式である。
+    ///
+    /// 索引を持たない代わりに、記憶域はコンセンサスが必要とするものだけで
+    /// 済んでいる。走査は UTXO セットの大きさに比例し、その大きさは
+    /// チェーンの長さではなく**使われていない出力の数**で決まる。
+    ///
+    /// `max` 件見つけたところで打ち切る。
+    pub fn scan_utxos(
+        &self,
+        wanted: &[Lock],
+        max: usize,
+    ) -> Result<Vec<(OutPoint, UtxoEntry)>, StoreError> {
+        if wanted.is_empty() || max == 0 {
+            return Ok(Vec::new());
+        }
+        let txn = self.db.begin_read().map_err(db_err)?;
+        let table = txn.open_table(UTXO).map_err(db_err)?;
+
+        let mut found = Vec::new();
+        for row in table.iter().map_err(db_err)? {
+            let (key, value) = row.map_err(db_err)?;
+            let entry = UtxoEntry::decode(value.value())?;
+            if !wanted.contains(&entry.output.lock) {
+                continue;
+            }
+            found.push((OutPoint::decode(key.value())?, entry));
+            if found.len() >= max {
+                break;
+            }
+        }
+        Ok(found)
     }
 
     /// ブロック本体とインデックスを記録する。アクティブチェーンには繋がない。
@@ -568,6 +609,89 @@ mod tests {
                 Some(block.header.hash())
             );
         }
+    }
+
+    #[test]
+    fn scanning_finds_only_the_requested_locks() {
+        let tmp = TempDb::new();
+        let store = tmp.open();
+
+        // 狙いの支払い条件を 1 つ決め、高さ 1 と 3 でそこへ払う。
+        let mine = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
+        let mut prev = Hash::ZERO;
+        for height in 0..5u64 {
+            let mut cb = coinbase(height, height);
+            if height == 1 || height == 3 {
+                cb.outputs[0].lock = mine.clone();
+            }
+            let merkle_root = merkle::merkle_root(&[cb.txid()]).unwrap();
+            let block = Block {
+                header: BlockHeader {
+                    version: 0,
+                    prev_hash: prev,
+                    merkle_root,
+                    timestamp: 1_800_000_000 + height as i64 * 60,
+                    difficulty: 1,
+                    height,
+                    nonce: height,
+                },
+                transactions: vec![cb],
+            };
+            prev = block.header.hash();
+            store
+                .put_block(&block, &entry_for(&block, u128::from(height) + 1))
+                .unwrap();
+            store.connect_block(&block).unwrap();
+        }
+        assert_eq!(store.utxo_count().unwrap(), 5);
+
+        let found = store.scan_utxos(std::slice::from_ref(&mine), 100).unwrap();
+        assert_eq!(found.len(), 2, "自分の分だけ拾うべき");
+        let mut heights: Vec<u64> = found.iter().map(|(_, e)| e.height).collect();
+        heights.sort_unstable();
+        assert_eq!(heights, vec![1, 3]);
+        for (_, entry) in &found {
+            assert_eq!(entry.output.lock, mine);
+            assert!(entry.is_coinbase);
+        }
+
+        // 上限は効く。
+        assert_eq!(
+            store
+                .scan_utxos(std::slice::from_ref(&mine), 1)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store.scan_utxos(&[mine], 0).unwrap().is_empty());
+
+        // 知らない支払い条件では何も見つからない。
+        let other = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
+        assert!(store.scan_utxos(&[other], 100).unwrap().is_empty());
+        assert!(store.scan_utxos(&[], 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_spent_output_is_no_longer_found() {
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let blocks = build(&store, 3);
+        let lock = blocks[1].transactions[0].outputs[0].lock.clone();
+        assert_eq!(
+            store
+                .scan_utxos(std::slice::from_ref(&lock), 100)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // 高さ 1 と 2 を巻き戻すと、高さ 1 の出力は無くなる。
+        store.disconnect_tip().unwrap();
+        store.disconnect_tip().unwrap();
+        assert!(
+            store.scan_utxos(&[lock], 100).unwrap().is_empty(),
+            "巻き戻したのに見つかる"
+        );
     }
 
     #[test]

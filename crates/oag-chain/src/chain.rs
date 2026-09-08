@@ -39,6 +39,23 @@ use oag_pow::lwma::{self, LwmaError};
 use oag_primitives::Hash;
 use std::collections::HashMap;
 
+/// 難易度調整を行うか。
+///
+/// regtest では**行わない**。ブロックを望むだけ速く積めるようにするため
+/// である。行うと、速く積むほど難易度が上がり、コインベースの成熟
+/// ([`params::COINBASE_MATURITY`] ブロック) を待つまでに現実的でない時間が
+/// かかる。Bitcoin の regtest も同じ扱いである (SPEC §12.4)。
+///
+/// **mainnet と testnet では必ず行う。** 行わなければハッシュレートの
+/// 変動にまったく追随できない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retarget {
+    /// 難易度を調整する。mainnet と testnet。
+    Enabled,
+    /// 難易度をジェネシスの値に固定する。regtest のみ。
+    Disabled,
+}
+
 /// ヘッダを受け取った結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderOutcome {
@@ -137,6 +154,7 @@ pub struct Chain<S: ChainStore> {
     /// ブロックインデックスの写し。祖先をたどる操作を高速にするために持つ。
     index: HashMap<Hash, BlockIndexEntry>,
     genesis_difficulty: u64,
+    retarget: Retarget,
 }
 
 impl<S: ChainStore> Chain<S> {
@@ -148,7 +166,12 @@ impl<S: ChainStore> Chain<S> {
     ///
     /// 記憶域がすでに使われている場合は、そのジェネシスが指定と一致することを
     /// 確認したうえで、インデックスを読み込む。
-    pub fn open(store: S, genesis: Block, genesis_difficulty: u64) -> Result<Chain<S>, ChainError> {
+    pub fn open(
+        store: S,
+        genesis: Block,
+        genesis_difficulty: u64,
+        retarget: Retarget,
+    ) -> Result<Chain<S>, ChainError> {
         check_genesis(&genesis, genesis_difficulty)?;
         let genesis_hash = genesis.header.hash();
 
@@ -156,6 +179,7 @@ impl<S: ChainStore> Chain<S> {
             store,
             index: HashMap::new(),
             genesis_difficulty,
+            retarget,
         };
 
         match chain.store.tip().map_err(Self::store_err)? {
@@ -284,6 +308,11 @@ impl<S: ChainStore> Chain<S> {
             .get(parent)
             .ok_or(ChainError::UnknownParent(*parent))?;
         let height = parent_entry.height() + 1;
+
+        // regtest は調整しない (SPEC §12.4)。
+        if self.retarget == Retarget::Disabled {
+            return Ok(self.genesis_difficulty);
+        }
 
         // 履歴が窓幅に満たない間はジェネシス難易度を用いる (SPEC §12.3)。
         if height < lwma::WINDOW as u64 + 1 {

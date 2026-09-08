@@ -25,6 +25,8 @@ oag-miner = { workspace = true, features = ["randomx"] }
 oag-pow = { workspace = true, features = ["randomx"] }
 oag-net = { workspace = true, features = ["tokio"] }
 oag-primitives.workspace = true
+oag-rpc.workspace = true
 oag-store.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }

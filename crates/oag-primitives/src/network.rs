@@ -78,6 +78,16 @@ impl Network {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
     }
 
+    /// 難易度を調整するか。
+    ///
+    /// **regtest だけ調整しない。** 調整すると、ブロックを速く積むほど
+    /// 難易度が上がり、コインベースの成熟を待つだけで現実的でない時間が
+    /// かかる。試験用のネットワークとして使い物にならなくなる。
+    /// Bitcoin の regtest も同じ扱いである (SPEC §12.4)。
+    pub const fn retargets(self) -> bool {
+        !matches!(self, Network::Regtest)
+    }
+
     /// RPC の既定バインドアドレス。**ループバックのみ**。
     ///
     /// RPC を外部公開した結果として資金を喪失する事故は複数のプロジェクトで
@@ -200,6 +210,15 @@ mod tests {
                 "P2P は外部接続を受け入れる"
             );
         }
+    }
+
+    #[test]
+    fn only_regtest_skips_the_difficulty_adjustment() {
+        // 本番のチェーンで調整を止めたら、ハッシュレートの変動に
+        // まったく追随できなくなる。
+        assert!(Network::Mainnet.retargets());
+        assert!(Network::Testnet.retargets());
+        assert!(!Network::Regtest.retargets());
     }
 
     #[test]

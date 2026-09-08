@@ -173,7 +173,7 @@ impl Transaction {
     /// BIP340 署名は固定長で厳密な符号化を持ち、本チェーンはスクリプトを
     /// 持たないため、**第三者が txid を書き換えることはできない**。
     /// この性質により SegWit 相当の機構なしに事前署名取引が成立する
-    /// (SPEC §5.3, §15.2)。
+    /// (SPEC §7.3, §17.2)。
     pub fn txid(&self) -> Hash {
         hash::txid(&self.encode())
     }

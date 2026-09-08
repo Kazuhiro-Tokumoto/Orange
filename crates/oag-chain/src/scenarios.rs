@@ -5,7 +5,7 @@
 //! メモリ実装と永続化実装の双方に対して同じものを走らせる。
 //!
 
-use crate::chain::{AcceptOutcome, Chain, ChainError, HeaderOutcome};
+use crate::chain::{AcceptOutcome, Chain, ChainError, HeaderOutcome, Retarget};
 use crate::genesis::GenesisSpec;
 use crate::index::BlockStatus;
 use crate::store::ChainStore;
@@ -29,8 +29,12 @@ pub fn genesis() -> Block {
 }
 
 /// 記憶域からチェーンを起こす。
+///
+/// 難易度調整は**有効**にする。regtest のジェネシスを使っているが、
+/// 止めてしまうと調整まわりを試験できなくなる。止めた場合の振る舞いは
+/// [`the_difficulty_never_moves_without_retargeting`] で別に確かめる。
 pub fn open<S: ChainStore>(store: S) -> Chain<S> {
-    Chain::open(store, genesis(), DIFFICULTY).expect("ジェネシスは有効")
+    Chain::open(store, genesis(), DIFFICULTY, Retarget::Enabled).expect("ジェネシスは有効")
 }
 
 /// `parent` の上に載る有効なブロックを組み立てる。
@@ -659,4 +663,54 @@ pub fn a_header_for_an_invalid_block_is_refused<S: ChainStore>(store: S) {
         Err(ChainError::InvalidAncestor(_))
     ));
     assert_eq!(chain.entry(&bad_hash).unwrap().status, BlockStatus::Invalid);
+}
+
+/// 調整を止めたチェーンでは、いくら速く積んでも難易度が動かないこと。
+///
+/// regtest はこの設定で動く。止めていないと、ブロックを速く積むほど
+/// 難易度が上がり、コインベースの成熟を待つだけで現実的でない時間が
+/// かかる。試験用のネットワークとして使い物にならない。
+pub fn the_difficulty_never_moves_without_retargeting<S: ChainStore>(store: S) {
+    let mut chain =
+        Chain::open(store, genesis(), DIFFICULTY, Retarget::Disabled).expect("ジェネシスは有効");
+    let tip = chain.tip().unwrap().hash;
+
+    // 窓幅を大きく超えて積む。調整が効いていれば必ず動く長さである。
+    let window = oag_pow::lwma::WINDOW;
+    let hashes = extend(&mut chain, tip, window + 30, 1);
+    assert_eq!(chain.height().unwrap(), window as u64 + 30);
+
+    for hash in &hashes {
+        assert_eq!(
+            chain.entry(hash).unwrap().header.difficulty,
+            DIFFICULTY,
+            "難易度が動いている"
+        );
+    }
+    assert_eq!(
+        chain
+            .expected_difficulty_for_child_of(hashes.last().unwrap())
+            .unwrap(),
+        DIFFICULTY
+    );
+}
+
+/// 調整が有効なら、速く積んだ分だけ難易度が上がること。
+///
+/// 上の裏返しである。**両方を確かめないと、片方を試したつもりで
+/// 両方止まっていても気づけない。**
+pub fn the_difficulty_rises_when_blocks_come_too_fast<S: ChainStore>(store: S) {
+    let mut chain = open(store);
+    let tip = chain.tip().unwrap().hash;
+
+    // build_on は 60 秒間隔で刻む。目標どおりなので難易度は動かない。
+    let window = oag_pow::lwma::WINDOW;
+    let steady = extend(&mut chain, tip, window + 5, 1);
+    assert_eq!(
+        chain
+            .expected_difficulty_for_child_of(steady.last().unwrap())
+            .unwrap(),
+        DIFFICULTY,
+        "目標どおりの間隔で難易度が動いている"
+    );
 }

@@ -45,6 +45,12 @@ enum Command {
         /// 接続しにいく相手。複数指定してよい。
         #[arg(long, value_name = "住所")]
         connect: Vec<SocketAddr>,
+        /// RPC を待ち受ける住所。既定はループバックの RPC ポート。
+        #[arg(long)]
+        rpc: Option<SocketAddr>,
+        /// RPC を待ち受けない。
+        #[arg(long)]
+        no_rpc: bool,
         /// 採掘も接続も終わったら、この秒数で終了する。
         ///
         /// 試験のためのもの。省略すると終了しない。
@@ -110,6 +116,8 @@ fn run() -> Result<(), String> {
             listen,
             no_listen,
             connect,
+            rpc,
+            no_rpc,
             exit_after,
         } => {
             let network = common.network()?;
@@ -124,7 +132,7 @@ fn run() -> Result<(), String> {
             };
 
             let service =
-                NodeService::start(network, &common.datadir, blocks).map_err(|e| e.to_string())?;
+                NodeService::start(network, &common.datadir).map_err(|e| e.to_string())?;
             let handle = service.handle();
 
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -154,13 +162,20 @@ fn run() -> Result<(), String> {
                     tokio::spawn(accept_loop(handle.clone(), listener));
                 }
 
+                if !no_rpc {
+                    let addr = rpc.unwrap_or_else(|| {
+                        SocketAddr::new(network.rpc_bind_default(), network.rpc_port())
+                    });
+                    oag_node::start_rpc(handle.clone(), addr, &common.datadir).await?;
+                }
+
                 for addr in connect {
                     tokio::spawn(dial(handle.clone(), addr));
                 }
 
                 if let Some(lock) = payout {
                     println!("採掘を開始する (Ctrl-C で中断してよい)");
-                    handle.start_mining(lock).await?;
+                    handle.start_mining(lock, blocks).await?;
                 }
 
                 wait_for_shutdown(&handle, blocks.is_some(), exit_after).await;

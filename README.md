@@ -51,7 +51,8 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 | 8 | マイナー | 完了 |
 | 9a | ノード (oag-node) — 記憶域・チェーン・採掘・CLI | 完了 |
 | 9b | ノードへの P2P 組み込み (2 台での同期) | 完了 |
-| 10 | RPC、CLI ウォレット | 未着手 |
+| 10a | JSON-RPC (ノード側) | 完了 |
+| 10b | CLI ウォレット (鍵・残高・送金) | 完了 |
 | 11 | ジェネシス確定 → テストネット公開 | 未着手 |
 
 ## クレート構成
@@ -69,7 +70,9 @@ crates/
 ├── oag-net/          P2P プロトコル (枠組み・メッセージ・ハンドシェイク・
 │                    ロケータ・取り寄せの割り振り・Compact Blocks・TCP)
 ├── oag-miner/        ブロックテンプレートの組み立てと nonce の探索
-└── oag-node/         ノード本体・専用スレッド・ピアとのやり取り・実行ファイル
+├── oag-rpc/          JSON-RPC 2.0・最小限の HTTP・合言葉・呼び出し側
+├── oag-node/         ノード本体・専用スレッド・ピアとのやり取り・実行ファイル
+└── oag-wallet/       鍵の保管・支払いの組み立てと署名・実行ファイル
 ```
 
 `oag-pow` の RandomX は feature `randomx` の背後にある。C++ 実装のビルドに
@@ -125,6 +128,44 @@ cargo build --release -p oag-node
 同期は headers-first です。ヘッダを先に集めてチェーンの形を確かめ、
 そのうえで本体を取り寄せます。受け取ったブロックは**自分で検証**して
 おり、UTXO セットは相手から貰うのではなく自分で組み立てています。
+
+## 送金する
+
+ウォレットはノードと **JSON-RPC でしか話しません**。秘密鍵はノードに
+渡らず、署名はウォレット側で済ませます。
+
+```sh
+cargo build --release -p oag-wallet
+
+# ウォレットを作る
+./target/release/oag-wallet --wallet ./alice.json new
+./target/release/oag-wallet --wallet ./bob.json new
+
+# alice のアドレス宛てに掘る (コインベースは 120 ブロック後に使える)
+./target/release/oag-node run --network regtest --datadir ./oag-data \
+    --mine --payout $(./target/release/oag-wallet --wallet ./alice.json address) \
+    --blocks 130
+
+# 残高を見る
+./target/release/oag-wallet --wallet ./alice.json --datadir ./oag-data balance
+
+# 送る
+./target/release/oag-wallet --wallet ./alice.json --datadir ./oag-data \
+    send $(./target/release/oag-wallet --wallet ./bob.json address) 12.5
+```
+
+RPC は**ループバックのみ**で待ち受け、合言葉による認証を要求します
+(合言葉は起動のたびに作られ、`<datadir>/.cookie` に書かれます)。
+`curl` からも呼べます。
+
+```sh
+curl -s --user "$(cat ./oag-data/.cookie)" -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"getinfo","params":[]}' \
+  http://127.0.0.1:9445/
+```
+
+> **鍵は平文で保管しています。** 暗号化は未実装で、ファイルの権限
+> (0600) だけが守りです。このファイルを読めた者は資金を動かせます。
 
 `oag-node` は RandomX を必ず使うため、ビルドに cmake と C++ コンパイラが
 必要です。

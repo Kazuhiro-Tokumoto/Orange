@@ -25,8 +25,11 @@
 
 use crate::node::{MinedBlock, Node, NodeError, NodeStatus};
 use oag_chain::chain::{AcceptOutcome, HeaderOutcome};
+use oag_chain::index::BlockIndexEntry;
 use oag_consensus::lock::Lock;
-use oag_consensus::{Block, BlockHeader};
+use oag_consensus::tx::OutPoint;
+use oag_consensus::utxo::UtxoEntry;
+use oag_consensus::{Block, BlockHeader, Transaction};
 use oag_net::message::MAX_HEADERS;
 use oag_net::sync::{BlockDownload, PeerId};
 use oag_primitives::{Hash, Network};
@@ -119,10 +122,52 @@ enum Request {
     },
     /// ピアが切れた。頼んでいた分を待ち行列に戻す。
     PeerGone(PeerId),
-    /// 採掘の受取先を設定する。`None` で止める。
-    SetMining(Option<Lock>),
+    /// 採掘を始める、または止める。
+    SetMining {
+        /// 受取先。`None` で止める。
+        payout: Option<Lock>,
+        /// この数だけ掘ったら止める。`None` なら止まらない。
+        blocks: Option<u64>,
+    },
+    /// 高さからブロックハッシュを引く。
+    HashAtHeight {
+        height: u64,
+        reply: oneshot::Sender<Result<Option<Hash>, String>>,
+    },
+    /// インデックスの 1 件を引く。
+    GetEntry {
+        hash: Hash,
+        reply: oneshot::Sender<Result<Option<BlockIndexEntry>, String>>,
+    },
+    /// トランザクションを mempool に入れる。
+    SubmitTx {
+        tx: Box<Transaction>,
+        reply: oneshot::Sender<Result<Hash, String>>,
+    },
+    /// mempool の中身。
+    MempoolTxids(oneshot::Sender<Result<Vec<Hash>, String>>),
+    /// mempool のトランザクションを引く。
+    MempoolTx {
+        txid: Hash,
+        reply: oneshot::Sender<Result<Option<Transaction>, String>>,
+    },
+    /// 支払い条件が一致する UTXO を集める。
+    ScanUtxos {
+        locks: Vec<Lock>,
+        max: usize,
+        reply: oneshot::Sender<Result<Vec<UtxoRecord>, String>>,
+    },
     /// 作業スレッドを終わらせる。
     Shutdown,
+}
+
+/// 走査で見つかった UTXO の 1 件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UtxoRecord {
+    /// 出力の参照。
+    pub outpoint: OutPoint,
+    /// 出力の中身と、生成された高さ。
+    pub entry: UtxoEntry,
 }
 
 /// 非同期側から専用スレッドを使うための取っ手。
@@ -246,8 +291,66 @@ impl NodeHandle {
     }
 
     /// 採掘を始める。
-    pub async fn start_mining(&self, payout: Lock) -> Result<(), String> {
-        self.tell(Request::SetMining(Some(payout))).await
+    ///
+    /// `blocks` を与えると、その数だけ掘ったところで止まり
+    /// [`NodeEvent::MiningStopped`] を報せる。**すでに掘った数とは無関係に、
+    /// ここから数える。** 止まったあとに掘り増したいときも同じ呼び方で
+    /// 済む。
+    pub async fn start_mining(&self, payout: Lock, blocks: Option<u64>) -> Result<(), String> {
+        self.tell(Request::SetMining {
+            payout: Some(payout),
+            blocks,
+        })
+        .await
+    }
+
+    /// 採掘を止める。
+    pub async fn stop_mining(&self) -> Result<(), String> {
+        self.tell(Request::SetMining {
+            payout: None,
+            blocks: None,
+        })
+        .await
+    }
+
+    /// アクティブチェーンの、その高さのブロックハッシュ。
+    pub async fn hash_at_height(&self, height: u64) -> Result<Option<Hash>, String> {
+        self.ask(|reply| Request::HashAtHeight { height, reply })
+            .await
+    }
+
+    /// インデックスの 1 件。
+    pub async fn entry(&self, hash: Hash) -> Result<Option<BlockIndexEntry>, String> {
+        self.ask(|reply| Request::GetEntry { hash, reply }).await
+    }
+
+    /// トランザクションを mempool に入れる。
+    pub async fn submit_tx(&self, tx: Transaction) -> Result<Hash, String> {
+        self.ask(|reply| Request::SubmitTx {
+            tx: Box::new(tx),
+            reply,
+        })
+        .await
+    }
+
+    /// mempool にある txid の一覧。
+    pub async fn mempool_txids(&self) -> Result<Vec<Hash>, String> {
+        self.ask(Request::MempoolTxids).await
+    }
+
+    /// mempool のトランザクション。
+    pub async fn mempool_tx(&self, txid: Hash) -> Result<Option<Transaction>, String> {
+        self.ask(|reply| Request::MempoolTx { txid, reply }).await
+    }
+
+    /// 支払い条件が一致する UTXO を集める。
+    pub async fn scan_utxos(
+        &self,
+        locks: Vec<Lock>,
+        max: usize,
+    ) -> Result<Vec<UtxoRecord>, String> {
+        self.ask(|reply| Request::ScanUtxos { locks, max, reply })
+            .await
     }
 }
 
@@ -257,10 +360,10 @@ struct Service {
     download: BlockDownload,
     mining: Option<Lock>,
     events: broadcast::Sender<NodeEvent>,
-    /// 掘れたブロックの数。
+    /// これまでに掘れたブロックの数。
     mined: u64,
-    /// この数だけ掘ったら採掘を止める。
-    mine_limit: Option<u64>,
+    /// 掘った数がここに達したら止める。
+    mine_until: Option<u64>,
 }
 
 /// 起動した専用スレッド。
@@ -276,11 +379,7 @@ impl NodeService {
     ///
     /// 開くのは呼び出し元のスレッドではなく専用スレッドの上で行う。
     /// 開いた結果を待ち合わせてから返すため、失敗はここで分かる。
-    pub fn start(
-        network: Network,
-        data_dir: &Path,
-        mine_limit: Option<u64>,
-    ) -> Result<NodeService, NodeError> {
+    pub fn start(network: Network, data_dir: &Path) -> Result<NodeService, NodeError> {
         let (tx, rx) = mpsc::channel(REQUEST_CAPACITY);
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -306,7 +405,7 @@ impl NodeService {
                     mining: None,
                     events: events_for_thread,
                     mined: 0,
-                    mine_limit,
+                    mine_until: None,
                 }
                 .run(rx);
             })
@@ -402,7 +501,7 @@ impl Service {
                 self.mined += 1;
                 println!("掘れた: 高さ {height}  {hash}");
                 self.announce_tip();
-                if self.mine_limit.is_some_and(|limit| self.mined >= limit) {
+                if self.mine_until.is_some_and(|limit| self.mined >= limit) {
                     self.stop_mining();
                 }
             }
@@ -480,8 +579,46 @@ impl Service {
             Request::PeerGone(peer) => {
                 self.download.peer_disconnected(peer);
             }
-            Request::SetMining(payout) => {
+            Request::SetMining { payout, blocks } => {
+                // 掘る数は「ここから」数える。前に掘った分は関係ない。
+                self.mine_until = blocks.map(|n| self.mined.saturating_add(n));
                 self.mining = payout;
+            }
+            Request::HashAtHeight { height, reply } => {
+                let result = self
+                    .node
+                    .chain()
+                    .hash_at_height(height)
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            }
+            Request::GetEntry { hash, reply } => {
+                let _ = reply.send(Ok(self.node.chain().entry(&hash).cloned()));
+            }
+            Request::SubmitTx { tx, reply } => {
+                let _ = reply.send(self.submit_tx(*tx));
+            }
+            Request::MempoolTxids(reply) => {
+                let _ = reply.send(Ok(self.node.mempool().txids()));
+            }
+            Request::MempoolTx { txid, reply } => {
+                let result = self.node.mempool().get(&txid).map(|e| e.tx.clone());
+                let _ = reply.send(Ok(result));
+            }
+            Request::ScanUtxos { locks, max, reply } => {
+                let result = self
+                    .node
+                    .chain()
+                    .store()
+                    .scan_utxos(&locks, max)
+                    .map(|found| {
+                        found
+                            .into_iter()
+                            .map(|(outpoint, entry)| UtxoRecord { outpoint, entry })
+                            .collect()
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(result);
             }
             // ここには来ない。run が先に捕まえる。
             Request::Shutdown => {}
@@ -535,6 +672,20 @@ impl Service {
             self.announce_tip();
         }
         Ok(BlockAccepted { outcome, moved_tip })
+    }
+
+    /// トランザクションを mempool に入れる。
+    ///
+    /// 中継の方針も含めてここで判断する。受け入れられなければ理由を返す。
+    fn submit_tx(&mut self, tx: Transaction) -> Result<Hash, String> {
+        let tip = self.node.chain().tip().map_err(|e| e.to_string())?;
+        let next_height = tip.height() + 1;
+        let mtp = self.node.chain().median_time_past_for_child_of(&tip.hash);
+        let view = self.node.chain().utxo_view().map_err(|e| e.to_string())?;
+        self.node
+            .mempool_mut()
+            .accept(tx, &view, next_height, mtp)
+            .map_err(|e| e.to_string())
     }
 
     fn assign_downloads(&mut self, peer: PeerId, now: i64) -> Result<Vec<Hash>, String> {
