@@ -1,11 +1,13 @@
 //! Orange (OAG) のノード。
 //!
 //! - [`addrbook`] — ピアの住所帳
+//! - [`connect`] — 外向きの接続を保つ
 //! - [`genesis`] — ネットワークごとのジェネシスブロック
 //! - [`node`] — チェーン・mempool・採掘を束ねた本体
 //! - [`service`] — 本体を専用スレッドに載せ、非同期側から使えるようにする
 //! - [`peer`] — 1 本の接続の面倒を見る
 //! - [`rpc`] — JSON-RPC の手続き
+//! - [`seeds`] — 最初の繋ぎ先 (DNS シード)
 //!
 //! 実行ファイルは `main.rs` にあり、ここを呼ぶだけの薄い層である。
 //! 束ねる部分を library に置いているのは、**2 台のノードを実際に繋いだ
@@ -15,10 +17,12 @@
 #![warn(missing_docs, clippy::all)]
 
 pub mod addrbook;
+pub mod connect;
 pub mod genesis;
 pub mod node;
 pub mod peer;
 pub mod rpc;
+pub mod seeds;
 pub mod service;
 
 use oag_net::magic::magic_for;

@@ -344,7 +344,18 @@ impl AddressBook {
     }
 
     /// 繋がったことを記録する。失敗の回数は 0 に戻す。
+    ///
+    /// **まだ覚えていない住所なら、ここで覚える。** 実際に繋がった住所は
+    /// 到達できることの最も強い証拠であり、`--connect` で名指しされた
+    /// 相手やシードから得た相手はこの経路で住所帳に入る。
+    ///
+    /// ただし [`add`](AddressBook::add) の規則には従う。/16 の枠が
+    /// 埋まっていれば覚えない。**繋がったからといって上限を緩めない。**
+    /// 緩めれば、攻撃者は繋がせるだけで枠を破れる。
     pub fn mark_success(&mut self, addr: &SocketAddr, now: i64) {
+        if !self.entries.contains_key(addr) {
+            self.add(*addr, now, now);
+        }
         if let Some(entry) = self.entries.get_mut(addr) {
             entry.last_try = Some(now);
             entry.last_success = Some(now);

@@ -199,6 +199,7 @@ async fn get_info(handle: &NodeHandle) -> Result<Value, RpcError> {
         "utxocount": status.utxo_count,
         "indexedblocks": status.indexed_blocks,
         "mempoolsize": status.mempool_len,
+        "knownaddresses": status.known_addresses,
     }))
 }
 

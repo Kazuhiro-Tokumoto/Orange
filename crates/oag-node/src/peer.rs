@@ -80,7 +80,29 @@ async fn our_version(handle: &NodeHandle) -> Result<VersionMessage, String> {
 ///
 /// ハンドシェイクから始め、切れたら戻る。失敗しても呼び出し側は
 /// そのピアを諦めればよい。
-pub async fn run(handle: NodeHandle, mut conn: Connection) -> Result<(), String> {
+pub async fn run(handle: NodeHandle, conn: Connection) -> Result<(), String> {
+    run_as(handle, conn, Direction::Inbound).await
+}
+
+/// こちらから繋いだのか、相手から繋がれたのか。
+///
+/// **住所を求めるのはこちらから繋いだ相手にだけ**にする。相手から
+/// 繋がれた接続は、相手が誰であれ好きに開けるので、そこから住所を集めると
+/// 攻撃者が「聞かれる側」に回りやすい。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// こちらから繋いだ。
+    Outbound,
+    /// 相手から繋がれた。
+    Inbound,
+}
+
+/// 1 本の接続を、向きを指定して面倒を見る。
+pub async fn run_as(
+    handle: NodeHandle,
+    mut conn: Connection,
+    direction: Direction,
+) -> Result<(), String> {
     let peer = next_peer_id();
     let addr = conn
         .peer_addr()
@@ -97,7 +119,7 @@ pub async fn run(handle: NodeHandle, mut conn: Connection) -> Result<(), String>
         theirs.user_agent, theirs.start_height
     );
 
-    let result = session(&handle, peer, conn, theirs.start_height).await;
+    let result = session(&handle, peer, conn, theirs.start_height, direction).await;
     handle.peer_gone(peer).await?;
     println!("ピア {addr} との接続が切れた");
     result
@@ -108,6 +130,7 @@ async fn session(
     peer: PeerId,
     conn: Connection,
     peer_height: u64,
+    direction: Direction,
 ) -> Result<(), String> {
     let (mut reader, mut writer) = conn.split();
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(SEND_QUEUE);
@@ -148,10 +171,30 @@ async fn session(
         peer,
         peer_height,
         asked_headers_at: 0,
+        addr_requests: 0,
     };
 
     // 相手が先を行っていれば、まずヘッダを求める。
     state.maybe_request_headers(handle, &out_tx).await?;
+
+    if direction == Direction::Outbound {
+        // 知っている住所を教えてもらう。**こちらから繋いだ相手にだけ
+        // 頼む。** これが住所帳の主な育ち方であり、シードを引くのは
+        // 最初の 1 回だけで済む。
+        send(&out_tx, Message::GetAddr).await?;
+        // こちらの住所も名乗る。**名乗らないと誰にも見つけてもらえない。**
+        // 名乗る住所は運用者が --external-addr で明示したものに限る。
+        // 自分の外向きの住所は自分では分からない。
+        let own = handle.own_addresses().await?;
+        if !own.is_empty() {
+            let at = now();
+            let addrs = own
+                .into_iter()
+                .map(|a| oag_net::message::NetAddress::from_socket(a, 0, at))
+                .collect();
+            send(&out_tx, Message::Addr(addrs)).await?;
+        }
+    }
 
     let outcome = loop {
         tokio::select! {
@@ -167,6 +210,13 @@ async fn session(
                         // 新しい先端を持っていることを知らせる。
                         let inv = Message::Inv(vec![InvItem::block(hash)]);
                         if out_tx.send(inv).await.is_err() {
+                            break Ok(());
+                        }
+                    }
+                    Ok(crate::service::NodeEvent::NewAddress(addr)) => {
+                        // 新しく到達を確かめた住所を流す。相手が知って
+                        // いれば捨てられるだけで、害は無い。
+                        if out_tx.send(Message::Addr(vec![addr])).await.is_err() {
                             break Ok(());
                         }
                     }
@@ -198,6 +248,8 @@ struct Session {
     peer_height: u64,
     /// 最後に `getheaders` を送った時刻。
     asked_headers_at: i64,
+    /// この接続で `getaddr` を受けた回数。**応えるのは 1 度だけ。**
+    addr_requests: u32,
 }
 
 /// `getheaders` を送り直すまでの間隔。
@@ -293,12 +345,30 @@ impl Session {
 
             Message::Inv(items) => self.on_inv(handle, out, items).await,
 
+            Message::GetAddr => {
+                // **1 本の接続につき 1 度だけ応える。** 繰り返し聞かれる
+                // まま返し続けると、こちらの住所帳を丸ごと吸い出す道具に
+                // なる。誰と繋がっているかは相手に教えたくない。
+                self.addr_requests += 1;
+                if self.addr_requests > 1 {
+                    return Ok(());
+                }
+                let addrs = handle.addresses_to_share().await?;
+                if addrs.is_empty() {
+                    return Ok(());
+                }
+                send(out, Message::Addr(addrs)).await
+            }
+
+            Message::Addr(addrs) => {
+                // 中身は相手が決める。住所帳の側で上限と括りに従わせる。
+                handle.add_addresses(addrs).await
+            }
+
             // まだ扱わないもの。無視してよい。相手を切る理由にはならない。
             Message::NotFound(_)
             | Message::Tx(_)
             | Message::Mempool
-            | Message::GetAddr
-            | Message::Addr(_)
             | Message::SendCompact(_)
             | Message::CompactBlock(_)
             | Message::GetBlockTxn(_)

@@ -14,6 +14,7 @@
 //! なり、中途半端な状態は残らない。信号を捕まえる仕掛けを置いていないのは
 //! そのためである。
 
+use crate::addrbook::AddressBook;
 use oag_chain::chain::{AcceptOutcome, Chain, ChainError, HeaderOutcome, Retarget};
 use oag_consensus::lock::Lock;
 use oag_consensus::params;
@@ -86,6 +87,8 @@ pub struct NodeStatus {
     pub indexed_blocks: usize,
     /// mempool の件数。
     pub mempool_len: usize,
+    /// 住所帳に覚えているピアの数。
+    pub known_addresses: usize,
 }
 
 /// 採掘の結果。
@@ -125,6 +128,8 @@ pub struct Node {
     miner: Option<(u64, RandomXMiner)>,
     /// fast モードで掘るか。
     fast_mining: bool,
+    /// ピアの住所帳。
+    addresses: AddressBook,
 }
 
 impl Node {
@@ -140,6 +145,7 @@ impl Node {
             Retarget::Disabled
         };
         let chain = Chain::open(store, genesis, network.genesis_difficulty(), retarget)?;
+        let addresses = AddressBook::open(network, &data_dir.join("peers.json"));
         Ok(Node {
             chain,
             mempool: Mempool::new(),
@@ -147,7 +153,18 @@ impl Node {
             verifier: None,
             miner: None,
             fast_mining: false,
+            addresses,
         })
+    }
+
+    /// ピアの住所帳。
+    pub fn addresses(&self) -> &AddressBook {
+        &self.addresses
+    }
+
+    /// ピアの住所帳 (書き換え可)。
+    pub fn addresses_mut(&mut self) -> &mut AddressBook {
+        &mut self.addresses
     }
 
     /// チェーン。
@@ -177,6 +194,7 @@ impl Node {
             utxo_count: self.chain.store().utxo_count()?,
             indexed_blocks: self.chain.indexed_blocks(),
             mempool_len: self.mempool.len(),
+            known_addresses: self.addresses.len(),
         })
     }
 

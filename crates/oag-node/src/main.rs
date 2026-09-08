@@ -49,8 +49,24 @@ enum Command {
         #[arg(long)]
         no_listen: bool,
         /// 接続しにいく相手。複数指定してよい。
+        ///
+        /// ここで名指しした相手は、切れていれば繋ぎ直す。住所帳から
+        /// 選ばれる相手とは別枠である。
         #[arg(long, value_name = "住所")]
         connect: Vec<SocketAddr>,
+        /// ピアに名乗る自分の住所 (外から見える `ホスト:ポート`)。
+        ///
+        /// **これを渡さないと、こちらの住所は誰にも伝わらない。** 外から
+        /// 繋いでもらいたいノード (シードに載せるノードなど) では渡す。
+        /// 自分の外向きの住所を自分で確かめる手立ては無いので、運用者が
+        /// 明示する。
+        #[arg(long, value_name = "住所")]
+        external_addr: Vec<SocketAddr>,
+        /// 住所帳とシードによる繋ぎ先の自動探索を行わない。
+        ///
+        /// `--connect` で名指しした相手だけに繋ぐ。
+        #[arg(long)]
+        no_discovery: bool,
         /// RPC を待ち受ける住所。既定はループバックの RPC ポート。
         #[arg(long)]
         rpc: Option<SocketAddr>,
@@ -118,6 +134,8 @@ fn run() -> Result<(), String> {
             common,
             mine,
             fast,
+            external_addr,
+            no_discovery,
             payout,
             blocks,
             listen,
@@ -176,8 +194,25 @@ fn run() -> Result<(), String> {
                     oag_node::start_rpc(handle.clone(), addr, &common.datadir).await?;
                 }
 
-                for addr in connect {
-                    tokio::spawn(dial(handle.clone(), addr));
+                if !external_addr.is_empty() {
+                    for addr in &external_addr {
+                        println!("自分の住所として {addr} を名乗る");
+                    }
+                    handle.set_own_addresses(external_addr).await?;
+                }
+
+                if no_discovery {
+                    // 名指しされた相手だけに繋ぐ。住所帳もシードも使わない。
+                    for addr in connect {
+                        tokio::spawn(dial(handle.clone(), addr));
+                    }
+                } else {
+                    let outbound = oag_node::connect::Outbound::new();
+                    tokio::spawn(oag_node::connect::maintain(
+                        handle.clone(),
+                        outbound,
+                        connect,
+                    ));
                 }
 
                 if let Some(lock) = payout {
@@ -186,6 +221,10 @@ fn run() -> Result<(), String> {
                 }
 
                 wait_for_shutdown(&handle, blocks.is_some(), exit_after).await;
+                // 覚えた住所を残す。次の起動でシードを引かずに済む。
+                if let Err(e) = handle.save_addresses().await {
+                    eprintln!("住所帳を書き出せない: {e}");
+                }
                 print_status(&handle).await
             })?;
             Ok(())
@@ -281,4 +320,5 @@ fn print_status_lines(s: &node::NodeStatus) {
     println!("  UTXO 件数       {}", s.utxo_count);
     println!("  知っているブロック {}", s.indexed_blocks);
     println!("  mempool         {}", s.mempool_len);
+    println!("  知っているピア  {}", s.known_addresses);
 }

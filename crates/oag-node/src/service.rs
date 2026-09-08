@@ -30,9 +30,11 @@ use oag_consensus::lock::Lock;
 use oag_consensus::tx::OutPoint;
 use oag_consensus::utxo::UtxoEntry;
 use oag_consensus::{Block, BlockHeader, Transaction};
+use oag_net::message::NetAddress;
 use oag_net::message::MAX_HEADERS;
 use oag_net::sync::{BlockDownload, PeerId};
 use oag_primitives::{Hash, Network};
+use std::net::SocketAddr;
 use std::path::Path;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -66,6 +68,21 @@ pub enum NodeEvent {
     },
     /// 採掘が止まった (指定した数だけ掘り終えた、または失敗した)。
     MiningStopped,
+    /// 新たに到達を確かめた住所。
+    ///
+    /// 繋がっているピアに流す。**これがピア発見の伝わり方である。**
+    /// `getaddr` は 1 本の接続につき 1 度しか応えないので、あとから
+    /// 判明した住所はこの経路で伝える。
+    NewAddress(NetAddress),
+}
+
+/// 繋ぎに行った結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialOutcome {
+    /// 繋がった。
+    Connected,
+    /// 繋がらなかった。
+    Failed,
 }
 
 /// ブロックを受け取った結果 (非同期側に返す形)。
@@ -131,6 +148,32 @@ enum Request {
         /// fast モード (2 GB) で掘るか。
         fast: bool,
     },
+    /// 聞いた住所を住所帳に入れる。
+    AddAddresses(Vec<NetAddress>),
+    /// `getaddr` に返す住所を選ぶ。
+    AddressesToShare(oneshot::Sender<Result<Vec<NetAddress>, String>>),
+    /// 次に繋ぎに行く候補を選ぶ。
+    AddressCandidates {
+        /// 欲しい件数。
+        want: usize,
+        /// いま繋がっている・繋ぎに行っている住所。返さない。
+        busy: Vec<SocketAddr>,
+        /// 返す先。
+        reply: oneshot::Sender<Result<Vec<SocketAddr>, String>>,
+    },
+    /// 繋ぎに行った結果を記録する。
+    AddressOutcome {
+        /// 相手。
+        addr: SocketAddr,
+        /// 結果。
+        outcome: DialOutcome,
+    },
+    /// 自分自身の住所を登録する。以後これを覚えない。
+    OwnAddresses(Vec<SocketAddr>),
+    /// 自分自身の住所を引く。ピアに名乗るために使う。
+    GetOwnAddresses(oneshot::Sender<Result<Vec<SocketAddr>, String>>),
+    /// 住所帳をファイルに書き出す。
+    SaveAddresses,
     /// 高さからブロックハッシュを引く。
     HashAtHeight {
         height: u64,
@@ -292,6 +335,52 @@ impl NodeHandle {
         self.tell(Request::PeerGone(peer)).await
     }
 
+    /// `addr` で聞いた住所を住所帳に入れる。
+    pub async fn add_addresses(&self, addrs: Vec<NetAddress>) -> Result<(), String> {
+        self.tell(Request::AddAddresses(addrs)).await
+    }
+
+    /// `getaddr` に返す住所。
+    pub async fn addresses_to_share(&self) -> Result<Vec<NetAddress>, String> {
+        self.ask(Request::AddressesToShare).await
+    }
+
+    /// 次に繋ぎに行く候補を、最大 `want` 件。
+    ///
+    /// `busy` はいま繋がっている・繋ぎに行っている住所。返らない。
+    pub async fn address_candidates(
+        &self,
+        want: usize,
+        busy: Vec<SocketAddr>,
+    ) -> Result<Vec<SocketAddr>, String> {
+        self.ask(|reply| Request::AddressCandidates { want, busy, reply })
+            .await
+    }
+
+    /// 繋ぎに行った結果を記録する。
+    pub async fn address_outcome(
+        &self,
+        addr: SocketAddr,
+        outcome: DialOutcome,
+    ) -> Result<(), String> {
+        self.tell(Request::AddressOutcome { addr, outcome }).await
+    }
+
+    /// 自分自身の住所を登録する。
+    pub async fn set_own_addresses(&self, addrs: Vec<SocketAddr>) -> Result<(), String> {
+        self.tell(Request::OwnAddresses(addrs)).await
+    }
+
+    /// ピアに名乗る自分自身の住所。
+    pub async fn own_addresses(&self) -> Result<Vec<SocketAddr>, String> {
+        self.ask(Request::GetOwnAddresses).await
+    }
+
+    /// 住所帳を書き出す。
+    pub async fn save_addresses(&self) -> Result<(), String> {
+        self.tell(Request::SaveAddresses).await
+    }
+
     /// 採掘を始める。
     ///
     /// `blocks` を与えると、その数だけ掘ったところで止まり
@@ -376,6 +465,8 @@ struct Service {
     events: broadcast::Sender<NodeEvent>,
     /// これまでに掘れたブロックの数。
     mined: u64,
+    /// 外に名乗る自分自身の住所。運用者が明示したものだけを入れる。
+    own_addresses: Vec<SocketAddr>,
     /// 採掘を始めてからの試行回数と、始めた時刻。
     ///
     /// 実効ハッシュレートを出すために持つ。**掘れたブロック数から
@@ -426,6 +517,7 @@ impl NodeService {
                     mining: None,
                     events: events_for_thread,
                     mined: 0,
+                    own_addresses: Vec::new(),
                     attempts: 0,
                     mining_since: None,
                     mine_until: None,
@@ -656,6 +748,61 @@ impl Service {
                 // かかった 1 分を混ぜると、ハッシュレートが低く出る。
                 self.attempts = 0;
                 self.mining_since = self.mining.is_some().then(std::time::Instant::now);
+            }
+            Request::AddAddresses(addrs) => {
+                self.node.addresses_mut().add_many(&addrs, now());
+            }
+            Request::AddressesToShare(reply) => {
+                let addrs = self
+                    .node
+                    .addresses()
+                    .to_share(now(), crate::addrbook::MAX_TO_SHARE);
+                let _ = reply.send(Ok(addrs));
+            }
+            Request::AddressCandidates { want, busy, reply } => {
+                let picked = self.node.addresses().candidates(now(), want, &busy);
+                // 繋ぎに行くと決めた時点で印を付ける。付けないと、
+                // 結果が返るまでの間に同じ住所をもう一度選んでしまう。
+                let at = now();
+                for addr in &picked {
+                    self.node.addresses_mut().mark_attempt(addr, at);
+                }
+                let _ = reply.send(Ok(picked));
+            }
+            Request::AddressOutcome { addr, outcome } => {
+                let at = now();
+                match outcome {
+                    DialOutcome::Connected => {
+                        let was_known = self
+                            .node
+                            .addresses()
+                            .get(&addr)
+                            .is_some_and(|e| e.is_proven());
+                        self.node.addresses_mut().mark_success(&addr, at);
+                        // 初めて到達を確かめた住所だけを流す。すでに
+                        // 知られている住所を繰り返し流しても仕方がない。
+                        if !was_known && self.node.addresses().get(&addr).is_some() {
+                            let _ = self
+                                .events
+                                .send(NodeEvent::NewAddress(NetAddress::from_socket(addr, 0, at)));
+                        }
+                    }
+                    DialOutcome::Failed => self.node.addresses_mut().mark_failure(&addr, at),
+                }
+            }
+            Request::OwnAddresses(addrs) => {
+                self.own_addresses = addrs.clone();
+                self.node.addresses_mut().set_own(addrs);
+            }
+            Request::GetOwnAddresses(reply) => {
+                let _ = reply.send(Ok(self.own_addresses.clone()));
+            }
+            Request::SaveAddresses => {
+                if self.node.addresses().is_dirty() {
+                    if let Err(e) = self.node.addresses_mut().save() {
+                        eprintln!("住所帳を書き出せない: {e}");
+                    }
+                }
             }
             Request::HashAtHeight { height, reply } => {
                 let result = self
