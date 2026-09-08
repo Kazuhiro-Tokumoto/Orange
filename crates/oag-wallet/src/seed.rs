@@ -21,14 +21,18 @@
 //! 2^-128 程度である。**それでも起こりうる以上、無視せず次の番号へ
 //! 進む。** 黙って失敗すると鍵の並びが食い違う。
 //!
-//! # BIP32 / BIP39 とは互換でない
+//! # これは暫定である
 //!
-//! 独自の導出である ([`docs/SPEC.md` の未決事項])。BIP32 は SLIP-0044 の
-//! コインタイプ番号が決まらないと導出経路を確定できず、まだ登録されて
-//! いない。ここでは**控えが 1 度で済む**という肝心の性質だけを先に
-//! 確保している。
+//! 独自の導出であり、BIP32 / BIP39 とは互換でない。**BIP39 の 12 語
+//! ニーモニックと BIP32 / BIP44 の導出へ移すことは決定済みで、まだ
+//! 実装していない** ([`docs/SPEC.md`] の §6.6 と §16.3)。ここでは
+//! **控えが 1 度で済む**という肝心の性質だけを先に確保している。
 //!
-//! [`docs/SPEC.md` の未決事項]: https://github.com/Kazuhiro-Tokumoto/Orange/blob/main/docs/SPEC.md
+//! 移行すると同じ種から導かれる鍵が変わる。**テストネットを公開する前に
+//! 済ませること。** 公開後に変えれば、利用者の控えが指す資金が見えなく
+//! なる。
+//!
+//! [`docs/SPEC.md`]: https://github.com/Kazuhiro-Tokumoto/Orange/blob/main/docs/SPEC.md
 
 use oag_primitives::SecretKey;
 use zeroize::{Zeroize, ZeroizeOnDrop};
