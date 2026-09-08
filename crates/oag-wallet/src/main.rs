@@ -157,13 +157,41 @@ fn passphrase(file: &Option<PathBuf>, prompt: &str) -> Result<Secret, String> {
 /// 端末なら伏せ字で尋ねる。端末でなければ標準入力から 1 行読む。
 /// **後者が要るのは、手で試すためだけでなく、自動で試験するためでもある。**
 /// 端末がないと動かないものは、試験されないまま腐る。
+///
+/// # 促しを自分で書く理由
+///
+/// `rpassword::prompt_password` を使わない。あれは促しを端末の装置
+/// (Windows なら `CONOUT$`、Unix なら `/dev/tty`) へ**生のバイト列のまま**
+/// 書き出す。Windows のコンソールは書き込まれたバイト列を現在の出力
+/// コードページ (日本語環境の既定は CP932) として解釈するので、UTF-8 の
+/// 日本語がそのまま届くと化ける。「パスフレーズ:」が
+/// 「繝代せ繝輔Ξ繝ｼ繧ｺ:」になるのはこれである。
+///
+/// 標準エラー出力なら Rust の標準ライブラリが噛む。Windows では相手が
+/// コンソールかどうかを見て、コンソールなら UTF-16 に直して
+/// `WriteConsoleW` で書くため、コードページに関わらず化けない。
+/// **だから促しは標準エラー出力へ書き、読むところだけ rpassword に任せる。**
+///
+/// 標準出力ではなく標準エラー出力なのは、促しが出力の一部ではないからだ。
+/// `oag-wallet ... | something` としたときに促しが混ざってはいけない。
 fn read_secret(prompt: &str) -> std::io::Result<String> {
-    use std::io::IsTerminal;
-    if std::io::stdin().is_terminal() {
-        rpassword::prompt_password(prompt)
-    } else {
-        rpassword::read_password()
+    use std::io::{BufRead, IsTerminal, Write};
+    use zeroize::Zeroize;
+
+    if !std::io::stdin().is_terminal() {
+        // 端末がないなら標準入力から読む。`rpassword::read_password` は
+        // 端末の装置そのものを開くので、端末のない場所では開けずに失敗する。
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        let secret = line.trim_end_matches(['\n', '\r']).to_string();
+        line.zeroize();
+        return Ok(secret);
     }
+
+    let mut err = std::io::stderr();
+    err.write_all(prompt.as_bytes())?;
+    err.flush()?;
+    rpassword::read_password()
 }
 
 /// 新しく決めるパスフレーズを、確認付きで尋ねる。
