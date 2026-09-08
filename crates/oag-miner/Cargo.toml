@@ -1,0 +1,19 @@
+[package]
+name = "oag-miner"
+description = "Orange (OAG) の採掘: ブロックテンプレートの組み立てと探索"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+randomx = ["oag-pow/randomx"]
+
+[dependencies]
+oag-consensus.workspace = true
+oag-mempool.workspace = true
+oag-pow.workspace = true
+oag-primitives.workspace = true
+thiserror.workspace = true

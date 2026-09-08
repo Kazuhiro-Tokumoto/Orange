@@ -47,9 +47,10 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 | 7b | ブロックロケータ、取り寄せの割り振り | 完了 |
 | 7c | Compact Blocks | 完了 |
 | 7d | TCP トランスポート | 完了 |
-| 8 | マイナー | 未着手 |
-| 9 | RPC、CLI ウォレット | 未着手 |
-| 10 | テストネット公開 | 未着手 |
+| 8 | マイナー | 完了 |
+| 9 | ノード (oag-node) — 全部を繋いだデーモン | 未着手 |
+| 10 | RPC、CLI ウォレット | 未着手 |
+| 11 | ジェネシス確定 → テストネット公開 | 未着手 |
 
 ## クレート構成
 
@@ -63,8 +64,9 @@ crates/
 │                    記憶域の抽象 (ChainStore) とメモリ実装
 ├── oag-store/        永続化 (redb)
 ├── oag-mempool/      mempool・中継ポリシー
-└── oag-net/          P2P プロトコル (枠組み・メッセージ・ハンドシェイク・
-                     ロケータ・取り寄せの割り振り・Compact Blocks・TCP)
+├── oag-net/          P2P プロトコル (枠組み・メッセージ・ハンドシェイク・
+│                    ロケータ・取り寄せの割り振り・Compact Blocks・TCP)
+└── oag-miner/        ブロックテンプレートの組み立てと nonce の探索
 ```
 
 `oag-pow` の RandomX は feature `randomx` の背後にある。C++ 実装のビルドに

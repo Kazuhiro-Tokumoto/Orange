@@ -150,6 +150,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "oag-miner"
+version = "0.1.0"
+dependencies = [
+ "oag-consensus",
+ "oag-mempool",
+ "oag-pow",
+ "oag-primitives",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "oag-net"
 version = "0.1.0"
 dependencies = [
