@@ -500,6 +500,7 @@ dependencies = [
  "oag-primitives",
  "oag-rpc",
  "oag-store",
+ "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",

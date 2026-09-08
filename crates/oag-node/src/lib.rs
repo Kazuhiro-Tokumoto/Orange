@@ -1,5 +1,6 @@
 //! Orange (OAG) のノード。
 //!
+//! - [`addrbook`] — ピアの住所帳
 //! - [`genesis`] — ネットワークごとのジェネシスブロック
 //! - [`node`] — チェーン・mempool・採掘を束ねた本体
 //! - [`service`] — 本体を専用スレッドに載せ、非同期側から使えるようにする
@@ -13,6 +14,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::all)]
 
+pub mod addrbook;
 pub mod genesis;
 pub mod node;
 pub mod peer;
