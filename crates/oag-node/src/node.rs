@@ -14,9 +14,10 @@
 //! なり、中途半端な状態は残らない。信号を捕まえる仕掛けを置いていないのは
 //! そのためである。
 
-use oag_chain::chain::{AcceptOutcome, Chain, ChainError};
+use oag_chain::chain::{AcceptOutcome, Chain, ChainError, HeaderOutcome};
 use oag_consensus::lock::Lock;
 use oag_consensus::params;
+use oag_consensus::{Block, BlockHeader};
 use oag_mempool::Mempool;
 use oag_miner::mine::{MiningOutcome, NeverStop};
 use oag_miner::{build_template, TemplateError, TemplateRequest};
@@ -50,6 +51,9 @@ pub enum NodeError {
     /// 採掘に失敗した。
     #[error(transparent)]
     Mine(#[from] oag_miner::MineError),
+    /// 作業スレッドを起こせない、あるいは落ちた。
+    #[error("ノードの作業スレッド: {0}")]
+    Thread(String),
     /// ジェネシスが確定していない。
     #[error(transparent)]
     Genesis(#[from] crate::genesis::GenesisUndecided),
@@ -133,6 +137,11 @@ impl Node {
         })
     }
 
+    /// チェーン。
+    pub fn chain(&self) -> &Chain<Store> {
+        &self.chain
+    }
+
     /// 現在の様子。
     pub fn status(&self) -> Result<NodeStatus, NodeError> {
         let tip = self.chain.tip()?;
@@ -169,6 +178,46 @@ impl Node {
         Ok(())
     }
 
+    /// その高さの検証器を用意し、それを借りたまま `f` を走らせる。
+    ///
+    /// 検証器を一旦 `self` から取り出す。こうしないと、検証器を借りたまま
+    /// チェーンを変更できない。`f` が失敗しても必ず戻す。
+    fn with_verifier<T>(
+        &mut self,
+        height: u64,
+        f: impl FnOnce(&mut Self, &RandomXVerifier) -> Result<T, NodeError>,
+    ) -> Result<T, NodeError> {
+        self.ensure_verifier(height)?;
+        let (epoch, verifier) = self.verifier.take().expect("直前に用意した");
+        let result = f(self, &verifier);
+        self.verifier = Some((epoch, verifier));
+        result
+    }
+
+    /// 他所から来たブロックを受け取る。
+    pub fn accept_block(&mut self, block: Block, now: i64) -> Result<AcceptOutcome, NodeError> {
+        let height = block.header.height;
+        self.with_verifier(height, |node, verifier| {
+            let outcome = node.chain.accept_block(block.clone(), verifier, now)?;
+            if !matches!(outcome, AcceptOutcome::Duplicate) {
+                node.mempool.on_block_connected(&block);
+            }
+            Ok(outcome)
+        })
+    }
+
+    /// 他所から来たヘッダを受け取る。
+    pub fn accept_header(
+        &mut self,
+        header: &BlockHeader,
+        now: i64,
+    ) -> Result<HeaderOutcome, NodeError> {
+        let height = header.height;
+        self.with_verifier(height, |node, verifier| {
+            Ok(node.chain.accept_header(header, verifier, now)?)
+        })
+    }
+
     /// 次のブロックを掘る。
     ///
     /// `now` はノードの現在時刻 (Unix 秒)。`max_attempts` を試して見つから
@@ -181,14 +230,9 @@ impl Node {
     ) -> Result<MinedBlock, NodeError> {
         let tip = self.chain.tip()?;
         let height = tip.height() + 1;
-        self.ensure_verifier(height)?;
-
-        // 検証器を一旦手元に取り出す。こうしないと、検証器を借りたまま
-        // チェーンを変更できない。作業が終わったら必ず戻す。
-        let (epoch, verifier) = self.verifier.take().expect("直前に用意した");
-        let result = self.mine_with(&verifier, &tip.hash, height, payout, now, max_attempts);
-        self.verifier = Some((epoch, verifier));
-        result
+        self.with_verifier(height, |node, verifier| {
+            node.mine_with(verifier, &tip.hash, height, payout, now, max_attempts)
+        })
     }
 
     fn mine_with(

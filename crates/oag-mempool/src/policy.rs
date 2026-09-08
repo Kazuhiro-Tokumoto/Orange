@@ -8,7 +8,7 @@
 //! この分離により、OAG の価格が変動しても最低手数料をハードフォークなしに
 //! 調整できる (SPEC §13.1)。
 //!
-//! 参照: `docs/SPEC.md` §13, §10.5
+//! 参照: `docs/SPEC.md` §13, §10.4
 
 use oag_consensus::params;
 use oag_primitives::Amount;
@@ -25,7 +25,7 @@ pub struct Policy {
     /// 未知の版数の支払い条件を許すか。
     ///
     /// **既定は false である。** 未知の版数はコンセンサス上 anyone-can-spend
-    /// として扱われる (SPEC §10.5)。有効化前にそのようなアドレスへ送金すると
+    /// として扱われる (SPEC §10.4)。有効化前にそのようなアドレスへ送金すると
     /// 資金を失うため、ポリシー層で作成も使用も中継しない。
     pub allow_unknown_lock_versions: bool,
 }

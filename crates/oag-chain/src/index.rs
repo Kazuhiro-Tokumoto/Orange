@@ -10,7 +10,12 @@ use oag_primitives::Hash;
 /// ブロックの検証状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockStatus {
-    /// ヘッダと PoW は検証済み。本体はまだ検証していない。
+    /// ヘッダと PoW は検証済み。**本体をまだ持っていない。**
+    ///
+    /// headers-first 同期で、ヘッダだけ先に受け取った状態である。本体が
+    /// 無いのだから接続できない。チェーン選択の候補にもならない。
+    HeaderOnly,
+    /// ヘッダと PoW は検証済み。本体は持っているが、まだ検証していない。
     ///
     /// 本体の検証には、そのブロックの位置における UTXO の状態が必要である。
     /// サイドチェーンのブロックは繋がるまでこの状態にとどまる。
@@ -47,9 +52,31 @@ impl BlockIndexEntry {
         self.header.prev_hash
     }
 
-    /// このブロックを候補として検討してよいか。
-    pub fn is_candidate(&self) -> bool {
+    /// 本体を持っているか。
+    pub fn has_body(&self) -> bool {
+        matches!(
+            self.status,
+            BlockStatus::HeaderValid | BlockStatus::FullyValid
+        )
+    }
+
+    /// ヘッダとして有効か (無効と判定されていないか)。
+    ///
+    /// 本体の有無は問わない。ロケータの構築や、次に本体を取り寄せるべき
+    /// ブロックの選定に用いる。
+    pub fn is_valid_header(&self) -> bool {
         !matches!(self.status, BlockStatus::Invalid)
+    }
+
+    /// このブロックをアクティブチェーンの先端の候補として検討してよいか。
+    ///
+    /// **本体を持っていることを要求する。** 本体が無ければ接続できず、
+    /// 候補に含めても失敗するだけだからである。祖先まで本体がそろって
+    /// いるかは、この 1 件だけでは分からない。
+    /// [`Chain::accept_block`](crate::chain::Chain::accept_block) が
+    /// 経路全体を確かめる。
+    pub fn is_candidate(&self) -> bool {
+        self.has_body()
     }
 }
 
@@ -61,6 +88,7 @@ impl BlockStatus {
             BlockStatus::HeaderValid => 0,
             BlockStatus::FullyValid => 1,
             BlockStatus::Invalid => 2,
+            BlockStatus::HeaderOnly => 3,
         }
     }
 
@@ -69,6 +97,7 @@ impl BlockStatus {
             0 => Some(BlockStatus::HeaderValid),
             1 => Some(BlockStatus::FullyValid),
             2 => Some(BlockStatus::Invalid),
+            3 => Some(BlockStatus::HeaderOnly),
             _ => None,
         }
     }
@@ -132,6 +161,7 @@ mod tests {
     #[test]
     fn round_trip() {
         for status in [
+            BlockStatus::HeaderOnly,
             BlockStatus::HeaderValid,
             BlockStatus::FullyValid,
             BlockStatus::Invalid,
@@ -152,6 +182,22 @@ mod tests {
             BlockIndexEntry::decode(&entry.encode()).unwrap().hash,
             entry.header.hash()
         );
+    }
+
+    #[test]
+    fn only_entries_with_a_body_are_candidates() {
+        assert!(!sample(BlockStatus::HeaderOnly).is_candidate());
+        assert!(sample(BlockStatus::HeaderValid).is_candidate());
+        assert!(sample(BlockStatus::FullyValid).is_candidate());
+        assert!(!sample(BlockStatus::Invalid).is_candidate());
+    }
+
+    #[test]
+    fn a_header_only_entry_is_still_a_valid_header() {
+        // 本体が無くても、ヘッダの連なりとしては有効である。
+        assert!(sample(BlockStatus::HeaderOnly).is_valid_header());
+        assert!(!sample(BlockStatus::HeaderOnly).has_body());
+        assert!(!sample(BlockStatus::Invalid).is_valid_header());
     }
 
     #[test]

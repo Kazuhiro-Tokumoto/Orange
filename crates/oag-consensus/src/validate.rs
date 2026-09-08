@@ -6,7 +6,7 @@
 //!
 //! RandomX の light モード検証は 1 ハッシュあたり数ミリ秒を要する。
 //! 攻撃者が無効なヘッダを大量に送ることでノードの CPU を枯渇させられるため、
-//! **PoW の検証は最も安価な検査をすべて通過した後に行う** (SPEC §10.4)。
+//! **PoW の検証は最も安価な検査をすべて通過した後に行う** (SPEC §10.5)。
 //! [`validate_block`] はこの順序を守る。
 
 use crate::block::{Block, BlockHeader, VERSION_BIT_AUX_POW};
@@ -450,7 +450,7 @@ pub fn validate_header(
         return Err(ValidationError::AuxPowNotEnabled);
     }
 
-    // ── PoW。安価な検査をすべて通過した場合のみ行う (SPEC §10.4) ──
+    // ── PoW。安価な検査をすべて通過した場合のみ行う (SPEC §10.5) ──
     if !pow.verify(header) {
         return Err(ValidationError::BadProofOfWork);
     }
@@ -459,7 +459,7 @@ pub fn validate_header(
 
 /// ブロックを検証する (SPEC §10.2)。
 ///
-/// 検査は安価なものから順に行い、PoW を最後に置く (SPEC §10.4)。
+/// 検査は安価なものから順に行い、PoW を最後に置く (SPEC §10.5)。
 pub fn validate_block(
     block: &Block,
     ctx: &BlockContext<'_>,
@@ -793,7 +793,7 @@ mod tests {
         assert!(validate_block(&block, &f.context(), &AcceptAnyPow).is_ok());
     }
 
-    // ━━━━━━━━ §10.4 検証順序 ━━━━━━━━
+    // ━━━━━━━━ §10.5 検証順序 ━━━━━━━━
 
     #[test]
     fn pow_is_verified_only_after_the_cheap_checks() {

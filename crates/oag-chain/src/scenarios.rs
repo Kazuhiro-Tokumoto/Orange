@@ -5,7 +5,7 @@
 //! メモリ実装と永続化実装の双方に対して同じものを走らせる。
 //!
 
-use crate::chain::{AcceptOutcome, Chain, ChainError};
+use crate::chain::{AcceptOutcome, Chain, ChainError, HeaderOutcome};
 use crate::genesis::GenesisSpec;
 use crate::index::BlockStatus;
 use crate::store::ChainStore;
@@ -423,4 +423,240 @@ pub fn median_time_past_follows_the_chain<S: ChainStore>(store: S) {
         chain.median_time_past_for_child_of(&tip),
         GENESIS_TIME + 15 * 60
     );
+}
+
+// ━━━━━━━━ headers-first 同期 ━━━━━━━━
+
+/// ヘッダだけを受け取っても先端は動かないこと。
+///
+/// 本体が無いのだから接続できない。ここで先端が動いてしまうと、
+/// 中身を検証していないブロックを採用したことになる。
+pub fn headers_alone_do_not_move_the_tip<S: ChainStore>(store: S) {
+    let mut chain = open(store);
+    let genesis = chain.tip().unwrap().hash;
+
+    // 本体は渡さず、ヘッダだけを 5 個受け取る。
+    let mut parent = genesis;
+    let mut headers = Vec::new();
+    for i in 0..5 {
+        let block = build_on(&chain, parent, 100 + i);
+        parent = block.header.hash();
+        assert_eq!(
+            chain
+                .accept_header(&block.header, &AcceptAnyPow, NOW)
+                .unwrap(),
+            HeaderOutcome::New
+        );
+        headers.push(block);
+    }
+
+    assert_eq!(chain.tip().unwrap().hash, genesis, "先端は動かないはず");
+    assert_eq!(chain.height().unwrap(), 0);
+    assert_eq!(chain.best_header().unwrap().height(), 5, "ヘッダは先行する");
+    assert_eq!(chain.indexed_blocks(), 6);
+
+    for header in &headers {
+        let entry = chain.entry(&header.header.hash()).unwrap();
+        assert_eq!(entry.status, BlockStatus::HeaderOnly);
+        assert!(!entry.has_body());
+    }
+
+    // 本体を古い順に渡すと、そのつど先端が伸びる。
+    for (i, block) in headers.into_iter().enumerate() {
+        let hash = block.header.hash();
+        assert_eq!(
+            chain.accept_block(block, &AcceptAnyPow, NOW).unwrap(),
+            AcceptOutcome::ExtendedTip
+        );
+        assert_eq!(chain.tip().unwrap().hash, hash);
+        assert_eq!(chain.height().unwrap(), i as u64 + 1);
+        assert_eq!(chain.entry(&hash).unwrap().status, BlockStatus::FullyValid);
+    }
+    assert!(chain.missing_bodies(100).unwrap().is_empty());
+}
+
+/// 同じヘッダを二度受け取っても増えないこと。
+pub fn a_known_header_is_not_added_twice<S: ChainStore>(store: S) {
+    let mut chain = open(store);
+    let genesis = chain.tip().unwrap().hash;
+    let block = build_on(&chain, genesis, 1);
+
+    assert_eq!(
+        chain
+            .accept_header(&block.header, &AcceptAnyPow, NOW)
+            .unwrap(),
+        HeaderOutcome::New
+    );
+    assert_eq!(
+        chain
+            .accept_header(&block.header, &AcceptAnyPow, NOW)
+            .unwrap(),
+        HeaderOutcome::Known
+    );
+    assert_eq!(chain.indexed_blocks(), 2);
+
+    // 本体を受け取った後は、ヘッダは「既知」のままである。
+    chain
+        .accept_block(block.clone(), &AcceptAnyPow, NOW)
+        .unwrap();
+    assert_eq!(
+        chain
+            .accept_header(&block.header, &AcceptAnyPow, NOW)
+            .unwrap(),
+        HeaderOutcome::Known
+    );
+    // 本体も二度目は重複として扱う。
+    assert_eq!(
+        chain.accept_block(block, &AcceptAnyPow, NOW).unwrap(),
+        AcceptOutcome::Duplicate
+    );
+    assert_eq!(chain.indexed_blocks(), 2);
+}
+
+/// 本体が飛び飛びに届いても、そろうまで先端が動かないこと。
+///
+/// 取り寄せは複数のピアに割り振るため、順序が入れ替わって届きうる。
+/// 途中が欠けたまま先へ進むと、検証していないブロックを飛ばして
+/// UTXO を更新することになる。
+pub fn bodies_arriving_out_of_order_wait_for_their_parents<S: ChainStore>(store: S) {
+    let mut chain = open(store);
+    let genesis = chain.tip().unwrap().hash;
+
+    let mut parent = genesis;
+    let mut blocks = Vec::new();
+    for i in 0..4 {
+        let block = build_on(&chain, parent, 200 + i);
+        parent = block.header.hash();
+        chain
+            .accept_header(&block.header, &AcceptAnyPow, NOW)
+            .unwrap();
+        blocks.push(block);
+    }
+
+    // 高さ 3 と 4 を先に渡す。親がまだ無いので繋がらない。
+    let fourth = blocks.pop().unwrap();
+    let third = blocks.pop().unwrap();
+    assert_eq!(
+        chain.accept_block(fourth, &AcceptAnyPow, NOW).unwrap(),
+        AcceptOutcome::SideChain,
+        "親の本体が無いうちは切り替えない"
+    );
+    assert_eq!(chain.height().unwrap(), 0);
+    assert_eq!(
+        chain.accept_block(third, &AcceptAnyPow, NOW).unwrap(),
+        AcceptOutcome::SideChain
+    );
+    assert_eq!(chain.height().unwrap(), 0);
+
+    // 高さ 2 を渡してもまだ足りない。
+    let second = blocks.pop().unwrap();
+    assert_eq!(
+        chain.accept_block(second, &AcceptAnyPow, NOW).unwrap(),
+        AcceptOutcome::SideChain
+    );
+    assert_eq!(chain.height().unwrap(), 0);
+
+    // 最後の欠けが埋まると、一気に 4 つ繋がる。
+    let first = blocks.pop().unwrap();
+    let outcome = chain.accept_block(first, &AcceptAnyPow, NOW).unwrap();
+    assert!(
+        matches!(outcome, AcceptOutcome::Reorganized(_)),
+        "4 つまとめて繋がる: {outcome:?}"
+    );
+    assert_eq!(chain.height().unwrap(), 4);
+    assert!(chain.missing_bodies(100).unwrap().is_empty());
+}
+
+/// 取り寄せるべき本体が、古い順に挙がること。
+pub fn missing_bodies_are_listed_oldest_first<S: ChainStore>(store: S) {
+    let mut chain = open(store);
+    let genesis = chain.tip().unwrap().hash;
+
+    let mut parent = genesis;
+    let mut expected = Vec::new();
+    for i in 0..6 {
+        let block = build_on(&chain, parent, 300 + i);
+        parent = block.header.hash();
+        chain
+            .accept_header(&block.header, &AcceptAnyPow, NOW)
+            .unwrap();
+        expected.push(block.header.hash());
+    }
+
+    assert_eq!(chain.missing_bodies(100).unwrap(), expected);
+    assert_eq!(
+        chain.missing_bodies(2).unwrap(),
+        expected[..2].to_vec(),
+        "上限は古い側から効く"
+    );
+    assert!(chain.missing_bodies(0).unwrap().is_empty());
+}
+
+/// `getheaders` にロケータの分岐点から答えること。
+pub fn headers_are_served_from_the_fork_point<S: ChainStore>(store: S) {
+    let mut chain = open(store);
+    let genesis = chain.tip().unwrap().hash;
+    let hashes = extend(&mut chain, genesis, 10, 1);
+
+    // 何も知らない相手 (ジェネシスだけ) には高さ 1 から返す。
+    let all = chain.headers_after(&[genesis], &Hash::ZERO, 100).unwrap();
+    assert_eq!(all.len(), 10);
+    assert_eq!(all[0].height, 1);
+    assert_eq!(all[9].height, 10);
+
+    // 高さ 4 まで知っている相手には高さ 5 から返す。
+    let after = chain.headers_after(&[hashes[3]], &Hash::ZERO, 100).unwrap();
+    assert_eq!(after.len(), 6);
+    assert_eq!(after[0].height, 5);
+
+    // 上限が効くこと。
+    let capped = chain.headers_after(&[genesis], &Hash::ZERO, 3).unwrap();
+    assert_eq!(capped.len(), 3);
+    assert_eq!(capped[2].height, 3);
+
+    // stop で打ち切ること (そのヘッダを含む)。
+    let stopped = chain.headers_after(&[genesis], &hashes[2], 100).unwrap();
+    assert_eq!(stopped.len(), 3);
+    assert_eq!(stopped[2].height, 3);
+
+    // 先端まで知っている相手には何も返さない。
+    assert!(chain
+        .headers_after(&[hashes[9]], &Hash::ZERO, 100)
+        .unwrap()
+        .is_empty());
+
+    // 知らないハッシュしか無いロケータにはジェネシスの次から返す。
+    let unknown = oag_primitives::hash::block_hash(b"unknown block");
+    let from_scratch = chain.headers_after(&[unknown], &Hash::ZERO, 100).unwrap();
+    assert_eq!(from_scratch.len(), 10);
+    assert_eq!(from_scratch[0].height, 1);
+}
+
+/// 無効と分かっているブロックのヘッダを受け取っても、蘇らないこと。
+pub fn a_header_for_an_invalid_block_is_refused<S: ChainStore>(store: S) {
+    let mut chain = open(store);
+    let genesis = chain.tip().unwrap().hash;
+
+    // 報酬を取りすぎたブロックを作る。ヘッダは正しいので、接続を試みて
+    // 初めて無効と判明する。
+    let mut bad = build_on(&chain, genesis, 7);
+    bad.transactions[0].outputs[0].amount = Amount::from_oag(1_000).unwrap();
+    bad.header.merkle_root = merkle::merkle_root(&[bad.transactions[0].txid()]).unwrap();
+    let bad_hash = bad.header.hash();
+    let header = bad.header;
+
+    assert_eq!(
+        chain.accept_block(bad, &AcceptAnyPow, NOW).unwrap(),
+        AcceptOutcome::SideChain,
+        "接続に失敗するので先端にはならない"
+    );
+    assert_eq!(chain.entry(&bad_hash).unwrap().status, BlockStatus::Invalid);
+    assert_eq!(chain.tip().unwrap().hash, genesis);
+
+    // 同じヘッダを送り直されても受け付けない。
+    assert!(matches!(
+        chain.accept_header(&header, &AcceptAnyPow, NOW),
+        Err(ChainError::InvalidAncestor(_))
+    ));
+    assert_eq!(chain.entry(&bad_hash).unwrap().status, BlockStatus::Invalid);
 }

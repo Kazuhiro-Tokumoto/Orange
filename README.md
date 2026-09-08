@@ -50,7 +50,7 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 | 7d | TCP トランスポート | 完了 |
 | 8 | マイナー | 完了 |
 | 9a | ノード (oag-node) — 記憶域・チェーン・採掘・CLI | 完了 |
-| 9b | ノードへの P2P 組み込み (2 台での同期) | 未着手 |
+| 9b | ノードへの P2P 組み込み (2 台での同期) | 完了 |
 | 10 | RPC、CLI ウォレット | 未着手 |
 | 11 | ジェネシス確定 → テストネット公開 | 未着手 |
 
@@ -69,7 +69,7 @@ crates/
 ├── oag-net/          P2P プロトコル (枠組み・メッセージ・ハンドシェイク・
 │                    ロケータ・取り寄せの割り振り・Compact Blocks・TCP)
 ├── oag-miner/        ブロックテンプレートの組み立てと nonce の探索
-└── oag-node/         実行ファイル (oag-node) — 全部を繋いだノード
+└── oag-node/         ノード本体・専用スレッド・ピアとのやり取り・実行ファイル
 ```
 
 `oag-pow` の RandomX は feature `randomx` の背後にある。C++ 実装のビルドに
@@ -109,6 +109,22 @@ cargo build --release -p oag-node
 ./target/release/oag-node export-blocks --network regtest \
     --datadir ./oag-data --out ./block
 ```
+
+2 台を繋ぐには、片方を待ち受けにして、もう片方から `--connect` します。
+
+```sh
+# 1 台目: 待ち受けて掘る
+./target/release/oag-node run --network regtest --datadir ./node-a \
+    --listen 127.0.0.1:19444 --mine --payout <アドレス>
+
+# 2 台目: 掘らずに繋いで同期する
+./target/release/oag-node run --network regtest --datadir ./node-b \
+    --no-listen --connect 127.0.0.1:19444
+```
+
+同期は headers-first です。ヘッダを先に集めてチェーンの形を確かめ、
+そのうえで本体を取り寄せます。受け取ったブロックは**自分で検証**して
+おり、UTXO セットは相手から貰うのではなく自分で組み立てています。
 
 `oag-node` は RandomX を必ず使うため、ビルドに cmake と C++ コンパイラが
 必要です。

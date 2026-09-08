@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+name = "oag_node"
+path = "src/lib.rs"
+
 [[bin]]
 name = "oag-node"
 path = "src/main.rs"
@@ -19,6 +23,8 @@ oag-consensus.workspace = true
 oag-mempool.workspace = true
 oag-miner = { workspace = true, features = ["randomx"] }
 oag-pow = { workspace = true, features = ["randomx"] }
+oag-net = { workspace = true, features = ["tokio"] }
 oag-primitives.workspace = true
 oag-store.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }

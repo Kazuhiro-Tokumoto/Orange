@@ -693,7 +693,7 @@ mod tests {
         );
     }
 
-    // ━━━━━━━━ 未知の版数 (SPEC §10.5 のポリシー層) ━━━━━━━━
+    // ━━━━━━━━ 未知の版数 (SPEC §10.4 のポリシー層) ━━━━━━━━
 
     #[test]
     fn refuses_to_create_an_unknown_lock_version() {

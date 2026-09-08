@@ -21,6 +21,7 @@ use crate::magic::MAGIC_LEN;
 use crate::message::{Message, VersionMessage};
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 
 /// 一度に読み取る大きさ。
@@ -137,6 +138,77 @@ impl Connection {
             .peer_version()
             .cloned()
             .expect("完了しているなら相手の version はある"))
+    }
+
+    /// 読む側と書く側に分ける。
+    ///
+    /// 溜め込んでいる受信途中のバイト列は読む側が引き継ぐ。ハンドシェイクの
+    /// 直後に分けても取りこぼさない。
+    pub fn split(self) -> (Reader, Writer) {
+        let (read_half, write_half) = self.stream.into_split();
+        (
+            Reader {
+                half: read_half,
+                magic: self.magic,
+                buffer: self.buffer,
+            },
+            Writer {
+                half: write_half,
+                magic: self.magic,
+            },
+        )
+    }
+}
+
+/// 受信専用の半分。
+///
+/// [`Connection::split`] で作る。読む側と書く側を別の作業に分けられる
+/// ようにするためである。1 本の作業で読み書きの両方を待つと、
+/// **待ち合わせのどちらかを打ち切ることになり、読みかけの内容を
+/// 取りこぼしうる**。半分に分ければ、それぞれの作業の待ち合わせは
+/// 1 つだけになる。
+pub struct Reader {
+    half: OwnedReadHalf,
+    magic: [u8; MAGIC_LEN],
+    buffer: Vec<u8>,
+}
+
+impl Reader {
+    /// メッセージを 1 個受け取る。そろうまで待つ。
+    pub async fn recv(&mut self) -> Result<Message, TransportError> {
+        loop {
+            if let Some((message, consumed)) = frame::decode(self.magic, &self.buffer)? {
+                self.buffer.drain(..consumed);
+                return Ok(message);
+            }
+
+            if self.buffer.len() > MAX_BUFFERED {
+                return Err(TransportError::BufferOverflow { max: MAX_BUFFERED });
+            }
+
+            let mut chunk = [0u8; READ_CHUNK];
+            let read = self.half.read(&mut chunk).await?;
+            if read == 0 {
+                return Err(TransportError::Closed);
+            }
+            self.buffer.extend_from_slice(&chunk[..read]);
+        }
+    }
+}
+
+/// 送信専用の半分。
+pub struct Writer {
+    half: OwnedWriteHalf,
+    magic: [u8; MAGIC_LEN],
+}
+
+impl Writer {
+    /// メッセージを 1 個送る。
+    pub async fn send(&mut self, message: &Message) -> Result<(), TransportError> {
+        let bytes = frame::encode(self.magic, message);
+        self.half.write_all(&bytes).await?;
+        self.half.flush().await?;
+        Ok(())
     }
 }
 

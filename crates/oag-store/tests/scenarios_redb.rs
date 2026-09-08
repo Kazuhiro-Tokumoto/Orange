@@ -66,3 +66,11 @@ scenario!(the_difficulty_is_fixed_until_the_window_is_full);
 scenario!(median_time_past_follows_the_chain);
 scenario!(a_reorg_matches_a_direct_build, two);
 scenario!(a_deep_reorg_stays_consistent, two);
+
+// headers-first 同期
+scenario!(headers_alone_do_not_move_the_tip);
+scenario!(a_known_header_is_not_added_twice);
+scenario!(bodies_arriving_out_of_order_wait_for_their_parents);
+scenario!(missing_bodies_are_listed_oldest_first);
+scenario!(headers_are_served_from_the_fork_point);
+scenario!(a_header_for_an_invalid_block_is_refused);

@@ -5,7 +5,7 @@
 //! # 最良チェーンの選び方
 //!
 //! **累積作業量 (各ブロックの難易度の総和) が最大**のチェーンを採用する。
-//! ブロック数ではない (SPEC §10.5)。同点の場合は現在の先端を保つ。
+//! ブロック数ではない (SPEC §10.6)。同点の場合は現在の先端を保つ。
 //!
 //! # 二段階の検証
 //!
@@ -34,10 +34,19 @@ use oag_consensus::validate::{
     median_time_past, validate_block, validate_header, BlockContext, HeaderContext, PowVerifier,
     ValidationError,
 };
-use oag_consensus::Block;
+use oag_consensus::{Block, BlockHeader};
 use oag_pow::lwma::{self, LwmaError};
 use oag_primitives::Hash;
 use std::collections::HashMap;
+
+/// ヘッダを受け取った結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderOutcome {
+    /// 初めて見るヘッダで、インデックスに加えた。
+    New,
+    /// すでに知っていた。
+    Known,
+}
 
 /// ブロックを受け取った結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,11 +307,8 @@ impl<S: ChainStore> Chain<S> {
         now: i64,
     ) -> Result<AcceptOutcome, ChainError> {
         let hash = block.header.hash();
-        if self.index.contains_key(&hash) {
-            return Ok(AcceptOutcome::Duplicate);
-        }
 
-        // 最も安価な検査から行う (SPEC §10.4)。
+        // 最も安価な検査から行う (SPEC §10.5)。
         let size = block.size();
         if size > params::MAX_BLOCK_SIZE {
             return Err(ChainError::BlockTooLarge {
@@ -311,7 +317,73 @@ impl<S: ChainStore> Chain<S> {
             });
         }
 
-        let parent_hash = block.header.prev_hash;
+        let entry = match self.index.get(&hash) {
+            // 本体をすでに持っている。
+            Some(known) if known.has_body() => return Ok(AcceptOutcome::Duplicate),
+            Some(known) if known.status == BlockStatus::Invalid => {
+                return Err(ChainError::InvalidAncestor(hash))
+            }
+            // ヘッダだけ先に受け取っていた。本体が届いたので格上げする。
+            //
+            // ヘッダはハッシュが一致する以上まったく同じものであり、
+            // 受け取った時点で検証済みである。やり直す必要はない。
+            Some(known) => BlockIndexEntry {
+                status: BlockStatus::HeaderValid,
+                ..known.clone()
+            },
+            None => self.validated_entry(&block.header, pow, now)?,
+        };
+
+        self.store
+            .put_block(&block, &entry)
+            .map_err(Self::store_err)?;
+        self.index.insert(hash, entry);
+
+        self.activate_best_chain(pow, now)
+    }
+
+    /// ヘッダだけを受け取る (headers-first 同期)。
+    ///
+    /// ヘッダと PoW を検証してインデックスに載せる。本体が無いので接続は
+    /// しない。どの本体を取り寄せるべきかは
+    /// [`Chain::missing_bodies`] が答える。
+    ///
+    /// すでに知っているヘッダなら [`HeaderOutcome::Known`] を返す。
+    pub fn accept_header(
+        &mut self,
+        header: &BlockHeader,
+        pow: &dyn PowVerifier,
+        now: i64,
+    ) -> Result<HeaderOutcome, ChainError> {
+        let hash = header.hash();
+        if let Some(known) = self.index.get(&hash) {
+            return if known.status == BlockStatus::Invalid {
+                Err(ChainError::InvalidAncestor(hash))
+            } else {
+                Ok(HeaderOutcome::Known)
+            };
+        }
+
+        let mut entry = self.validated_entry(header, pow, now)?;
+        entry.status = BlockStatus::HeaderOnly;
+        self.store
+            .put_index_entry(&entry)
+            .map_err(Self::store_err)?;
+        self.index.insert(hash, entry);
+        Ok(HeaderOutcome::New)
+    }
+
+    /// ヘッダを検証し、インデックスの 1 件を組み立てる。
+    ///
+    /// 状態は `HeaderValid` (本体あり) を仮に入れる。ヘッダだけの場合は
+    /// 呼び出し側が `HeaderOnly` に書き換える。
+    fn validated_entry(
+        &self,
+        header: &BlockHeader,
+        pow: &dyn PowVerifier,
+        now: i64,
+    ) -> Result<BlockIndexEntry, ChainError> {
+        let parent_hash = header.prev_hash;
         let parent = self
             .index
             .get(&parent_hash)
@@ -329,20 +401,38 @@ impl<S: ChainStore> Chain<S> {
             expected_difficulty: self.expected_difficulty_for_child_of(&parent_hash)?,
             now,
         };
-        validate_header(&block.header, &ctx, pow)?;
+        validate_header(header, &ctx, pow)?;
 
-        let entry = BlockIndexEntry {
-            hash,
-            header: block.header,
-            cumulative_work: parent_work + u128::from(block.header.difficulty),
+        Ok(BlockIndexEntry {
+            hash: header.hash(),
+            header: *header,
+            cumulative_work: parent_work + u128::from(header.difficulty),
             status: BlockStatus::HeaderValid,
-        };
-        self.store
-            .put_block(&block, &entry)
-            .map_err(Self::store_err)?;
-        self.index.insert(hash, entry);
+        })
+    }
 
-        self.activate_best_chain(pow, now)
+    /// アクティブチェーンに合流するまでの経路が、すべて本体を持っているか。
+    ///
+    /// headers-first 同期では、ヘッダだけ知っている祖先の先に本体が届く
+    /// ことがある。そのまま切り替えにかかると、途中で本体が無いことに
+    /// 気づいて巻き戻す羽目になる。切り替える前に確かめる。
+    fn path_has_all_bodies(&self, target: &Hash) -> Result<bool, ChainError> {
+        let mut cursor = *target;
+        loop {
+            if self.is_active(&cursor)? {
+                return Ok(true);
+            }
+            let Some(entry) = self.index.get(&cursor) else {
+                return Ok(false);
+            };
+            if !entry.has_body() {
+                return Ok(false);
+            }
+            if entry.height() == 0 {
+                return Ok(true);
+            }
+            cursor = entry.prev_hash();
+        }
     }
 
     /// 最良のチェーンへ切り替える。
@@ -354,17 +444,26 @@ impl<S: ChainStore> Chain<S> {
         loop {
             let tip_work = self.tip()?.cumulative_work;
 
+            // 作業量の多い順に、経路がそろっているものを探す。
             // 同点なら現先端を保つ。最初に受け取ったチェーンを優先する。
-            let best = self
+            let mut candidates: Vec<(u128, Hash)> = self
                 .index
                 .values()
                 .filter(|e| e.is_candidate() && e.cumulative_work > tip_work)
-                .max_by(|a, b| {
-                    a.cumulative_work
-                        .cmp(&b.cumulative_work)
-                        .then_with(|| b.hash.as_bytes().cmp(a.hash.as_bytes()))
-                })
-                .map(|e| e.hash);
+                .map(|e| (e.cumulative_work, e.hash))
+                .collect();
+            candidates.sort_by(|a, b| {
+                b.0.cmp(&a.0)
+                    .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
+            });
+
+            let mut best = None;
+            for (_, hash) in candidates {
+                if self.path_has_all_bodies(&hash)? {
+                    best = Some(hash);
+                    break;
+                }
+            }
 
             let Some(target) = best else {
                 return Ok(AcceptOutcome::SideChain);
@@ -519,6 +618,113 @@ impl<S: ChainStore> Chain<S> {
         Ok(())
     }
 
+    /// 最も作業量の多いヘッダの先端。
+    ///
+    /// 本体の有無は問わない。同期がどこまで進んだかを測る基準であり、
+    /// アクティブチェーンの先端 ([`Chain::tip`]) とは別物である。
+    /// headers-first では、ヘッダの先端が本体の先端よりずっと先を行く。
+    pub fn best_header(&self) -> Result<BlockIndexEntry, ChainError> {
+        self.index
+            .values()
+            .filter(|e| e.is_valid_header())
+            .max_by(|a, b| {
+                a.cumulative_work
+                    .cmp(&b.cumulative_work)
+                    .then_with(|| b.hash.as_bytes().cmp(a.hash.as_bytes()))
+            })
+            .cloned()
+            .ok_or(ChainError::BadGenesis("インデックスが空である"))
+    }
+
+    /// 最良ヘッダチェーン上の、指定した高さのブロックハッシュを集める。
+    ///
+    /// `heights` は**新しい順 (降順)** に与える。ブロックロケータの構築に
+    /// 用いる。先端から親をたどって 1 度で集めるため、1 つずつ引くより安い。
+    ///
+    /// アクティブチェーンではなく**ヘッダの連なり**をたどる。headers-first
+    /// では本体がまだ無い高さまでヘッダが伸びており、そこまで「知っている」
+    /// と相手に伝えないと、同じヘッダを何度も送らせることになる。
+    pub fn header_hashes_at(&self, heights: &[u64]) -> Result<Vec<Hash>, ChainError> {
+        let mut cursor = self.best_header()?;
+        let mut out = Vec::with_capacity(heights.len());
+        for &wanted in heights {
+            if wanted > cursor.height() {
+                continue;
+            }
+            while cursor.height() > wanted {
+                let Some(parent) = self.index.get(&cursor.prev_hash()) else {
+                    return Ok(out);
+                };
+                cursor = parent.clone();
+            }
+            out.push(cursor.hash);
+        }
+        Ok(out)
+    }
+
+    /// 本体をまだ持っていないブロックを、繋ぐべき順に最大 `max` 件返す。
+    ///
+    /// 最良ヘッダチェーンをジェネシス側から順にたどり、本体の無いものを
+    /// 拾う。**古い順に返す。** ブロックは親から順にしか繋げないため、
+    /// この並びを崩して取り寄せても繋げられない。
+    pub fn missing_bodies(&self, max: usize) -> Result<Vec<Hash>, ChainError> {
+        if max == 0 {
+            return Ok(Vec::new());
+        }
+        // 最良ヘッダの先端から遡り、本体を持つ祖先に着いたら止める。
+        let mut cursor = self.best_header()?.hash;
+        let mut missing = Vec::new();
+        while let Some(entry) = self.index.get(&cursor) {
+            if entry.has_body() {
+                break;
+            }
+            missing.push(cursor);
+            if entry.height() == 0 {
+                break;
+            }
+            cursor = entry.prev_hash();
+        }
+        // 遡って集めたので新しい順である。古い順に直し、頭から max 件返す。
+        missing.reverse();
+        missing.truncate(max);
+        Ok(missing)
+    }
+
+    /// `getheaders` に応える。
+    ///
+    /// ロケータとアクティブチェーンが最後に一致する高さを求め、その次から
+    /// 最大 `max` 件のヘッダを古い順に返す。`stop` が非ゼロなら、そこまでで
+    /// 打ち切る (そのヘッダを含む)。
+    ///
+    /// ロケータに一致する点が無ければジェネシスの次から返す。相手が別の
+    /// チェーンを見ている場合であり、こちらの分岐点から送り直すことになる。
+    pub fn headers_after(
+        &self,
+        locator: &[Hash],
+        stop: &Hash,
+        max: usize,
+    ) -> Result<Vec<BlockHeader>, ChainError> {
+        let fork = locator_fork_height(self, locator)?;
+        let tip_height = self.height()?;
+
+        let mut headers = Vec::new();
+        let mut height = fork + 1;
+        while headers.len() < max && height <= tip_height {
+            let Some(hash) = self.hash_at_height(height)? else {
+                break;
+            };
+            let Some(entry) = self.index.get(&hash) else {
+                break;
+            };
+            headers.push(entry.header);
+            if hash == *stop {
+                break;
+            }
+            height += 1;
+        }
+        Ok(headers)
+    }
+
     /// ブロックとその子孫すべてに無効の印を付ける。
     fn mark_invalid(&mut self, hash: &Hash) -> Result<(), ChainError> {
         let mut frontier = vec![*hash];
@@ -570,4 +776,24 @@ fn check_genesis(genesis: &Block, genesis_difficulty: u64) -> Result<(), ChainEr
         return Err(ChainError::BadGenesis("大きすぎる"));
     }
     Ok(())
+}
+
+/// ロケータとアクティブチェーンが最後に一致する高さ。
+///
+/// 一致する点が無ければ 0 (ジェネシス) を返す。ジェネシスは必ず共通で
+/// あるためである。
+fn locator_fork_height<S: ChainStore>(
+    chain: &Chain<S>,
+    locator: &[Hash],
+) -> Result<u64, ChainError> {
+    for hash in locator {
+        let Some(entry) = chain.entry(hash) else {
+            continue;
+        };
+        let height = entry.height();
+        if chain.hash_at_height(height)? == Some(*hash) {
+            return Ok(height);
+        }
+    }
+    Ok(0)
 }
