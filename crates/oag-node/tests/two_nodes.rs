@@ -120,7 +120,7 @@ fn a_new_node_catches_up_with_an_existing_chain() {
 
     runtime.block_on(async {
         // A に 5 ブロック積む。この時点で B は繋がっていない。
-        a.start_mining(payout(), Some(5)).await.unwrap();
+        a.start_mining(payout(), Some(5), false).await.unwrap();
         wait_for_mining(&a, 5).await;
         assert_eq!(b.status().await.unwrap().height, 0, "B はまだ空のはず");
 
@@ -159,7 +159,7 @@ fn a_block_mined_while_connected_reaches_the_peer() {
         assert_eq!(a.status().await.unwrap().height, 0);
         assert_eq!(b.status().await.unwrap().height, 0);
 
-        a.start_mining(payout(), Some(3)).await.unwrap();
+        a.start_mining(payout(), Some(3), false).await.unwrap();
         wait_for_mining(&a, 3).await;
 
         wait_for_height(&b, 3, "中継").await;
@@ -185,7 +185,7 @@ fn a_synced_node_rebuilds_the_utxo_set_itself() {
     let b = service_b.handle();
 
     runtime.block_on(async {
-        a.start_mining(payout(), Some(4)).await.unwrap();
+        a.start_mining(payout(), Some(4), false).await.unwrap();
         wait_for_mining(&a, 4).await;
 
         let addr = listen(a.clone()).await;

@@ -21,7 +21,7 @@ use oag_consensus::{Block, BlockHeader};
 use oag_mempool::Mempool;
 use oag_miner::mine::{MiningOutcome, NeverStop};
 use oag_miner::{build_template, TemplateError, TemplateRequest};
-use oag_pow::randomx::{RandomXPowError, RandomXVerifier};
+use oag_pow::randomx::{RandomXMiner, RandomXPowError, RandomXVerifier};
 use oag_pow::seed_height;
 use oag_primitives::{Hash, Network};
 use oag_store::{Store, StoreError};
@@ -112,8 +112,19 @@ pub struct Node {
     chain: Chain<Store>,
     mempool: Mempool,
     network: Network,
-    /// 現在のシードエポックの検証器。
+    /// 現在のシードエポックの検証器 (light、256 MB)。
+    ///
+    /// **検証には常にこちらを使う。** 採掘を fast モードで行っていても、
+    /// 掘れたブロックは light の検証器に通す。両者が同じハッシュを返す
+    /// ことは `oag-pow` の試験で確かめてあるが、確かめてあることと
+    /// 実際に通すことは別である。
     verifier: Option<(u64, RandomXVerifier)>,
+    /// 現在のシードエポックの採掘器 (fast、2 GB)。
+    ///
+    /// `None` なら light モードで掘る。
+    miner: Option<(u64, RandomXMiner)>,
+    /// fast モードで掘るか。
+    fast_mining: bool,
 }
 
 impl Node {
@@ -134,6 +145,8 @@ impl Node {
             mempool: Mempool::new(),
             network,
             verifier: None,
+            miner: None,
+            fast_mining: false,
         })
     }
 
@@ -180,10 +193,7 @@ impl Node {
         {
             return Ok(());
         }
-        let seed = self
-            .chain
-            .hash_at_height(wanted)?
-            .unwrap_or(self.chain.tip()?.hash);
+        let seed = self.seed_for(wanted)?;
         self.verifier = Some((wanted, RandomXVerifier::new(&seed, wanted)?));
         Ok(())
     }
@@ -240,14 +250,83 @@ impl Node {
     ) -> Result<MinedBlock, NodeError> {
         let tip = self.chain.tip()?;
         let height = tip.height() + 1;
-        self.with_verifier(height, |node, verifier| {
-            node.mine_with(verifier, &tip.hash, height, payout, now, max_attempts)
-        })
+        self.ensure_miner(height);
+        // 採掘器も一旦取り出す。検証器と同じ理由で、借りたままチェーンを
+        // 変更できないためである。失敗しても必ず戻す。
+        let miner = self.miner.take();
+        let result = self.with_verifier(height, |node, verifier| {
+            let fast = miner.as_ref().map(|(_, m)| m);
+            node.mine_with(verifier, fast, &tip.hash, height, payout, now, max_attempts)
+        });
+        self.miner = miner;
+        result
     }
 
+    /// fast モード (2 GB) で掘るようにする。
+    ///
+    /// データセットの構築に 1 分前後かかる。**ここで済ませておく。**
+    /// 掘り始めてから固まったように見えるのを避けるためである。
+    ///
+    /// 2 GB を確保できなければ誤りを返す。呼び出し側は light モードの
+    /// まま続けてよい。
+    pub fn enable_fast_mining(&mut self, height: u64) -> Result<(), NodeError> {
+        self.fast_mining = true;
+        let wanted = seed_height(height);
+        let seed = self.seed_for(wanted)?;
+        self.miner = Some((wanted, RandomXMiner::new(&seed, wanted)?));
+        Ok(())
+    }
+
+    /// fast モードで掘っているか。
+    pub fn is_fast_mining(&self) -> bool {
+        self.miner.is_some()
+    }
+
+    /// この高さのシードエポックに合う採掘器を用意する。
+    ///
+    /// fast モードでないなら何もしない。エポックが変わっていたら作り直す。
+    /// **作り直しには 1 分前後かかり、その間は掘れない。** 2048 ブロック
+    /// (約 34 時間) に 1 度である。
+    ///
+    /// 確保に失敗したら light モードに退き、以後 fast は試みない。
+    /// 採掘そのものは続く。
+    fn ensure_miner(&mut self, height: u64) {
+        if !self.fast_mining {
+            return;
+        }
+        let wanted = seed_height(height);
+        if self.miner.as_ref().is_some_and(|(e, _)| *e == wanted) {
+            return;
+        }
+        let built = self
+            .seed_for(wanted)
+            .and_then(|seed| Ok(RandomXMiner::new(&seed, wanted)?));
+        match built {
+            Ok(miner) => self.miner = Some((wanted, miner)),
+            Err(e) => {
+                eprintln!(
+                    "fast モードのデータセットを用意できない: {e}\n\
+                     light モード (256 MB) で採掘を続ける。速さはおよそ 6 分の 1 になる。"
+                );
+                self.fast_mining = false;
+                self.miner = None;
+            }
+        }
+    }
+
+    /// そのシード高さのブロックハッシュ。
+    fn seed_for(&self, seed_height: u64) -> Result<Hash, NodeError> {
+        Ok(self
+            .chain
+            .hash_at_height(seed_height)?
+            .unwrap_or(self.chain.tip()?.hash))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn mine_with(
         &mut self,
         verifier: &RandomXVerifier,
+        fast: Option<&RandomXMiner>,
         prev_hash: &Hash,
         height: u64,
         payout: &Lock,
@@ -278,7 +357,10 @@ impl Node {
             let template = build_template(&request, &self.mempool)?;
 
             let batch = NONCE_BATCH.min(max_attempts - attempts);
-            let outcome = oag_miner::mine(&template, verifier, 0, batch, &NeverStop)?;
+            // 探すのは fast、確かめるのは light。どちらも同じハッシュを返す。
+            let hasher: &dyn oag_miner::mine::PowHasher =
+                fast.map_or(verifier as &dyn oag_miner::mine::PowHasher, |m| m);
+            let outcome = oag_miner::mine(&template, hasher, 0, batch, &NeverStop)?;
             attempts += outcome.attempts();
 
             if let MiningOutcome::Found { block, .. } = outcome {

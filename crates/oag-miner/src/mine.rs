@@ -148,6 +148,15 @@ impl PowHasher for oag_pow::randomx::RandomXVerifier {
     }
 }
 
+#[cfg(feature = "randomx")]
+impl PowHasher for oag_pow::randomx::RandomXMiner {
+    /// light モードと**同じ値を返す**。違うのは速さだけである。
+    fn hash(&self, header_bytes: &[u8]) -> Hash {
+        self.hash(header_bytes)
+            .unwrap_or(Hash::from_bytes([0xff; 32]))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

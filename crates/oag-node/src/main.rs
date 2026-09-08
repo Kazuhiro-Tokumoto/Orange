@@ -30,6 +30,12 @@ enum Command {
         /// 採掘する。`--payout` が必要。
         #[arg(long)]
         mine: bool,
+        /// 採掘に fast モード (2 GB) を使う。light モードのおよそ 6 倍速い。
+        ///
+        /// データセットの構築に 1 分前後かかる。2 GB を確保できなければ
+        /// light モードで続ける。**検証は常に light モードで行う。**
+        #[arg(long)]
+        fast: bool,
         /// 報酬の受取先アドレス。
         #[arg(long)]
         payout: Option<String>,
@@ -111,6 +117,7 @@ fn run() -> Result<(), String> {
         Command::Run {
             common,
             mine,
+            fast,
             payout,
             blocks,
             listen,
@@ -175,7 +182,7 @@ fn run() -> Result<(), String> {
 
                 if let Some(lock) = payout {
                     println!("採掘を開始する (Ctrl-C で中断してよい)");
-                    handle.start_mining(lock, blocks).await?;
+                    handle.start_mining(lock, blocks, fast).await?;
                 }
 
                 wait_for_shutdown(&handle, blocks.is_some(), exit_after).await;

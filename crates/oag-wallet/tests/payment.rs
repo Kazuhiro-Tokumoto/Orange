@@ -63,7 +63,7 @@ impl Drop for TempDir {
 async fn mine(handle: &NodeHandle, payout: &Address, blocks: u64) {
     let mut events = handle.subscribe();
     handle
-        .start_mining(Lock::from_address(payout), Some(blocks))
+        .start_mining(Lock::from_address(payout), Some(blocks), false)
         .await
         .unwrap();
 

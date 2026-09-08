@@ -58,8 +58,9 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 | 10c | 安全性の強化 (鍵の暗号化・種からの導出) | 完了 |
 | 11a | チェーン選択の候補探しを漸進的にする | 完了 |
 | 11b | ジェネシス確定 (3 ネットワークすべて) | 完了 |
-| 11c | ピア発見 (アドレス帳・`addr`・シードノード) | 未着手 |
-| 11d | テストネット公開 | 未着手 |
+| 11c | RandomX の fast モード (採掘) | 完了 |
+| 11d | ピア発見 (アドレス帳・`addr`・シードノード) | 未着手 |
+| 11e | テストネット公開 | 未着手 |
 
 ## クレート構成
 
@@ -100,13 +101,28 @@ cargo test -p oag-net --features tokio
 mainnet / testnet / regtest のいずれも起動します。**手元で試すなら
 regtest** です。難易度が 1 なので 1 台ですぐにブロックが積み上がります。
 
-| ネットワーク | ジェネシス難易度 | 1 コアでのブロック間隔 (実測 30 H/s) |
-| --- | ---: | ---: |
-| mainnet | 1,000 | 約 36 秒 |
-| testnet | 10 | 約 0.4 秒 |
-| regtest | 1 | ほぼ即座 |
+| ネットワーク | ジェネシス難易度 |
+| --- | ---: |
+| mainnet | 1,000 |
+| testnet | 10 |
+| regtest | 1 |
 
 最初の 90 ブロックはこの難易度のままです (LWMA は窓が埋まるまで働かない)。
+
+採掘には `--fast` を付けると RandomX の fast モード (2 GB) を使います。
+省くと light モード (256 MB) です。**検証は常に light モードで行う**ので、
+2 GB 積んでいない機械でもノードは動きます。
+
+```sh
+./target/release/oag-node run --network mainnet --datadir ./oag-data \
+    --mine --fast --payout <アドレス> --blocks 5
+```
+
+手元のハッシュレートは次で測れます。
+
+```sh
+cargo run --release -p oag-pow --features randomx --example hashrate
+```
 
 ```sh
 cargo build --release -p oag-node

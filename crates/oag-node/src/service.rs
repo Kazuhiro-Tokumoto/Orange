@@ -128,6 +128,8 @@ enum Request {
         payout: Option<Lock>,
         /// この数だけ掘ったら止める。`None` なら止まらない。
         blocks: Option<u64>,
+        /// fast モード (2 GB) で掘るか。
+        fast: bool,
     },
     /// 高さからブロックハッシュを引く。
     HashAtHeight {
@@ -296,10 +298,21 @@ impl NodeHandle {
     /// [`NodeEvent::MiningStopped`] を報せる。**すでに掘った数とは無関係に、
     /// ここから数える。** 止まったあとに掘り増したいときも同じ呼び方で
     /// 済む。
-    pub async fn start_mining(&self, payout: Lock, blocks: Option<u64>) -> Result<(), String> {
+    /// 採掘を始める。
+    ///
+    /// `fast` を立てると 2 GB のデータセットを構築して掘る。light モードの
+    /// およそ 6 倍速い。**構築に 1 分前後かかり、その間ノードは他の要求に
+    /// 応えない。** 確保できなければ light モードのまま続ける。
+    pub async fn start_mining(
+        &self,
+        payout: Lock,
+        blocks: Option<u64>,
+        fast: bool,
+    ) -> Result<(), String> {
         self.tell(Request::SetMining {
             payout: Some(payout),
             blocks,
+            fast,
         })
         .await
     }
@@ -309,6 +322,7 @@ impl NodeHandle {
         self.tell(Request::SetMining {
             payout: None,
             blocks: None,
+            fast: false,
         })
         .await
     }
@@ -362,6 +376,13 @@ struct Service {
     events: broadcast::Sender<NodeEvent>,
     /// これまでに掘れたブロックの数。
     mined: u64,
+    /// 採掘を始めてからの試行回数と、始めた時刻。
+    ///
+    /// 実効ハッシュレートを出すために持つ。**掘れたブロック数から
+    /// 逆算すると振れが大きすぎて比較にならない** (難易度 1,000 で
+    /// 5 ブロックなら 1 標準偏差が 45 % ある)。試行回数を直接数える。
+    attempts: u64,
+    mining_since: Option<std::time::Instant>,
     /// 掘った数がここに達したら止める。
     mine_until: Option<u64>,
 }
@@ -405,6 +426,8 @@ impl NodeService {
                     mining: None,
                     events: events_for_thread,
                     mined: 0,
+                    attempts: 0,
+                    mining_since: None,
                     mine_until: None,
                 }
                 .run(rx);
@@ -497,19 +520,58 @@ impl Service {
             return;
         };
         match self.node.mine_next(&payout, now(), MINING_SLICE) {
-            Ok(MinedBlock::Accepted { hash, height, .. }) => {
+            Ok(MinedBlock::Accepted {
+                hash,
+                height,
+                attempts,
+            }) => {
                 self.mined += 1;
-                println!("掘れた: 高さ {height}  {hash}");
+                self.attempts += attempts;
+                println!("掘れた: 高さ {height}  {hash}{}", self.rate_suffix());
                 self.announce_tip();
                 if self.mine_until.is_some_and(|limit| self.mined >= limit) {
                     self.stop_mining();
                 }
             }
-            Ok(MinedBlock::NotFound { .. }) => {}
+            Ok(MinedBlock::NotFound { attempts }) => {
+                self.attempts += attempts;
+            }
             Err(e) => {
                 eprintln!("採掘に失敗した: {e}。採掘を止める。");
                 self.stop_mining();
             }
+        }
+    }
+
+    /// 「  12,345 回、40 H/s」のような後置き。まだ数えていなければ空。
+    fn rate_suffix(&self) -> String {
+        let Some(started) = self.mining_since else {
+            return String::new();
+        };
+        let seconds = started.elapsed().as_secs_f64();
+        if seconds <= 0.0 || self.attempts == 0 {
+            return String::new();
+        }
+        format!(
+            "  ({} 回、{:.0} H/s)",
+            self.attempts,
+            self.attempts as f64 / seconds
+        )
+    }
+
+    /// fast モードを用意する。**1 分前後かかる。**
+    ///
+    /// その間この関数を呼んだスレッド (ノードのスレッド) は他の要求に
+    /// 応えない。掘り始める合図を受けた直後に済ませてしまう。
+    fn enable_fast_mining(&mut self) {
+        let height = self.node.chain().height().unwrap_or(0) + 1;
+        println!("fast モードのデータセットを構築する (2 GB、1 分前後かかる)");
+        match self.node.enable_fast_mining(height) {
+            Ok(()) => println!("fast モードで採掘する"),
+            Err(e) => eprintln!(
+                "fast モードを用意できない: {e}\n\
+                 light モード (256 MB) で採掘する。速さはおよそ 6 分の 1 になる。"
+            ),
         }
     }
 
@@ -579,10 +641,21 @@ impl Service {
             Request::PeerGone(peer) => {
                 self.download.peer_disconnected(peer);
             }
-            Request::SetMining { payout, blocks } => {
+            Request::SetMining {
+                payout,
+                blocks,
+                fast,
+            } => {
                 // 掘る数は「ここから」数える。前に掘った分は関係ない。
                 self.mine_until = blocks.map(|n| self.mined.saturating_add(n));
                 self.mining = payout;
+                if fast && self.mining.is_some() && !self.node.is_fast_mining() {
+                    self.enable_fast_mining();
+                }
+                // 数え始めは**データセットを用意したあと**である。構築に
+                // かかった 1 分を混ぜると、ハッシュレートが低く出る。
+                self.attempts = 0;
+                self.mining_since = self.mining.is_some().then(std::time::Instant::now);
             }
             Request::HashAtHeight { height, reply } => {
                 let result = self
