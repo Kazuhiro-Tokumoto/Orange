@@ -40,7 +40,7 @@ const COIN_TYPE_TESTNET: u32 = 1;
 /// mainnet 用のコインタイプ番号。
 ///
 /// SLIP-0044 へ `| 1033 | OAG | Orange |` の 1 行を加える申請を提出済み
-/// である ([`docs/SPEC.md`] の §6.6)。**取り込まれるまでは暫定である。**
+/// である (SPEC の §6.6)。**取り込まれるまでは暫定である。**
 ///
 /// 審査で別の番号を割り当てられ、ここを書き換えた場合、**同じ控えから
 /// 導かれる mainnet の鍵はすべて変わる**。控えを書き写してあっても、
@@ -89,8 +89,8 @@ impl From<Bip32Error> for SeedError {
 
 /// ネットワークのコインタイプ番号。
 ///
-/// testnet と regtest は SLIP-0044 の予約番号 1 を使う。mainnet は
-/// [`COIN_TYPE_MAINNET`] を使う。**この値は審査待ちである。**
+/// testnet と regtest は SLIP-0044 の予約番号 1 を使う。mainnet は 1033 で
+/// あり、**この番号はまだ審査待ちである** (SPEC の §6.6)。
 pub fn coin_type(network: Network) -> u32 {
     match network {
         Network::Testnet | Network::Regtest => COIN_TYPE_TESTNET,
