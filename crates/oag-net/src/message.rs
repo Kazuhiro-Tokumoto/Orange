@@ -4,6 +4,7 @@
 
 use oag_consensus::codec::{write_var_bytes, write_varint, CodecError, Decode, Encode, Reader};
 use oag_consensus::{Block, BlockHeader, Transaction};
+use oag_primitives::hash::HASH_LEN;
 use oag_primitives::Hash;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -122,6 +123,9 @@ impl Encode for InvItem {
 }
 
 impl Decode for InvItem {
+    /// 種別 1 バイト + ハッシュ 32 バイト。固定長である。
+    const MIN_ENCODED_LEN: usize = 1 + HASH_LEN;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<InvItem, CodecError> {
         let kind = reader.read_u8()?;
         let hash = reader.read_hash()?;
@@ -203,6 +207,9 @@ impl Encode for NetAddress {
 }
 
 impl Decode for NetAddress {
+    /// services 8 + ip 16 + port 2 + last_seen 8。固定長である。
+    const MIN_ENCODED_LEN: usize = 8 + 16 + 2 + 8;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<NetAddress, CodecError> {
         Ok(NetAddress {
             services: reader.read_u64()?,
@@ -258,7 +265,7 @@ impl Decode for VersionMessage {
                 max: MAX_USER_AGENT,
             })?;
         let start_height = reader.read_varint_u64("version.start_height")?;
-        let relay = reader.read_u8()? != 0;
+        let relay = reader.read_bool("version.relay")?;
         Ok(VersionMessage {
             protocol_version,
             services,
@@ -295,9 +302,13 @@ impl Encode for GetBlockTxn {
 }
 
 impl Decode for GetBlockTxn {
+    /// ブロックハッシュ 32 + 個数 1。
+    const MIN_ENCODED_LEN: usize = HASH_LEN + 1;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<GetBlockTxn, CodecError> {
         let block_hash = reader.read_hash()?;
-        let count = reader.read_count("getblocktxn.indices")?;
+        // 番号は varint 1 個ずつ。
+        let count = reader.read_count_of("getblocktxn.indices", 1)?;
         if count > MAX_BLOCK_TXN {
             return Err(CodecError::LengthTooLarge {
                 field: "getblocktxn.indices",
@@ -347,9 +358,12 @@ impl Encode for BlockTxn {
 }
 
 impl Decode for BlockTxn {
+    /// ブロックハッシュ 32 + 個数 1。
+    const MIN_ENCODED_LEN: usize = HASH_LEN + 1;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<BlockTxn, CodecError> {
         let block_hash = reader.read_hash()?;
-        let count = reader.read_count("blocktxn.transactions")?;
+        let count = reader.read_count::<Transaction>("blocktxn.transactions")?;
         if count > MAX_BLOCK_TXN {
             return Err(CodecError::LengthTooLarge {
                 field: "blocktxn.transactions",
@@ -388,7 +402,7 @@ impl Encode for SendCompact {
 impl Decode for SendCompact {
     fn read_from(reader: &mut Reader<'_>) -> Result<SendCompact, CodecError> {
         Ok(SendCompact {
-            high_bandwidth: reader.read_u8()? != 0,
+            high_bandwidth: reader.read_bool("sendcmpct.high_bandwidth")?,
             version: reader.read_u64()?,
         })
     }
@@ -417,9 +431,12 @@ impl Encode for GetHeaders {
 }
 
 impl Decode for GetHeaders {
+    /// 版数 4 + ロケータ長 1 + stop 32。
+    const MIN_ENCODED_LEN: usize = 4 + 1 + HASH_LEN;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<GetHeaders, CodecError> {
         let protocol_version = reader.read_u32()?;
-        let count = reader.read_count("getheaders.locator")?;
+        let count = reader.read_count_of("getheaders.locator", HASH_LEN)?;
         if count > MAX_LOCATOR {
             return Err(CodecError::LengthTooLarge {
                 field: "getheaders.locator",
@@ -587,7 +604,7 @@ fn decode_list<T: Decode>(
     max: usize,
 ) -> Result<Vec<T>, MessageError> {
     let mut reader = Reader::new(payload);
-    let count = reader.read_count(field)?;
+    let count = reader.read_count::<T>(field)?;
     if count > max {
         return Err(MessageError::TooManyItems {
             field,

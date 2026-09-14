@@ -52,6 +52,9 @@ impl Encode for OutPoint {
 }
 
 impl Decode for OutPoint {
+    /// ハッシュ 32 バイト + 出力番号の varint 1 バイト。
+    const MIN_ENCODED_LEN: usize = oag_primitives::hash::HASH_LEN + 1;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<OutPoint, CodecError> {
         let txid = reader.read_hash()?;
         let index = reader.read_varint_u32("prev_index")?;
@@ -99,6 +102,9 @@ impl Encode for TxInput {
 }
 
 impl Decode for TxInput {
+    /// 参照 + 長さ 0 の署名 1 バイト + sequence 4 バイト。
+    const MIN_ENCODED_LEN: usize = OutPoint::MIN_ENCODED_LEN + 1 + 4;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<TxInput, CodecError> {
         let prev_out = OutPoint::read_from(reader)?;
         let signature = reader
@@ -141,6 +147,9 @@ impl Encode for TxOutput {
 }
 
 impl Decode for TxOutput {
+    /// 金額の varint 1 バイト + lock。
+    const MIN_ENCODED_LEN: usize = 1 + Lock::MIN_ENCODED_LEN;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<TxOutput, CodecError> {
         let amount = reader.read_amount()?;
         let lock = Lock::read_from(reader)?;
@@ -215,16 +224,22 @@ impl Encode for Transaction {
 }
 
 impl Decode for Transaction {
+    /// 版数 4 + 入力数 1 + 出力数 1 + locktime 1。
+    ///
+    /// 入力も出力も 0 個のトランザクションは検証で弾かれるが、
+    /// **ここは符号化の下限であって有効性の下限ではない**。
+    const MIN_ENCODED_LEN: usize = 4 + 1 + 1 + 1;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<Transaction, CodecError> {
         let version = reader.read_u32()?;
 
-        let input_count = reader.read_count("tx.inputs")?;
+        let input_count = reader.read_count::<TxInput>("tx.inputs")?;
         let mut inputs = Vec::with_capacity(input_count);
         for _ in 0..input_count {
             inputs.push(TxInput::read_from(reader)?);
         }
 
-        let output_count = reader.read_count("tx.outputs")?;
+        let output_count = reader.read_count::<TxOutput>("tx.outputs")?;
         let mut outputs = Vec::with_capacity(output_count);
         for _ in 0..output_count {
             outputs.push(TxOutput::read_from(reader)?);
@@ -265,6 +280,37 @@ mod tests {
 
     fn lock() -> Lock {
         Lock::pay_to_pubkey(&SecretKey::generate().public_key())
+    }
+
+    #[test]
+    fn an_input_count_that_cannot_fit_is_rejected() {
+        // 入力 1 個は最低 38 バイト (参照 33 + 署名長 1 + sequence 4) を
+        // 要する。100 バイトの残りに 50 個は入りようがない。個数 (50) は
+        // 残りバイト数 (100) より小さいので、残りバイト数とだけ比べる
+        // 検査はこれを通し、50 × TxInput の大きさを確保してしまう。
+        let mut bytes = CURRENT_TX_VERSION.to_le_bytes().to_vec();
+        write_varint(50, &mut bytes);
+        bytes.extend_from_slice(&[0u8; 100]);
+        assert!(matches!(
+            Transaction::decode(&bytes),
+            Err(CodecError::CountTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn the_minimum_encoded_lengths_are_not_overstated() {
+        // MIN_ENCODED_LEN が実際の下限を上回っていると、正当なバイト列を
+        // 拒むようになる。実物を符号化して確かめる。
+        let tx = tx_with(["1", "2"]);
+        assert!(tx.encode().len() >= Transaction::MIN_ENCODED_LEN);
+        assert!(tx.inputs[0].encode().len() >= TxInput::MIN_ENCODED_LEN);
+        assert!(tx.outputs[0].encode().len() >= TxOutput::MIN_ENCODED_LEN);
+        assert!(tx.inputs[0].prev_out.encode().len() >= OutPoint::MIN_ENCODED_LEN);
+        assert!(lock().encode().len() >= Lock::MIN_ENCODED_LEN);
+
+        // 署名が空で lock も空の、考えうる最小の入出力。
+        let bare_input = TxInput::new(OutPoint::new(Hash::ZERO, 0));
+        assert_eq!(bare_input.encode().len(), TxInput::MIN_ENCODED_LEN);
     }
 
     fn tx_with(amounts: [&str; 2]) -> Transaction {

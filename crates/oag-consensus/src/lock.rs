@@ -126,6 +126,9 @@ impl Encode for Lock {
 }
 
 impl Decode for Lock {
+    /// 版数 1 バイト + 長さ 0 のペイロード 1 バイト。
+    const MIN_ENCODED_LEN: usize = 1 + 1;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<Lock, CodecError> {
         let version = reader.read_u8()?;
         let payload = reader.read_var_bytes("lock.payload", MAX_PAYLOAD_LEN)?;

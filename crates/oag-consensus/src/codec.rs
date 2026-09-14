@@ -8,7 +8,8 @@
 //!
 //! - varint は最短形のみ (`oag_primitives::varint` が保証する)
 //! - 復号後に余剰バイトがあれば拒否する
-//! - 個数フィールドは残りバイト数を超えられない (割り当て量の爆発を防ぐ)
+//! - 個数フィールドは、その個数を符号化するのに足るバイト数が残っていなければ
+//!   ならない (割り当て量の爆発を防ぐ)
 //!
 //! 参照: `docs/SPEC.md` §2, §7
 
@@ -37,7 +38,7 @@ pub enum CodecError {
     /// 金額が不正。
     #[error(transparent)]
     Amount(#[from] AmountError),
-    /// 個数フィールドが残りバイト数を超えている。
+    /// 個数フィールドが、残りバイト数に収まらない個数を宣言している。
     #[error("{field} の個数 {declared} が残り {remaining} バイトに対して大きすぎる")]
     CountTooLarge {
         /// フィールド名。
@@ -151,6 +152,23 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
+    /// 真偽値を 1 バイトとして読む。
+    ///
+    /// **0 と 1 以外は拒否する。** `!= 0` で受けると、真を表すバイトが
+    /// 255 通りになる。同じ値が複数のバイト列で表現できる状態であり、
+    /// 本モジュールが禁じているもの (展性) そのものである。符号化側は
+    /// 常に 0 か 1 を書くのだから、それ以外は壊れたバイト列である。
+    pub fn read_bool(&mut self, field: &'static str) -> Result<bool, CodecError> {
+        match self.read_u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            other => Err(CodecError::ValueOutOfRange {
+                field,
+                value: u128::from(other),
+            }),
+        }
+    }
+
     /// varint を読み、`u32` に収まることを確認する。
     pub fn read_varint_u32(&mut self, field: &'static str) -> Result<u32, CodecError> {
         let value = self.read_varint()?;
@@ -170,15 +188,35 @@ impl<'a> Reader<'a> {
         Ok(amount)
     }
 
-    /// 要素数を読む。
+    /// 要素数を読む。要素の最小符号化長は型から取る。
     ///
-    /// 各要素は最低 1 バイトを占めるため、残りバイト数を超える個数は
-    /// その時点で不正である。この検査により、巨大な個数を宣言して
-    /// メモリ割り当てを誘発する攻撃を防ぐ。
-    pub fn read_count(&mut self, field: &'static str) -> Result<usize, CodecError> {
+    /// 復号する型が [`Decode::MIN_ENCODED_LEN`] を持つ場合はこちらを使う。
+    pub fn read_count<T: Decode>(&mut self, field: &'static str) -> Result<usize, CodecError> {
+        self.read_count_of(field, T::MIN_ENCODED_LEN)
+    }
+
+    /// 要素数を読む。`min_item_len` は 1 要素が占める最小バイト数。
+    ///
+    /// **宣言された個数がそのバイト数だけ残っていなければ、その場で拒否
+    /// する。** 個数は攻撃者が決められるうえ、読み出し側はそれを見て
+    /// `Vec::with_capacity` を呼ぶ。残りバイト数とだけ比べると、1 要素が
+    /// 実際には数十バイトを要する型でも 1 バイト分の個数まで通ってしまい、
+    /// **復号が 1 要素目で失敗するより前に、受け取ったバイト列の数十倍の
+    /// メモリを確保してしまう**。最小符号化長を掛けて比べれば、確保量は
+    /// 受け取ったバイト列と同じ桁に収まる。
+    ///
+    /// 型に対応する [`Decode`] がある場合は [`Reader::read_count`] を使う。
+    /// こちらは varint の並びのように `Decode` を持たない要素のためにある。
+    pub fn read_count_of(
+        &mut self,
+        field: &'static str,
+        min_item_len: usize,
+    ) -> Result<usize, CodecError> {
         let declared = self.read_varint()?;
         let remaining = self.remaining();
-        if declared > remaining as u128 {
+        // 0 は「いくらでも入る」ことになってしまう。どの要素も 1 バイトは占める。
+        let min_item_len = min_item_len.max(1) as u128;
+        if declared.saturating_mul(min_item_len) > remaining as u128 {
             return Err(CodecError::CountTooLarge {
                 field,
                 declared,
@@ -222,6 +260,14 @@ pub trait Encode {
 
 /// バイト列から復号できる型。
 pub trait Decode: Sized {
+    /// この型を符号化したときに最低限占めるバイト数。
+    ///
+    /// 列の個数フィールドを検査するために使う ([`Reader::read_count`])。
+    /// **実際の下限より大きい値を入れてはならない。** 正当なバイト列を
+    /// 拒否することになる。既定の 1 はどの型でも成り立つ下限であり、
+    /// 安全ではあるが、確保量を抑える効き目は小さい。
+    const MIN_ENCODED_LEN: usize = 1;
+
     /// 読み取り器から 1 個復号する。
     fn read_from(reader: &mut Reader<'_>) -> Result<Self, CodecError>;
 
@@ -283,7 +329,42 @@ mod tests {
         write_varint(1_000, &mut buf);
         let mut r = Reader::new(&buf);
         assert!(matches!(
-            r.read_count("inputs"),
+            r.read_count_of("inputs", 1),
+            Err(CodecError::CountTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn count_accounts_for_how_big_one_item_is() {
+        // 100 バイトの残りに「40 バイトの要素が 10 個」は入らない。
+        // 個数 (10) 自体は残り (100) より小さいので、残りバイト数とだけ
+        // 比べる検査はこれを通してしまう。
+        let mut buf = Vec::new();
+        write_varint(10, &mut buf);
+        buf.extend_from_slice(&[0u8; 100]);
+
+        let mut r = Reader::new(&buf);
+        assert_eq!(r.read_count_of("items", 10).unwrap(), 10, "10x10 は入る");
+
+        let mut r = Reader::new(&buf);
+        assert!(
+            matches!(
+                r.read_count_of("items", 40),
+                Err(CodecError::CountTooLarge { .. })
+            ),
+            "1 要素 40 バイトなら 10 個は入らない"
+        );
+    }
+
+    #[test]
+    fn an_absurd_count_does_not_overflow_the_check() {
+        // 個数 × 最小長 が u128 を溢れても、検査は拒否側に倒れること。
+        let mut buf = Vec::new();
+        write_varint(u128::MAX, &mut buf);
+        buf.extend_from_slice(&[0u8; 64]);
+        let mut r = Reader::new(&buf);
+        assert!(matches!(
+            r.read_count_of("items", 1_000),
             Err(CodecError::CountTooLarge { .. })
         ));
     }

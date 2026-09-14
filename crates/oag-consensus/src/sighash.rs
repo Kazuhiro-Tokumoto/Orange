@@ -225,8 +225,15 @@ pub fn sighash(
         SighashBase::None => {}
     }
 
-    // 署名対象の入力。
-    msg.extend_from_slice(&(input_index as u32).to_le_bytes());
+    // 署名対象の入力。**切り詰めてはならない。** 切り詰めると別々の入力が
+    // 同じ署名対象を持つことになり、片方の署名をもう片方に使い回せる。
+    // 入力数は MAX_TX_SIZE が抑えているのでここに来る番号は必ず収まるが、
+    // 収まらない場合は範囲外として断る。
+    let index = u32::try_from(input_index).map_err(|_| SighashError::InputIndexOutOfRange {
+        index: input_index,
+        count: tx.inputs.len(),
+    })?;
+    msg.extend_from_slice(&index.to_le_bytes());
 
     // ANYONECANPAY なら、自分の入力の情報をここで直接コミットする。
     if hash_type.anyone_can_pay {

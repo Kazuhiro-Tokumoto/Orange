@@ -199,3 +199,141 @@ fn a_synced_node_rebuilds_the_utxo_set_itself() {
         assert_same_tip(&a, &b).await;
     });
 }
+
+/// 先端が一致するまで待つ。
+async fn wait_for_same_tip(a: &NodeHandle, b: &NodeHandle, what: &str) {
+    let deadline = Instant::now() + SYNC_TIMEOUT;
+    while Instant::now() < deadline {
+        let sa = a.status().await.expect("状態を引ける");
+        let sb = b.status().await.expect("状態を引ける");
+        if sa.tip == sb.tip {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let sa = a.status().await.unwrap();
+    let sb = b.status().await.unwrap();
+    panic!(
+        "{what}: 先端が揃わなかった (A は高さ {} の {}、B は高さ {} の {})",
+        sa.height, sa.tip, sb.height, sb.tip
+    );
+}
+
+/// 別々に掘った 2 本のチェーンが繋がったとき、作業量の多い方に揃うこと。
+///
+/// **これがブロックチェーンの根幹である。** 離れている間に別々のブロックを
+/// 掘った 2 台は、繋がった時点で異なる帳簿を持っている。どちらが正しいかは
+/// 多数決でも先着順でもなく、**積み上げた作業量**で決まる。負けた側は
+/// 自分のブロックを取り消し、相手の枝を自分で検証して繋ぎ直す。
+///
+/// 単なる追いつき ([`a_new_node_catches_up_with_an_existing_chain`]) との
+/// 違いは、**負ける側にも捨てるべきブロックがある**ことである。取り消しは
+/// UTXO セットを巻き戻す操作を伴い、追いつきでは一度も走らない。
+#[test]
+fn two_chains_that_disagree_converge_on_the_heavier_one() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (_dir_a, service_a) = start("d-light");
+    let (_dir_b, service_b) = start("d-heavy");
+    let a = service_a.handle();
+    let b = service_b.handle();
+
+    runtime.block_on(async {
+        // 繋がずにそれぞれ掘る。報酬の宛先が違うのでコインベースが違い、
+        // 同じ高さでも別のブロックになる。
+        a.start_mining(payout(), Some(3), false).await.unwrap();
+        b.start_mining(payout(), Some(6), false).await.unwrap();
+        wait_for_mining(&a, 3).await;
+        wait_for_mining(&b, 6).await;
+
+        let light = a.status().await.unwrap();
+        let heavy = b.status().await.unwrap();
+        assert_ne!(light.tip, heavy.tip, "同じチェーンを掘ってしまっている");
+        assert!(light.cumulative_work < heavy.cumulative_work);
+        let abandoned = light.tip;
+
+        // ここで繋ぐ。A は自分の 3 ブロックを捨てて B の 6 ブロックに乗る。
+        let addr = listen(b.clone()).await;
+        tokio::spawn(dial(a.clone(), addr));
+
+        wait_for_height(&a, 6, "リオーグ").await;
+        wait_for_same_tip(&a, &b, "リオーグ").await;
+        assert_same_tip(&a, &b).await;
+
+        let after = a.status().await.unwrap();
+        assert_ne!(after.tip, abandoned, "自分の枝を持ったままである");
+        // 捨てた枝のコインベースは UTXO から消えていなければならない。
+        // 残っていれば、存在しないはずの金が使える。
+        assert_eq!(
+            after.utxo_count, 6,
+            "取り消した 3 ブロックのコインベースが残っている"
+        );
+    });
+}
+
+/// 作業量が同じ 2 本は、次の 1 ブロックが決めること。
+///
+/// 同点では切り替えない。切り替えると、繋ぎ直しただけで帳簿が入れ替わる
+/// ことになり、決着がつかない。**先に見ていた方を保つ。** 決着は次の
+/// ブロックが積まれたときに、そちらが重くなることでつく。
+///
+/// このとき負ける側のリオーグは分岐点まで遡るため、**チェーン全体と同じ
+/// 深さ**になる。浅いリオーグより厳しい経路である。
+#[test]
+fn an_even_race_is_settled_by_the_next_block() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (_dir_a, service_a) = start("e-a");
+    let (_dir_b, service_b) = start("e-b");
+    let a = service_a.handle();
+    let b = service_b.handle();
+
+    runtime.block_on(async {
+        // 同じ高さまで、別々に掘る。
+        a.start_mining(payout(), Some(4), false).await.unwrap();
+        b.start_mining(payout(), Some(4), false).await.unwrap();
+        wait_for_mining(&a, 4).await;
+        wait_for_mining(&b, 4).await;
+
+        let before_a = a.status().await.unwrap();
+        let before_b = b.status().await.unwrap();
+        assert_ne!(before_a.tip, before_b.tip);
+        assert_eq!(before_a.cumulative_work, before_b.cumulative_work);
+
+        let addr = listen(b.clone()).await;
+        tokio::spawn(dial(a.clone(), addr));
+
+        // 繋がっても、同点のうちはどちらも動かない。
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(
+            a.status().await.unwrap().tip,
+            before_a.tip,
+            "同点で先端を明け渡している"
+        );
+        assert_eq!(
+            b.status().await.unwrap().tip,
+            before_b.tip,
+            "同点で先端を明け渡している"
+        );
+
+        // B が 1 つ積む。これで B の方が重くなる。
+        b.start_mining(payout(), Some(1), false).await.unwrap();
+        wait_for_mining(&b, 5).await;
+
+        // A は 4 ブロックすべてを取り消して B の枝に乗り換える。
+        wait_for_height(&a, 5, "同点の決着").await;
+        wait_for_same_tip(&a, &b, "同点の決着").await;
+        assert_same_tip(&a, &b).await;
+        assert_eq!(
+            a.status().await.unwrap().utxo_count,
+            5,
+            "取り消した枝のコインベースが残っている"
+        );
+    });
+}

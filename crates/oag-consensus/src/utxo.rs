@@ -81,7 +81,10 @@ pub fn apply_block_to(
         }
         let txid = tx.txid();
         for (index, output) in tx.outputs.iter().enumerate() {
-            let outpoint = OutPoint::new(txid, index as u32);
+            // 出力番号が u32 に収まることは MAX_TX_SIZE が保証する
+            // (validate::register_outputs と同じ理由)。
+            let index = u32::try_from(index).expect("出力数は MAX_TX_SIZE が抑えている");
+            let outpoint = OutPoint::new(txid, index);
             utxo.insert(
                 outpoint,
                 UtxoEntry {
@@ -449,11 +452,14 @@ impl Encode for UtxoEntry {
 }
 
 impl Decode for UtxoEntry {
+    /// 出力 + 高さの varint 1 バイト + コインベース印 1 バイト。
+    const MIN_ENCODED_LEN: usize = TxOutput::MIN_ENCODED_LEN + 1 + 1;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<UtxoEntry, CodecError> {
         Ok(UtxoEntry {
             output: TxOutput::read_from(reader)?,
             height: reader.read_varint_u64("utxo.height")?,
-            is_coinbase: reader.read_u8()? != 0,
+            is_coinbase: reader.read_bool("utxo.is_coinbase")?,
         })
     }
 }
@@ -473,15 +479,22 @@ impl Encode for UndoBlock {
 }
 
 impl Decode for UndoBlock {
+    /// 使用分の個数 1 バイト + 作成分の個数 1 バイト。
+    const MIN_ENCODED_LEN: usize = 1 + 1;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<UndoBlock, CodecError> {
-        let spent_count = reader.read_count("undo.spent")?;
+        // 1 件は「参照 + UTXO」の組である。
+        let spent_count = reader.read_count_of(
+            "undo.spent",
+            OutPoint::MIN_ENCODED_LEN + UtxoEntry::MIN_ENCODED_LEN,
+        )?;
         let mut spent = Vec::with_capacity(spent_count);
         for _ in 0..spent_count {
             let outpoint = OutPoint::read_from(reader)?;
             let entry = UtxoEntry::read_from(reader)?;
             spent.push((outpoint, entry));
         }
-        let created_count = reader.read_count("undo.created")?;
+        let created_count = reader.read_count::<OutPoint>("undo.created")?;
         let mut created = Vec::with_capacity(created_count);
         for _ in 0..created_count {
             created.push(OutPoint::read_from(reader)?);

@@ -72,6 +72,9 @@ impl Encode for BlockHeader {
 }
 
 impl Decode for BlockHeader {
+    /// ヘッダは固定長である。
+    const MIN_ENCODED_LEN: usize = BLOCK_HEADER_LEN;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<BlockHeader, CodecError> {
         Ok(BlockHeader {
             version: reader.read_u32()?,
@@ -131,9 +134,12 @@ impl Encode for Block {
 }
 
 impl Decode for Block {
+    /// ヘッダ + 取引数の varint 1 バイト。
+    const MIN_ENCODED_LEN: usize = BLOCK_HEADER_LEN + 1;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<Block, CodecError> {
         let header = BlockHeader::read_from(reader)?;
-        let count = reader.read_count("block.transactions")?;
+        let count = reader.read_count::<Transaction>("block.transactions")?;
         let mut transactions = Vec::with_capacity(count);
         for _ in 0..count {
             transactions.push(Transaction::read_from(reader)?);
@@ -340,6 +346,22 @@ mod tests {
     fn rejects_absurd_transaction_count() {
         let mut bytes = block(1, 0).header.encode();
         write_varint(u128::from(u64::MAX), &mut bytes);
+        assert!(matches!(
+            Block::decode(&bytes),
+            Err(CodecError::CountTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn a_transaction_count_that_cannot_fit_is_rejected() {
+        // 「取引が 900 件ある」と宣言しつつ、本体は 900 バイトしかない。
+        // 個数 (900) は残りバイト数 (900) を超えないので、残りバイト数と
+        // だけ比べる検査はこれを通してしまい、900 × Transaction の
+        // 大きさだけ確保したうえで 1 件目の復号に失敗する。
+        // 1 取引は最低 7 バイトを要するのだから、この宣言は成り立たない。
+        let mut bytes = block(1, 0).header.encode();
+        write_varint(900, &mut bytes);
+        bytes.extend_from_slice(&[0u8; 900]);
         assert!(matches!(
             Block::decode(&bytes),
             Err(CodecError::CountTooLarge { .. })

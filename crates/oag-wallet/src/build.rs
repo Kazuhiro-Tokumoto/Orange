@@ -50,7 +50,9 @@ impl Coin {
         if !self.is_coinbase {
             return true;
         }
-        height >= self.height + params::COINBASE_MATURITY
+        // 飽和させる。高さが u64 の端に届くことは無いが、届いたときに
+        // 「成熟済み」と誤らせるより、使えないままにする方が安全である。
+        height >= self.height.saturating_add(params::COINBASE_MATURITY)
     }
 }
 

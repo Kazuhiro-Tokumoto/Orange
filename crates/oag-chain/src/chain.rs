@@ -434,7 +434,7 @@ impl<S: ChainStore> Chain<S> {
         Ok(BlockIndexEntry {
             hash: header.hash(),
             header: *header,
-            cumulative_work: parent_work + u128::from(header.difficulty),
+            cumulative_work: parent_work.saturating_add(u128::from(header.difficulty)),
             status: BlockStatus::HeaderValid,
         })
     }

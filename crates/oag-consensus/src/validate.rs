@@ -595,8 +595,13 @@ pub fn validate_block(
 fn register_outputs(overlay: &mut OverlayView<'_>, tx: &Transaction, height: u64, coinbase: bool) {
     let txid = tx.txid();
     for (index, output) in tx.outputs.iter().enumerate() {
+        // 出力番号は u32 である。1 出力は 3 バイト以上を要し、
+        // トランザクションは MAX_TX_SIZE バイト以下なので、ここに来る
+        // 番号は必ず収まる。**収まらなければ切り詰めてはならない。**
+        // 切り詰めると別の出力が同じ OutPoint を持ち、UTXO セットが壊れる。
+        let index = u32::try_from(index).expect("出力数は MAX_TX_SIZE が抑えている");
         overlay.add_created(
-            crate::tx::OutPoint::new(txid, index as u32),
+            crate::tx::OutPoint::new(txid, index),
             UtxoEntry {
                 output: output.clone(),
                 height,

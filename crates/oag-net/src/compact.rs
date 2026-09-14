@@ -345,11 +345,14 @@ impl Encode for CompactBlock {
 }
 
 impl Decode for CompactBlock {
+    /// ヘッダ 100 + nonce 8 + 短縮 ID 数 1 + 事前同梱数 1。
+    const MIN_ENCODED_LEN: usize = BlockHeader::MIN_ENCODED_LEN + 8 + 1 + 1;
+
     fn read_from(reader: &mut Reader<'_>) -> Result<CompactBlock, CodecError> {
         let header = BlockHeader::read_from(reader)?;
         let nonce = reader.read_u64()?;
 
-        let short_count = reader.read_count("cmpct.short_ids")?;
+        let short_count = reader.read_count_of("cmpct.short_ids", SHORT_ID_LEN)?;
         if short_count > MAX_BLOCK_TRANSACTIONS {
             return Err(CodecError::LengthTooLarge {
                 field: "cmpct.short_ids",
@@ -362,7 +365,9 @@ impl Decode for CompactBlock {
             short_ids.push(reader.read_array::<SHORT_ID_LEN>()?);
         }
 
-        let prefilled_count = reader.read_count("cmpct.prefilled")?;
+        // 1 件は「番号の varint 1 バイト + 取引」である。
+        let prefilled_count =
+            reader.read_count_of("cmpct.prefilled", 1 + Transaction::MIN_ENCODED_LEN)?;
         if prefilled_count > MAX_BLOCK_TRANSACTIONS {
             return Err(CodecError::LengthTooLarge {
                 field: "cmpct.prefilled",
