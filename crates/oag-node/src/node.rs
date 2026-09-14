@@ -212,7 +212,16 @@ impl Node {
             return Ok(());
         }
         let seed = self.seed_for(wanted)?;
-        self.verifier = Some((wanted, RandomXVerifier::new(&seed, wanted)?));
+        let verifier = RandomXVerifier::new(&seed, wanted)?;
+        if !verifier.uses_jit() {
+            // JIT を使えない環境である。検証は動くが 10 倍ほど遅い。
+            // 黙っていると「なぜか同期が進まない」に見えるので伝える。
+            eprintln!(
+                "RandomX の JIT を使えないため、インタプリタで検証する ({:?})。\n                 動作はするが、ブロックの検証がおよそ 10 倍遅くなる。\n                 実行可能メモリを禁じる設定 (SELinux の deny_execmem など) が\n                 掛かっていないか確かめること。",
+                verifier.flags()
+            );
+        }
+        self.verifier = Some((wanted, verifier));
         Ok(())
     }
 
