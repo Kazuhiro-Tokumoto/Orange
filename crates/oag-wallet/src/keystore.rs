@@ -848,17 +848,29 @@ mod tests {
     }
 
     #[test]
-    fn a_mainnet_wallet_cannot_be_made_yet() {
-        // mainnet のコインタイプ番号は SLIP-0044 に未登録であり、
-        // 導出経路が確定しない (SPEC §6.6)。**ファイルを作る前に断る。**
-        // 作ってしまうと、開くたびに失敗するウォレットが残る。
-        let path = temp("mainnet");
-        let err = Keystore::create(&path, Network::Mainnet, PASS, "").unwrap_err();
-        assert!(
-            matches!(err, KeystoreError::Seed(SeedError::CoinTypeUnregistered)),
-            "{err:?}"
+    fn a_mainnet_wallet_uses_its_own_branch() {
+        // コインタイプ番号 1033 が決まったので mainnet のウォレットを
+        // 作れる (SPEC §6.6)。**同じ控えでも testnet とは別の鍵になる。**
+        // 同じになるなら、testnet で晒した鍵が mainnet の資金を持つ。
+        let main_path = temp("mainnet");
+        let test_path = temp("mainnet-testnet");
+        let (main, mnemonic) = Keystore::create(&main_path, Network::Mainnet, PASS, "").unwrap();
+        let test = Keystore::restore(&test_path, Network::Testnet, PASS, &mnemonic, "").unwrap();
+        assert_ne!(
+            main.default_address().unwrap().to_string(),
+            test.default_address().unwrap().to_string(),
+            "mainnet と testnet で同じアドレスが出ている"
         );
-        assert!(!path.exists(), "断ったのにファイルが残っている");
+
+        // 開き直しても同じアドレスが出る。
+        let reopened = Keystore::open(&main_path, Network::Mainnet, PASS).unwrap();
+        assert_eq!(
+            reopened.default_address().unwrap().to_string(),
+            main.default_address().unwrap().to_string()
+        );
+
+        std::fs::remove_file(&main_path).unwrap();
+        std::fs::remove_file(&test_path).unwrap();
     }
 
     #[test]

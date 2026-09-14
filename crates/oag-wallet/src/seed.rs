@@ -37,6 +37,17 @@ const PURPOSE: u32 = 44;
 /// 登録は要らない。regtest もこれを用いる。
 const COIN_TYPE_TESTNET: u32 = 1;
 
+/// mainnet 用のコインタイプ番号。
+///
+/// SLIP-0044 へ `| 1033 | OAG | Orange |` の 1 行を加える申請を提出済み
+/// である ([`docs/SPEC.md`] の §6.6)。**取り込まれるまでは暫定である。**
+///
+/// 審査で別の番号を割り当てられ、ここを書き換えた場合、**同じ控えから
+/// 導かれる mainnet の鍵はすべて変わる**。控えを書き写してあっても、
+/// 古い番号で作ったアドレスの資金は新しい経路からは見えない。
+/// 登録が確定するまで、mainnet のアドレスへ資金を入れてはならない。
+const COIN_TYPE_MAINNET: u32 = 1033;
+
 /// 使う口座番号。いまは 1 つだけ。
 const ACCOUNT: u32 = 0;
 
@@ -58,14 +69,6 @@ impl std::fmt::Debug for Seed {
 /// 種の扱いで起きる失敗。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SeedError {
-    /// mainnet のコインタイプ番号がまだ決まっていない。
-    #[error(
-        "mainnet のコインタイプ番号は SLIP-0044 に未登録であり、導出経路を確定できない。\n\
-         暫定の番号で運用すると、登録された番号へ移した時点で同じ控えから導かれる鍵が\n\
-         変わる。それは資金が消えたのと区別がつかない。\n\
-         testnet または regtest を使うこと (--network testnet)。"
-    )]
-    CoinTypeUnregistered,
     /// 鍵を導出できなかった。
     #[error("{index} 番目の鍵を導出できない")]
     Underivable {
@@ -86,11 +89,12 @@ impl From<Bip32Error> for SeedError {
 
 /// ネットワークのコインタイプ番号。
 ///
-/// mainnet は未登録である。**暫定の番号を返さない。**
-pub fn coin_type(network: Network) -> Result<u32, SeedError> {
+/// testnet と regtest は SLIP-0044 の予約番号 1 を使う。mainnet は
+/// [`COIN_TYPE_MAINNET`] を使う。**この値は審査待ちである。**
+pub fn coin_type(network: Network) -> u32 {
     match network {
-        Network::Testnet | Network::Regtest => Ok(COIN_TYPE_TESTNET),
-        Network::Mainnet => Err(SeedError::CoinTypeUnregistered),
+        Network::Testnet | Network::Regtest => COIN_TYPE_TESTNET,
+        Network::Mainnet => COIN_TYPE_MAINNET,
     }
 }
 
@@ -114,7 +118,7 @@ impl Seed {
     pub fn derive(&self, network: Network, index: u32) -> Result<SecretKey, SeedError> {
         let path = [
             PURPOSE | HARDENED,
-            coin_type(network)? | HARDENED,
+            coin_type(network) | HARDENED,
             ACCOUNT | HARDENED,
             CHANGE_RECEIVE,
             index,
@@ -129,7 +133,7 @@ impl Seed {
         // HMAC を繰り返すことになる。
         let branch = [
             PURPOSE | HARDENED,
-            coin_type(network)? | HARDENED,
+            coin_type(network) | HARDENED,
             ACCOUNT | HARDENED,
             CHANGE_RECEIVE,
         ];
@@ -151,28 +155,30 @@ mod tests {
     }
 
     #[test]
-    fn mainnet_has_no_coin_type_yet() {
-        // **暫定の番号を返してはならない。** 返してしまうと、登録された
-        // 番号へ移した時点で同じ控えから別の鍵が出る。
-        assert_eq!(
-            coin_type(Network::Mainnet).unwrap_err(),
-            SeedError::CoinTypeUnregistered
-        );
-        assert_eq!(
-            seed().derive(Network::Mainnet, 0).unwrap_err(),
-            SeedError::CoinTypeUnregistered
-        );
-        assert_eq!(
-            seed().derive_many(Network::Mainnet, 3).unwrap_err(),
-            SeedError::CoinTypeUnregistered
-        );
+    fn mainnet_uses_the_number_filed_with_slip_0044() {
+        // **値そのものを書いて留める。** 定数を書き換えれば、同じ控えから
+        // 導かれる mainnet の鍵がすべて変わる。うっかり変えたのであれば
+        // ここで落ちる。変えるのは SLIP-0044 が別の番号で受理したときだけ
+        // であり、そのときは既存の mainnet のアドレスを捨てることになる。
+        assert_eq!(coin_type(Network::Mainnet), 1033);
     }
 
     #[test]
     fn the_test_networks_use_the_reserved_number() {
         // SLIP-0044 が全コインのテストネット用に 1 を予約している。
-        assert_eq!(coin_type(Network::Testnet).unwrap(), COIN_TYPE_TESTNET);
-        assert_eq!(coin_type(Network::Regtest).unwrap(), COIN_TYPE_TESTNET);
+        assert_eq!(coin_type(Network::Testnet), COIN_TYPE_TESTNET);
+        assert_eq!(coin_type(Network::Regtest), COIN_TYPE_TESTNET);
+    }
+
+    #[test]
+    fn mainnet_and_testnet_derive_different_keys() {
+        // 経路が枝分かれしていることの確認である。ここが同じなら、
+        // testnet で使った鍵がそのまま mainnet の資金を持つことになる。
+        let seed = seed();
+        assert_ne!(
+            seed.derive(Network::Mainnet, 0).unwrap().to_bytes(),
+            seed.derive(Network::Testnet, 0).unwrap().to_bytes()
+        );
     }
 
     #[test]
@@ -208,6 +214,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             seed.derive(Network::Testnet, 3).unwrap().to_bytes(),
+            expected.secret_key().to_bytes()
+        );
+
+        let expected = ExtendedKey::master(seed.as_bytes())
+            .unwrap()
+            .derive_path(&[44 | HARDENED, 1033 | HARDENED, HARDENED, 0, 3])
+            .unwrap();
+        assert_eq!(
+            seed.derive(Network::Mainnet, 3).unwrap().to_bytes(),
             expected.secret_key().to_bytes()
         );
     }
