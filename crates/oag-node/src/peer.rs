@@ -172,6 +172,7 @@ async fn session(
         peer_height,
         asked_headers_at: 0,
         addr_requests: 0,
+        rejected_txs: 0,
     };
 
     // 相手が先を行っていれば、まずヘッダを求める。
@@ -206,11 +207,25 @@ async fn session(
             }
             event = events.recv() => {
                 match event {
-                    Ok(crate::service::NodeEvent::NewTip { hash, .. }) => {
+                    Ok(crate::service::NodeEvent::NewTip { hash, from, .. }) => {
                         // 新しい先端を持っていることを知らせる。
-                        let inv = Message::Inv(vec![InvItem::block(hash)]);
-                        if out_tx.send(inv).await.is_err() {
-                            break Ok(());
+                        // **くれた相手には言わない。** 相手は既に持って
+                        // いるので、先端が動かず中継もしない。送るだけ無駄。
+                        if from != Some(state.peer) {
+                            let inv = Message::Inv(vec![InvItem::block(hash)]);
+                            if out_tx.send(inv).await.is_err() {
+                                break Ok(());
+                            }
+                        }
+                    }
+                    Ok(crate::service::NodeEvent::NewTx { txid, from }) => {
+                        // 検証を通ったトランザクションだけがここに来る。
+                        // ブロックと同じく、くれた相手には言わない。
+                        if from != Some(state.peer) {
+                            let inv = Message::Inv(vec![InvItem::tx(txid)]);
+                            if out_tx.send(inv).await.is_err() {
+                                break Ok(());
+                            }
                         }
                     }
                     Ok(crate::service::NodeEvent::NewAddress(addr)) => {
@@ -250,6 +265,8 @@ struct Session {
     asked_headers_at: i64,
     /// この接続で `getaddr` を受けた回数。**応えるのは 1 度だけ。**
     addr_requests: u32,
+    /// 受け付けなかったトランザクションの数。記録だけで、切る材料にはしない。
+    rejected_txs: u64,
 }
 
 /// `getheaders` を送り直すまでの間隔。
@@ -343,6 +360,8 @@ impl Session {
 
             Message::Block(block) => self.on_block(handle, out, *block).await,
 
+            Message::Tx(tx) => self.on_tx(handle, *tx).await,
+
             Message::Inv(items) => self.on_inv(handle, out, items).await,
 
             Message::GetAddr => {
@@ -367,7 +386,6 @@ impl Session {
 
             // まだ扱わないもの。無視してよい。相手を切る理由にはならない。
             Message::NotFound(_)
-            | Message::Tx(_)
             | Message::Mempool
             | Message::SendCompact(_)
             | Message::CompactBlock(_)
@@ -413,13 +431,17 @@ impl Session {
     ) -> Result<(), String> {
         let mut missing = Vec::new();
         for item in items {
-            if item.kind != InvKind::Block {
-                missing.push(item);
-                continue;
-            }
-            match handle.block(item.hash).await? {
-                Some(block) => send(out, Message::Block(Box::new(block))).await?,
-                None => missing.push(item),
+            match item.kind {
+                InvKind::Block => match handle.block(item.hash).await? {
+                    Some(block) => send(out, Message::Block(Box::new(block))).await?,
+                    None => missing.push(item),
+                },
+                // **自分の mempool にあるものだけを渡す。** 持っていない
+                // ものを探しに行ったりはしない。
+                InvKind::Tx => match handle.mempool_tx(item.hash).await? {
+                    Some(tx) => send(out, Message::Tx(Box::new(tx))).await?,
+                    None => missing.push(item),
+                },
             }
         }
         if !missing.is_empty() {
@@ -435,7 +457,8 @@ impl Session {
         block: oag_consensus::Block,
     ) -> Result<(), String> {
         let height = block.header.height;
-        match handle.accept_block(block).await {
+        // くれた相手を添える。通ったとき、この相手には報せ返さない。
+        match handle.accept_block_from(block, Some(self.peer)).await {
             Ok(accepted) => {
                 if accepted.moved_tip {
                     println!("高さ {height} まで繋がった");
@@ -453,6 +476,22 @@ impl Session {
         out: &mpsc::Sender<Message>,
         items: Vec<InvItem>,
     ) -> Result<(), String> {
+        let txids: Vec<Hash> = items
+            .iter()
+            .filter(|i| i.kind == InvKind::Tx)
+            .map(|i| i.hash)
+            .collect();
+        if !txids.is_empty() {
+            // 要るものだけを選んでもらう。すでに持っているもの、すでに
+            // 誰かに頼んであるものは外れる。ここで頼んだという記録が
+            // 残り、それが `tx` を受け取る条件になる。
+            let wanted = handle.want_txs(self.peer, txids).await?;
+            if !wanted.is_empty() {
+                let items = wanted.into_iter().map(InvItem::tx).collect();
+                send(out, Message::GetData(items)).await?;
+            }
+        }
+
         let has_block = items.iter().any(|i| i.kind == InvKind::Block);
         if !has_block {
             return Ok(());
@@ -462,6 +501,31 @@ impl Session {
         // 求めることはしない。
         self.asked_headers_at = now();
         self.request_headers(handle, out).await
+    }
+
+    /// トランザクションを受け取る。
+    ///
+    /// **頼んでいなかったものは断られる。** そのときは黙って捨てる。
+    /// 相手を切りはしない。こちらが時間切れで忘れた直後に届く、といった
+    /// 行き違いは普通に起きる。
+    ///
+    /// 検証に落ちたときも切らない。ブロックと違い、トランザクションが
+    /// 受け付けられない理由には無害なものが多い (手数料がこちらの方針に
+    /// 足りない、同じ UTXO を使う別のものを先に持っている、など)。
+    /// **方針の違いで接続を切ると、ネットワークが方針ごとに割れる。**
+    async fn on_tx(
+        &mut self,
+        handle: &NodeHandle,
+        tx: oag_consensus::Transaction,
+    ) -> Result<(), String> {
+        if let Err(e) = handle.submit_tx_from(tx, Some(self.peer)).await {
+            // 記録だけ残す。切る理由にはしない。
+            self.rejected_txs = self.rejected_txs.saturating_add(1);
+            if self.rejected_txs % 100 == 1 {
+                eprintln!("トランザクションを受け付けなかった: {e}");
+            }
+        }
+        Ok(())
     }
 }
 

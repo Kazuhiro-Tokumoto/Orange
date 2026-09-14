@@ -26,7 +26,7 @@
 //! 実際の送受信は行わない。
 
 use oag_primitives::Hash;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// 1 つのピアに同時に頼むブロック数の上限。
 ///
@@ -203,6 +203,156 @@ impl BlockDownload {
         if let Some(order) = self.order_of.remove(hash) {
             self.wanted.remove(&order);
         }
+    }
+}
+
+// ━━━━━━━━ トランザクションの取り寄せ ━━━━━━━━
+
+/// 1 つのピアに同時に頼むトランザクション数の上限。
+pub const MAX_TX_IN_FLIGHT_PER_PEER: usize = 32;
+
+/// 取り寄せ待ちに溜めておくトランザクションの上限。
+///
+/// `inv` は 1 通で [`crate::message::MAX_INV_ITEMS`] 件を運べる。上限が
+/// 無ければ、繋がっただけのピアがこちらの記憶を好きなだけ埋められる。
+pub const MAX_QUEUED_TX: usize = 5_000;
+
+/// トランザクションの応答を待つ秒数。
+///
+/// 過ぎたら**忘れる**。頼み直さない ([`TxRequests`] の説明を参照)。
+pub const TX_REQUEST_TIMEOUT_SECS: i64 = 60;
+
+/// トランザクション取り寄せの割り振り。
+///
+/// [`BlockDownload`] と似ているが、2 点で意図的に違う。
+///
+/// # 並びを持たない
+///
+/// ブロックは親から順に繋ぐ必要があるので待ち行列の並びが要る。
+/// トランザクションにその制約はない。到着順に頼めばよい。
+///
+/// # 取りこぼしても頼み直さない
+///
+/// ブロックは 1 つ欠けると以降が全部繋がらないので、返ってこなければ
+/// 別のピアに頼み直す。トランザクションは違う。1 つ取り逃しても、
+/// 誰かが次のブロックに入れるか、誰かがまた `inv` してくる。
+///
+/// **頼み直さないことが、ここでは安全側である。** 存在しない txid を
+/// 大量に `inv` されたとき、頼み直す作りだと、こちらがピアを次々に
+/// 変えながら同じ嘘を追い続けることになる。1 度で諦めれば、嘘 1 件の
+/// 代償は往復 1 回で終わる。
+///
+/// # 頼んでいないものは受け取らない
+///
+/// [`TxRequests::was_requested_from`] が、この構造体の主な役目である。
+/// 頼んだ覚えのないトランザクションを検証すると、署名の検証という重い
+/// 計算を、相手が好きなだけこちらに行わせられる。**頼んだ相手から、
+/// 頼んだものが来たときだけ検証する。**
+#[derive(Debug, Default)]
+pub struct TxRequests {
+    /// まだ誰にも頼んでいないもの。到着順。
+    wanted: VecDeque<Hash>,
+    /// `wanted` に入っているものの集合。重複を弾くために持つ。
+    queued: HashSet<Hash>,
+    /// 依頼中のもの。
+    in_flight: HashMap<Hash, InFlight>,
+}
+
+impl TxRequests {
+    /// 空の状態を作る。
+    pub fn new() -> TxRequests {
+        TxRequests::default()
+    }
+
+    /// 取り寄せ待ちの数。
+    pub fn queued_len(&self) -> usize {
+        self.wanted.len()
+    }
+
+    /// 依頼中の数。
+    pub fn in_flight_len(&self) -> usize {
+        self.in_flight.len()
+    }
+
+    /// すでに待ち行列にあるか、依頼中か。
+    pub fn is_tracked(&self, txid: &Hash) -> bool {
+        self.queued.contains(txid) || self.in_flight.contains_key(txid)
+    }
+
+    /// 取り寄せたいものとして積む。積めた数を返す。
+    ///
+    /// すでに追っているものと、上限を超える分は捨てる。
+    pub fn want(&mut self, txids: impl IntoIterator<Item = Hash>) -> usize {
+        let mut added = 0;
+        for txid in txids {
+            if self.wanted.len() >= MAX_QUEUED_TX {
+                break;
+            }
+            if self.is_tracked(&txid) {
+                continue;
+            }
+            self.queued.insert(txid);
+            self.wanted.push_back(txid);
+            added += 1;
+        }
+        added
+    }
+
+    /// このピアに頼むものを取り出す。
+    ///
+    /// 1 つのピアへの同時依頼は [`MAX_TX_IN_FLIGHT_PER_PEER`] 件まで。
+    pub fn assign(&mut self, peer: PeerId, now: i64) -> Vec<Hash> {
+        let current = self.in_flight.values().filter(|f| f.peer == peer).count();
+        let room = MAX_TX_IN_FLIGHT_PER_PEER.saturating_sub(current);
+        let mut picked = Vec::new();
+        while picked.len() < room {
+            let Some(txid) = self.wanted.pop_front() else {
+                break;
+            };
+            self.queued.remove(&txid);
+            self.in_flight.insert(
+                txid,
+                InFlight {
+                    peer,
+                    requested_at: now,
+                },
+            );
+            picked.push(txid);
+        }
+        picked
+    }
+
+    /// このピアに、このトランザクションを頼んであるか。
+    ///
+    /// **検証する前にこれを通すこと。** 偽ならそのトランザクションには
+    /// 触らない。頼んでいないものを検証するのは、相手に計算を命じられて
+    /// いるのと同じである。
+    pub fn was_requested_from(&self, peer: PeerId, txid: &Hash) -> bool {
+        self.in_flight.get(txid).is_some_and(|f| f.peer == peer)
+    }
+
+    /// 受け取った (または諦めた) 印をつける。依頼中だったなら真。
+    pub fn received(&mut self, txid: &Hash) -> bool {
+        self.in_flight.remove(txid).is_some()
+    }
+
+    /// 時間切れのものを忘れる。忘れた数を返す。
+    ///
+    /// **頼み直さない。** 理由は型の説明にある。
+    pub fn expire(&mut self, now: i64) -> usize {
+        let before = self.in_flight.len();
+        self.in_flight
+            .retain(|_, f| now - f.requested_at < TX_REQUEST_TIMEOUT_SECS);
+        before - self.in_flight.len()
+    }
+
+    /// 切れたピアに頼んでいたものを忘れる。忘れた数を返す。
+    ///
+    /// こちらも頼み直さない。
+    pub fn peer_disconnected(&mut self, peer: PeerId) -> usize {
+        let before = self.in_flight.len();
+        self.in_flight.retain(|_, f| f.peer != peer);
+        before - self.in_flight.len()
     }
 }
 
@@ -422,5 +572,113 @@ mod tests {
             received.len()
         );
         assert!(download.is_idle());
+    }
+    // ━━━━━━━━ トランザクションの取り寄せ ━━━━━━━━
+
+    fn txid(n: u64) -> Hash {
+        oag_primitives::hash::txid(&n.to_le_bytes())
+    }
+
+    #[test]
+    fn a_transaction_is_only_accepted_from_the_peer_it_was_asked_of() {
+        // これがこの型の主な役目である。頼んだ覚えのないものを検証すると、
+        // 署名の検証という重い計算を相手に命じられることになる。
+        let mut reqs = TxRequests::new();
+        reqs.want([txid(1)]);
+        let asked = reqs.assign(7, 0);
+        assert_eq!(asked, vec![txid(1)]);
+
+        assert!(reqs.was_requested_from(7, &txid(1)), "頼んだ相手からは通る");
+        assert!(
+            !reqs.was_requested_from(8, &txid(1)),
+            "別のピアが割り込んで送ってきても通してはならない"
+        );
+        assert!(
+            !reqs.was_requested_from(7, &txid(2)),
+            "頼んでいないものは通してはならない"
+        );
+    }
+
+    #[test]
+    fn the_same_transaction_is_not_asked_for_twice() {
+        let mut reqs = TxRequests::new();
+        assert_eq!(
+            reqs.want([txid(1), txid(1), txid(2)]),
+            2,
+            "重複は 1 つに畳む"
+        );
+        assert_eq!(reqs.assign(1, 0).len(), 2);
+        // 依頼中のものをもう一度積もうとしても増えない。
+        assert_eq!(reqs.want([txid(1)]), 0);
+    }
+
+    #[test]
+    fn one_peer_cannot_be_asked_for_more_than_the_limit() {
+        let mut reqs = TxRequests::new();
+        let many: Vec<Hash> = (0..MAX_TX_IN_FLIGHT_PER_PEER as u64 * 3)
+            .map(txid)
+            .collect();
+        reqs.want(many);
+        assert_eq!(reqs.assign(1, 0).len(), MAX_TX_IN_FLIGHT_PER_PEER);
+        // 同じピアには、返すまで追加で頼まない。
+        assert!(reqs.assign(1, 0).is_empty());
+        // 別のピアには頼める。
+        assert_eq!(reqs.assign(2, 0).len(), MAX_TX_IN_FLIGHT_PER_PEER);
+    }
+
+    #[test]
+    fn the_queue_is_bounded() {
+        // 上限が無ければ、繋がっただけのピアがこちらの記憶を好きなだけ
+        // 埋められる。inv は 1 通で 5,000 件を運べる。
+        let mut reqs = TxRequests::new();
+        let flood: Vec<Hash> = (0..MAX_QUEUED_TX as u64 + 1_000).map(txid).collect();
+        reqs.want(flood);
+        assert_eq!(reqs.queued_len(), MAX_QUEUED_TX);
+    }
+
+    #[test]
+    fn a_request_that_times_out_is_forgotten_rather_than_retried() {
+        // ブロックとは違い、頼み直さない。存在しない txid を大量に
+        // 知らされたとき、頼み直す作りだと、ピアを変えながら同じ嘘を
+        // 追い続けることになる。
+        let mut reqs = TxRequests::new();
+        reqs.want([txid(1)]);
+        reqs.assign(1, 0);
+        assert_eq!(reqs.in_flight_len(), 1);
+
+        assert_eq!(reqs.expire(TX_REQUEST_TIMEOUT_SECS), 1);
+        assert_eq!(reqs.in_flight_len(), 0);
+        assert_eq!(reqs.queued_len(), 0, "待ち行列に戻してはならない");
+        assert!(!reqs.is_tracked(&txid(1)));
+    }
+
+    #[test]
+    fn a_request_still_inside_the_timeout_is_kept() {
+        let mut reqs = TxRequests::new();
+        reqs.want([txid(1)]);
+        reqs.assign(1, 0);
+        assert_eq!(reqs.expire(TX_REQUEST_TIMEOUT_SECS - 1), 0);
+        assert!(reqs.was_requested_from(1, &txid(1)));
+    }
+
+    #[test]
+    fn requests_to_a_peer_that_left_are_forgotten() {
+        let mut reqs = TxRequests::new();
+        reqs.want([txid(1), txid(2)]);
+        reqs.assign(1, 0);
+        assert_eq!(reqs.peer_disconnected(1), 2);
+        assert_eq!(reqs.in_flight_len(), 0);
+        assert_eq!(reqs.queued_len(), 0, "こちらも頼み直さない");
+    }
+
+    #[test]
+    fn receiving_clears_the_request() {
+        let mut reqs = TxRequests::new();
+        reqs.want([txid(1)]);
+        reqs.assign(1, 0);
+        assert!(reqs.received(&txid(1)));
+        // 使い切り。同じ相手がもう一度送ってきても通らない。
+        assert!(!reqs.was_requested_from(1, &txid(1)));
+        assert!(!reqs.received(&txid(1)));
     }
 }

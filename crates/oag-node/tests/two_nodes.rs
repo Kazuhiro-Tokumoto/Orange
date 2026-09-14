@@ -8,11 +8,15 @@
 //! 他の試験より重い。
 
 use oag_consensus::lock::Lock;
+use oag_consensus::params;
+use oag_consensus::sighash::{sighash, SighashType};
+use oag_consensus::tx::{TxInput, CURRENT_TX_VERSION, SEQUENCE_FINAL};
+use oag_consensus::{Transaction, TxOutput};
 use oag_net::magic::magic_for;
 use oag_net::transport::Listener;
 use oag_node::service::{NodeHandle, NodeService};
 use oag_node::{accept_loop, dial};
-use oag_primitives::{Address, Network, SecretKey};
+use oag_primitives::{Address, Amount, Network, SecretKey};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +26,10 @@ const NETWORK: Network = Network::Regtest;
 
 /// 同期を待つ上限。RandomX の検証を含むため短くしすぎない。
 const SYNC_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// コインベースの成熟まで掘る試験の上限。130 ブロックを掘って、
+/// さらにもう 1 台が検証する。
+const MATURITY_TIMEOUT: Duration = Duration::from_secs(240);
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -74,7 +82,12 @@ async fn listen(handle: NodeHandle) -> SocketAddr {
 
 /// 高さがその値になるまで待つ。
 async fn wait_for_height(handle: &NodeHandle, wanted: u64, what: &str) {
-    let deadline = Instant::now() + SYNC_TIMEOUT;
+    wait_for_height_within(handle, wanted, what, SYNC_TIMEOUT).await
+}
+
+/// 高さがその値になるまで、上限を指定して待つ。
+async fn wait_for_height_within(handle: &NodeHandle, wanted: u64, what: &str, limit: Duration) {
+    let deadline = Instant::now() + limit;
     let mut last = 0;
     while Instant::now() < deadline {
         let status = handle.status().await.expect("状態を引ける");
@@ -334,6 +347,153 @@ fn an_even_race_is_settled_by_the_next_block() {
             a.status().await.unwrap().utxo_count,
             5,
             "取り消した枝のコインベースが残っている"
+        );
+    });
+}
+
+/// 送金が、繋がっている相手の mempool まで届くこと。
+///
+/// ブロックの中継とは別の道である。ブロックは `inv` → `getheaders` →
+/// `getdata` と辿るが、トランザクションは `inv` → `getdata` → `tx` で
+/// 済む。**頼んだものだけを受け取る**規則が、この道を塞いでいないことを
+/// 実際に確かめる。
+///
+/// # なぜ 130 ブロック掘るのか
+///
+/// コインベースは 120 ブロック経つまで使えない。使える残高を作るには
+/// それを超えて掘るしかない。regtest は難易度調整をしないので、現実的な
+/// 時間で終わる。
+#[test]
+fn a_transaction_reaches_the_peers_mempool() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (_dir_a, service_a) = start("tx-src");
+    let (_dir_b, service_b) = start("tx-dst");
+    let a = service_a.handle();
+    let b = service_b.handle();
+
+    // 受け取り先の鍵は手元に残す。UTXO を引くのに要る。
+    let secret = SecretKey::generate();
+    let lock = Lock::from_address(&Address::from_pubkey(NETWORK, &secret.public_key()));
+    let mine_to = params::COINBASE_MATURITY + 10;
+
+    runtime.block_on(async {
+        // A に成熟したコインベースができるまで掘る。B はまだ居ない。
+        a.start_mining(lock.clone(), Some(mine_to), false)
+            .await
+            .unwrap();
+        wait_for_height_within(&a, mine_to, "採掘", MATURITY_TIMEOUT).await;
+
+        // B を繋いで追いつかせる。
+        let addr = listen(a.clone()).await;
+        tokio::spawn(dial(b.clone(), addr));
+        wait_for_height_within(&b, mine_to, "追いつき", MATURITY_TIMEOUT).await;
+
+        // 使えるコインベースを 1 つ選ぶ。
+        let coins = a.scan_utxos(vec![lock.clone()], 500).await.unwrap();
+        let spendable = coins
+            .into_iter()
+            .find(|c| c.entry.height + params::COINBASE_MATURITY <= mine_to)
+            .expect("成熟したコインベースがあるはず");
+
+        // 1 入力 1 出力。差額はそのまま手数料になる。
+        let value = spendable.entry.output.amount;
+        let send = Amount::from_atomic(value.to_atomic() / 2).unwrap();
+        let mut tx = Transaction {
+            version: CURRENT_TX_VERSION,
+            inputs: vec![TxInput {
+                prev_out: spendable.outpoint,
+                signature: Vec::new(),
+                sequence: SEQUENCE_FINAL,
+            }],
+            outputs: vec![TxOutput {
+                amount: send,
+                lock: lock.clone(),
+            }],
+            locktime: 0,
+        };
+        let spent = vec![spendable.entry.output.clone()];
+        let msg = sighash(&tx, &spent, 0, SighashType::DEFAULT).unwrap();
+        tx.inputs[0].signature = secret.sign(&msg).to_bytes().to_vec();
+        let txid = tx.txid();
+
+        // A に入れる。ここを通った時点で検証は済んでいる。
+        let accepted = a.submit_tx(tx).await.expect("A が受け付ける");
+        assert_eq!(accepted, txid);
+
+        // B の mempool に届くまで待つ。
+        let deadline = Instant::now() + SYNC_TIMEOUT;
+        loop {
+            if b.mempool_txids().await.unwrap().contains(&txid) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "B の mempool に届かなかった");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // B は中身も持っている。ハッシュだけ知らされて終わりではない。
+        let got = b
+            .mempool_tx(txid)
+            .await
+            .unwrap()
+            .expect("B が実体を持っている");
+        assert_eq!(got.txid(), txid);
+        // A も手放していない。
+        assert!(a.mempool_txids().await.unwrap().contains(&txid));
+    });
+}
+
+/// 頼んでいないトランザクションは、検証せずに断ること。
+///
+/// 署名の検証は高い計算である。**頼んだ覚えのないものを検証するのは、
+/// 相手に計算を命じられているのと変わらない。** ここが開いていると、
+/// 繋がっただけの相手が、こちらの CPU を好きなだけ使える。
+///
+/// 中身が正しいかどうかは関係ない。**頼んでいないという一点で断る。**
+#[test]
+fn an_unrequested_transaction_is_refused_without_being_verified() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (_dir, service) = start("tx-unsolicited");
+    let node = service.handle();
+
+    runtime.block_on(async {
+        // 中身は何でもよい。どうせ検証まで行かない。
+        let tx = Transaction {
+            version: CURRENT_TX_VERSION,
+            inputs: vec![TxInput {
+                prev_out: oag_consensus::tx::OutPoint::new(oag_primitives::Hash::ZERO, 0),
+                signature: vec![0u8; 64],
+                sequence: SEQUENCE_FINAL,
+            }],
+            outputs: vec![TxOutput {
+                amount: Amount::from_oag(1).unwrap(),
+                lock: Lock::from_address(&Address::from_pubkey(
+                    NETWORK,
+                    &SecretKey::generate().public_key(),
+                )),
+            }],
+            locktime: 0,
+        };
+
+        // ピアから来たことにする。誰もこれを頼んでいない。
+        let refused = node.submit_tx_from(tx.clone(), Some(1)).await;
+        assert!(refused.is_err(), "頼んでいないものを受け付けてしまった");
+
+        // 自分で出したものは、この規則の対象外である。財布からの送金が
+        // 塞がれては困る。こちらは中身が駄目なので別の理由で落ちる。
+        let own = node.submit_tx(tx).await;
+        assert!(own.is_err(), "この中身は検証に落ちるはず");
+        assert_ne!(
+            own.unwrap_err(),
+            refused.unwrap_err(),
+            "断る理由が同じでは、検証を省いた証拠にならない"
         );
     });
 }

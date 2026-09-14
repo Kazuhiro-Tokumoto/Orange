@@ -32,7 +32,7 @@ use oag_consensus::utxo::UtxoEntry;
 use oag_consensus::{Block, BlockHeader, Transaction};
 use oag_net::message::NetAddress;
 use oag_net::message::MAX_HEADERS;
-use oag_net::sync::{BlockDownload, PeerId};
+use oag_net::sync::{BlockDownload, PeerId, TxRequests};
 use oag_primitives::{Hash, Network};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -65,6 +65,20 @@ pub enum NodeEvent {
         hash: Hash,
         /// 新しい高さ。
         height: u64,
+        /// このブロックをくれたピア。自分で掘ったなら `None`。
+        ///
+        /// **このピアには報せ直さない。** 相手は既に持っている。
+        from: Option<PeerId>,
+    },
+    /// mempool に新しいトランザクションが入った。
+    ///
+    /// **検証を通ったものだけがここに来る。** 受け付けなかったものを
+    /// 流すことはない。
+    NewTx {
+        /// トランザクション ID。
+        txid: Hash,
+        /// これをくれたピア。自分の財布から出したなら `None`。
+        from: Option<PeerId>,
     },
     /// 採掘が止まった (指定した数だけ掘り終えた、または失敗した)。
     MiningStopped,
@@ -124,6 +138,8 @@ enum Request {
     /// 受け取ったブロックを取り込む。
     AcceptBlock {
         block: Box<Block>,
+        /// どのピアからもらったか。自分で掘ったなら `None`。
+        from: Option<PeerId>,
         reply: oneshot::Sender<Result<BlockAccepted, String>>,
     },
     /// ブロックの実体を引く。
@@ -187,7 +203,21 @@ enum Request {
     /// トランザクションを mempool に入れる。
     SubmitTx {
         tx: Box<Transaction>,
+        /// どのピアからもらったか。自分の財布から出したなら `None`。
+        ///
+        /// ピアから来たものは、**そのピアに頼んであった場合だけ**検証する。
+        from: Option<PeerId>,
         reply: oneshot::Sender<Result<Hash, String>>,
+    },
+    /// ピアが `inv` で知らせてきたトランザクションのうち、要るものを選ぶ。
+    ///
+    /// すでに mempool にあるもの、すでに誰かに頼んであるものは外す。
+    /// 返ってきた分だけ `getdata` で求める。
+    WantTxs {
+        peer: PeerId,
+        txids: Vec<Hash>,
+        now: i64,
+        reply: oneshot::Sender<Result<Vec<Hash>, String>>,
     },
     /// mempool の中身。
     MempoolTxids(oneshot::Sender<Result<Vec<Hash>, String>>),
@@ -312,8 +342,20 @@ impl NodeHandle {
 
     /// ブロックを取り込む。
     pub async fn accept_block(&self, block: Block) -> Result<BlockAccepted, String> {
+        self.accept_block_from(block, None).await
+    }
+
+    /// ブロックを受け取る。くれたピアを添える。
+    ///
+    /// そのピアには報せ直さない。相手は既に持っている。
+    pub async fn accept_block_from(
+        &self,
+        block: Block,
+        from: Option<PeerId>,
+    ) -> Result<BlockAccepted, String> {
         self.ask(|reply| Request::AcceptBlock {
             block: Box::new(block),
+            from,
             reply,
         })
         .await
@@ -429,8 +471,34 @@ impl NodeHandle {
 
     /// トランザクションを mempool に入れる。
     pub async fn submit_tx(&self, tx: Transaction) -> Result<Hash, String> {
+        self.submit_tx_from(tx, None).await
+    }
+
+    /// ピアから来たトランザクションを mempool に入れる。
+    ///
+    /// **頼んでいなかったものは検証せずに断る。** 署名の検証は重い。
+    /// 頼んだ覚えのないものを検証するのは、相手に計算を命じられて
+    /// いるのと変わらない。
+    pub async fn submit_tx_from(
+        &self,
+        tx: Transaction,
+        from: Option<PeerId>,
+    ) -> Result<Hash, String> {
         self.ask(|reply| Request::SubmitTx {
             tx: Box::new(tx),
+            from,
+            reply,
+        })
+        .await
+    }
+
+    /// `inv` で知らされた txid のうち、取り寄せるものを選ぶ。
+    pub async fn want_txs(&self, peer: PeerId, txids: Vec<Hash>) -> Result<Vec<Hash>, String> {
+        let now = now();
+        self.ask(|reply| Request::WantTxs {
+            peer,
+            txids,
+            now,
             reply,
         })
         .await
@@ -461,6 +529,8 @@ impl NodeHandle {
 struct Service {
     node: Node,
     download: BlockDownload,
+    /// トランザクションの取り寄せ。**頼んだものだけを受け取るための記録。**
+    tx_requests: TxRequests,
     mining: Option<Lock>,
     events: broadcast::Sender<NodeEvent>,
     /// これまでに掘れたブロックの数。
@@ -514,6 +584,7 @@ impl NodeService {
                 Service {
                     node,
                     download: BlockDownload::new(),
+                    tx_requests: TxRequests::new(),
                     mining: None,
                     events: events_for_thread,
                     mined: 0,
@@ -620,7 +691,7 @@ impl Service {
                 self.mined += 1;
                 self.attempts += attempts;
                 println!("掘れた: 高さ {height}  {hash}{}", self.rate_suffix());
-                self.announce_tip();
+                self.announce_tip(None);
                 if self.mine_until.is_some_and(|limit| self.mined >= limit) {
                     self.stop_mining();
                 }
@@ -673,12 +744,15 @@ impl Service {
     }
 
     /// 先端が変わったことを報せる。
-    fn announce_tip(&self) {
+    ///
+    /// `from` はそのブロックをくれたピア。そのピアには報せが届かない。
+    fn announce_tip(&self, from: Option<PeerId>) {
         if let Ok(tip) = self.node.chain().tip() {
             // 受け手が居なければ落ちるが、それは失敗ではない。
             let _ = self.events.send(NodeEvent::NewTip {
                 hash: tip.hash,
                 height: tip.height(),
+                from,
             });
         }
     }
@@ -715,8 +789,8 @@ impl Service {
             Request::AcceptHeaders { headers, reply } => {
                 let _ = reply.send(self.accept_headers(&headers));
             }
-            Request::AcceptBlock { block, reply } => {
-                let _ = reply.send(self.accept_block(*block));
+            Request::AcceptBlock { block, from, reply } => {
+                let _ = reply.send(self.accept_block(*block, from));
             }
             Request::GetBlock { hash, reply } => {
                 let result = self
@@ -732,6 +806,7 @@ impl Service {
             }
             Request::PeerGone(peer) => {
                 self.download.peer_disconnected(peer);
+                self.tx_requests.peer_disconnected(peer);
             }
             Request::SetMining {
                 payout,
@@ -815,8 +890,16 @@ impl Service {
             Request::GetEntry { hash, reply } => {
                 let _ = reply.send(Ok(self.node.chain().entry(&hash).cloned()));
             }
-            Request::SubmitTx { tx, reply } => {
-                let _ = reply.send(self.submit_tx(*tx));
+            Request::SubmitTx { tx, from, reply } => {
+                let _ = reply.send(self.submit_tx(*tx, from));
+            }
+            Request::WantTxs {
+                peer,
+                txids,
+                now,
+                reply,
+            } => {
+                let _ = reply.send(Ok(self.want_txs(peer, txids, now)));
             }
             Request::MempoolTxids(reply) => {
                 let _ = reply.send(Ok(self.node.mempool().txids()));
@@ -876,7 +959,11 @@ impl Service {
         })
     }
 
-    fn accept_block(&mut self, block: Block) -> Result<BlockAccepted, String> {
+    fn accept_block(
+        &mut self,
+        block: Block,
+        from: Option<PeerId>,
+    ) -> Result<BlockAccepted, String> {
         let hash = block.header.hash();
         let before = self.node.chain().tip().map_err(|e| e.to_string())?.hash;
         let outcome = self.node.accept_block(block, now()).map_err(|e| {
@@ -889,7 +976,7 @@ impl Service {
         let after = self.node.chain().tip().map_err(|e| e.to_string())?.hash;
         let moved_tip = before != after;
         if moved_tip {
-            self.announce_tip();
+            self.announce_tip(from);
         }
         Ok(BlockAccepted { outcome, moved_tip })
     }
@@ -897,15 +984,53 @@ impl Service {
     /// トランザクションを mempool に入れる。
     ///
     /// 中継の方針も含めてここで判断する。受け入れられなければ理由を返す。
-    fn submit_tx(&mut self, tx: Transaction) -> Result<Hash, String> {
+    ///
+    /// `from` があるなら、それはピアから来たものである。**そのピアに
+    /// 頼んであった場合だけ検証する。** 頼んでいないものは中身を見ずに
+    /// 断る。署名の検証は高い計算であり、誰でも好きなだけこちらに
+    /// 行わせられる状態にしてはならない。
+    fn submit_tx(&mut self, tx: Transaction, from: Option<PeerId>) -> Result<Hash, String> {
+        let txid = tx.txid();
+        if let Some(peer) = from {
+            if !self.tx_requests.was_requested_from(peer, &txid) {
+                return Err("頼んでいないトランザクションが来た".to_string());
+            }
+            // 頼んだ分は使い切る。以降の検証が失敗しても、同じものを
+            // もう一度この相手から受け取ることはない。
+            self.tx_requests.received(&txid);
+        }
+
         let tip = self.node.chain().tip().map_err(|e| e.to_string())?;
         let next_height = tip.height() + 1;
         let mtp = self.node.chain().median_time_past_for_child_of(&tip.hash);
         let view = self.node.chain().utxo_view().map_err(|e| e.to_string())?;
-        self.node
+        let accepted = self
+            .node
             .mempool_mut()
             .accept(tx, &view, next_height, mtp)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+
+        // **通ったものだけを流す。** くれた相手には流し返さない。
+        let _ = self.events.send(NodeEvent::NewTx {
+            txid: accepted,
+            from,
+        });
+        Ok(accepted)
+    }
+
+    /// `inv` で知らされた txid のうち、取り寄せるものを選ぶ。
+    ///
+    /// すでに mempool にあるもの、すでに誰かに頼んであるものは外す。
+    fn want_txs(&mut self, peer: PeerId, txids: Vec<Hash>, now: i64) -> Vec<Hash> {
+        // 返ってこないものを忘れてから積む。
+        self.tx_requests.expire(now);
+
+        let fresh: Vec<Hash> = txids
+            .into_iter()
+            .filter(|txid| !self.node.mempool().contains(txid))
+            .collect();
+        self.tx_requests.want(fresh);
+        self.tx_requests.assign(peer, now)
     }
 
     fn assign_downloads(&mut self, peer: PeerId, now: i64) -> Result<Vec<Hash>, String> {
