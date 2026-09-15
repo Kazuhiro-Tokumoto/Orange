@@ -135,6 +135,21 @@ pub struct Accepted {
     pub replaced: Vec<Hash>,
 }
 
+/// リオーグの後に mempool を組み直した結果。
+///
+/// 合計が組み直しに掛けた件数である。ただし上限を超えた分は、この後の
+/// 追い出しでさらに減ることがある ([`Policy::max_mempool_bytes`])。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rebuilt {
+    /// 取り消された枝から mempool へ戻したもの。
+    pub resubmitted: usize,
+    /// 元から mempool にあり、検証し直しても通ったもの。
+    pub retained: usize,
+    /// 検証し直して落ちたもの。新しい枝にすでに入っている、二重使用に
+    /// なった、親を失った、成熟や locktime に届かなくなった、のいずれか。
+    pub dropped: usize,
+}
+
 /// mempool の 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MempoolEntry {
@@ -621,8 +636,8 @@ impl Mempool {
     /// ブロックが取り消されたときに、mempool へ戻すべきトランザクション。
     ///
     /// **戻す処理自体は行わない。** 戻すには改めて検証が要り、そのためには
-    /// リオーグ後の UTXO の状態が必要だからである。呼び出し側がリオーグを
-    /// 終えてから [`Mempool::accept`] を呼ぶ。
+    /// リオーグ後の UTXO の状態が必要だからである。リオーグを終えてから
+    /// [`Mempool::rebuild_after_reorg`] にまとめて渡す。
     pub fn transactions_to_resubmit(block: &Block) -> Vec<Transaction> {
         block
             .transactions
@@ -630,6 +645,59 @@ impl Mempool {
             .filter(|tx| !tx.is_coinbase())
             .cloned()
             .collect()
+    }
+
+    /// リオーグの後、mempool を組み直す。
+    ///
+    /// 取り消された枝のトランザクション (`orphaned`、古い順) と、いま持って
+    /// いるものを合わせ、**リオーグ後の UTXO で全部検証し直す。**
+    ///
+    /// 落ちたものだけを選んで外すのでは足りない。リオーグは残ったものの
+    /// 前提も崩すからである。
+    ///
+    /// - 親が取り消された枝にあり、戻せなかった (新しい枝と二重使用になる)
+    /// - 高さが戻り、コインベース成熟 ([`params::COINBASE_MATURITY`]) に
+    ///   届かなくなった
+    /// - 高さが戻り、locktime が再び未来になった
+    ///
+    /// **崩れたまま残すと、自分で掘ったブロックが自分で弾かれる。**
+    /// テンプレートは mempool をそのまま詰めるためである。
+    ///
+    /// 新しい枝に入ったトランザクションを明示的に外す必要はない。使用済みに
+    /// なった UTXO はこのビューから消えており、検証し直す時点で落ちる。
+    ///
+    /// 費用は mempool の大きさに比例する (署名を検証し直す)。リオーグは稀で
+    /// あり、mempool には上限があるので、ここは単純さを取る。
+    pub fn rebuild_after_reorg(
+        &mut self,
+        orphaned: Vec<Transaction>,
+        chain_utxo: &dyn UtxoView,
+        next_height: u64,
+        median_time_past: i64,
+    ) -> Rebuilt {
+        // 取り消された枝のものを先に置く。いちど確認まで進んでいた側であり、
+        // 同じ UTXO を奪い合ったときはこちらを優先する。
+        let mut candidates: Vec<(bool, Transaction)> =
+            orphaned.into_iter().map(|tx| (true, tx)).collect();
+
+        // いま持っているものを到着順に取り出し、空にする。
+        let mut existing: Vec<MempoolEntry> = self.entries.values().cloned().collect();
+        existing.sort_by_key(|entry| entry.arrival);
+        candidates.extend(existing.into_iter().map(|entry| (false, entry.tx)));
+
+        self.entries.clear();
+        self.spent.clear();
+        self.total_size = 0;
+
+        let mut report = Rebuilt::default();
+        for (from_branch, tx) in dependency_order(candidates) {
+            match self.accept(tx, chain_utxo, next_height, median_time_past) {
+                Ok(_) if from_branch => report.resubmitted += 1,
+                Ok(_) => report.retained += 1,
+                Err(_) => report.dropped += 1,
+            }
+        }
+        report
     }
 
     /// ブロックに詰めるトランザクションを選ぶ。
@@ -679,6 +747,63 @@ impl Default for Mempool {
     fn default() -> Mempool {
         Mempool::new()
     }
+}
+
+/// 親が子より先に来るように並べ替える。
+///
+/// 組み直しでは親を先に受け入れなければならない。子を先に出すと、その時点
+/// では親の出力が存在せず、落ちてしまう。
+///
+/// 依存先が候補の中に無いもの (親がチェーン側にある、あるいは入力が
+/// 見つからない) は元の順序のまま残る。候補の中に循環は作れない。txid は
+/// トランザクションの中身のハッシュであり、自分の txid を含む親を指す
+/// トランザクションは構成できないからである。それでも印で防いでおく。
+fn dependency_order(candidates: Vec<(bool, Transaction)>) -> Vec<(bool, Transaction)> {
+    let position: HashMap<Hash, usize> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, (_, tx))| (tx.txid(), index))
+        .collect();
+
+    let mut done = vec![false; candidates.len()];
+    let mut open = vec![false; candidates.len()];
+    let mut ordered: Vec<usize> = Vec::with_capacity(candidates.len());
+    // (候補の番号, 親を積み終えたか)。再帰にしないのは、長い連鎖でも
+    // スタックを使い切らないようにするためである。
+    let mut stack: Vec<(usize, bool)> = Vec::new();
+
+    for start in 0..candidates.len() {
+        if done[start] {
+            continue;
+        }
+        stack.push((start, false));
+        while let Some((index, expanded)) = stack.pop() {
+            if done[index] || (!expanded && open[index]) {
+                continue;
+            }
+            if expanded {
+                done[index] = true;
+                open[index] = false;
+                ordered.push(index);
+                continue;
+            }
+            open[index] = true;
+            stack.push((index, true));
+            for input in &candidates[index].1.inputs {
+                if let Some(&parent) = position.get(&input.prev_out.txid) {
+                    if !done[parent] && !open[parent] {
+                        stack.push((parent, false));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut slots: Vec<Option<(bool, Transaction)>> = candidates.into_iter().map(Some).collect();
+    ordered
+        .into_iter()
+        .filter_map(|index| slots[index].take())
+        .collect()
 }
 
 #[cfg(test)]
@@ -1388,6 +1513,140 @@ mod tests {
         let resubmit = Mempool::transactions_to_resubmit(&block);
         assert_eq!(resubmit, vec![payment]);
         let _ = utxo;
+    }
+
+    // ━━━━━━━━ リオーグ後の組み直し ━━━━━━━━
+
+    #[test]
+    fn a_payment_from_the_undone_branch_comes_back_to_the_mempool() {
+        // 取り消された枝に入っていた支払いは、また未確認に戻る。誰の
+        // mempool にも無ければ、二度と掘られない。
+        let (mut pool, utxo, funds) = setup();
+        let payment = simple_spend(&funds, "0.01");
+        let txid = payment.txid();
+
+        let report = pool.rebuild_after_reorg(vec![payment], &utxo, HEIGHT, MTP);
+
+        assert_eq!(report.resubmitted, 1);
+        assert_eq!(report.dropped, 0);
+        assert!(pool.contains(&txid));
+    }
+
+    #[test]
+    fn a_payment_the_new_branch_already_carries_does_not_come_back() {
+        // 新しい枝が同じ UTXO を使っているなら、その出力はもう無い。戻して
+        // しまえば二重使用になる。
+        let (mut pool, mut utxo, funds) = setup();
+        let payment = simple_spend(&funds, "0.01");
+        // 新しい枝が使い切ったものとする。
+        utxo.remove(&funds.outpoint).unwrap();
+
+        let report = pool.rebuild_after_reorg(vec![payment], &utxo, HEIGHT, MTP);
+
+        assert_eq!(report.resubmitted, 0);
+        assert_eq!(report.dropped, 1);
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn an_entry_whose_input_the_new_branch_spent_is_dropped() {
+        // 組み直しの要点。**落ちたものを選んで外すのではなく、全部検証し直す。**
+        // 残したまま掘ると、自分のブロックが自分で弾かれる。
+        let (mut pool, mut utxo, funds) = setup();
+        let stale = simple_spend(&funds, "0.01");
+        let stale_id = pool.accept(stale, &utxo, HEIGHT, MTP).unwrap();
+        assert!(pool.contains(&stale_id));
+
+        // 新しい枝が同じ UTXO を別の形で使った。
+        utxo.remove(&funds.outpoint).unwrap();
+        let report = pool.rebuild_after_reorg(Vec::new(), &utxo, HEIGHT, MTP);
+
+        assert_eq!(report.retained, 0);
+        assert_eq!(report.dropped, 1);
+        assert!(!pool.contains(&stale_id), "無効になったものが残っている");
+    }
+
+    #[test]
+    fn an_untouched_entry_survives_the_rebuild() {
+        let (mut pool, utxo, funds) = setup();
+        let payment = simple_spend(&funds, "0.01");
+        let txid = pool.accept(payment, &utxo, HEIGHT, MTP).unwrap();
+
+        let report = pool.rebuild_after_reorg(Vec::new(), &utxo, HEIGHT, MTP);
+
+        assert_eq!(report.retained, 1);
+        assert_eq!(report.dropped, 0);
+        assert!(pool.contains(&txid));
+    }
+
+    #[test]
+    fn a_child_is_put_back_after_its_parent() {
+        // 取り消された枝では、親と子が別のブロックに入っていることも、
+        // 逆順に届くこともある。子を先に受け入れようとすると、その時点では
+        // 親の出力が存在せず落ちてしまう。並べ替えてから入れる。
+        let (mut pool, utxo, funds) = setup();
+        let parent_key = SecretKey::generate();
+        let parent = spend(
+            &[&funds],
+            vec![TxOutput::new(
+                "9.99".parse().unwrap(),
+                Lock::pay_to_pubkey(&parent_key.public_key()),
+            )],
+        );
+        let parent_id = parent.txid();
+        let child = simple_spend(&from_pool(parent_id, &parent, parent_key), "0.01");
+        let child_id = child.txid();
+
+        // わざと子を先に渡す。
+        let report = pool.rebuild_after_reorg(vec![child, parent], &utxo, HEIGHT, MTP);
+
+        assert_eq!(report.resubmitted, 2, "親子とも戻るべき");
+        assert_eq!(report.dropped, 0);
+        assert!(pool.contains(&parent_id));
+        assert!(pool.contains(&child_id));
+    }
+
+    #[test]
+    fn a_child_left_without_its_parent_is_dropped() {
+        // 親が新しい枝と競合して戻れなければ、子も入れない。
+        let (mut pool, mut utxo, funds) = setup();
+        let parent_key = SecretKey::generate();
+        let parent = spend(
+            &[&funds],
+            vec![TxOutput::new(
+                "9.99".parse().unwrap(),
+                Lock::pay_to_pubkey(&parent_key.public_key()),
+            )],
+        );
+        let child = simple_spend(&from_pool(parent.txid(), &parent, parent_key), "0.01");
+        let child_id = child.txid();
+        // 新しい枝が親の入力を使い切った。親は戻れない。
+        utxo.remove(&funds.outpoint).unwrap();
+
+        let report = pool.rebuild_after_reorg(vec![parent, child], &utxo, HEIGHT, MTP);
+
+        assert_eq!(report.resubmitted, 0);
+        assert_eq!(report.dropped, 2);
+        assert!(!pool.contains(&child_id));
+    }
+
+    #[test]
+    fn the_undone_branch_wins_a_conflict_against_the_mempool() {
+        // 同じ UTXO を、mempool にあるものと取り消された枝のものが奪い合う。
+        // いちど確認まで進んでいた側を先に置く。
+        let (mut pool, utxo, funds) = setup();
+        let in_pool = spend(&[&funds], vec![to("9.99")]);
+        let in_pool_id = pool.accept(in_pool, &utxo, HEIGHT, MTP).unwrap();
+        let confirmed = spend(&[&funds], vec![to("9.98")]);
+        let confirmed_id = confirmed.txid();
+        assert_ne!(in_pool_id, confirmed_id);
+
+        let report = pool.rebuild_after_reorg(vec![confirmed], &utxo, HEIGHT, MTP);
+
+        assert_eq!(report.resubmitted, 1);
+        assert!(pool.contains(&confirmed_id));
+        assert_eq!(report.dropped, 1);
+        assert!(!pool.contains(&in_pool_id));
     }
 
     // ━━━━━━━━ 追い出し ━━━━━━━━

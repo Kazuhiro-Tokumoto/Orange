@@ -15,7 +15,7 @@
 //! そのためである。
 
 use crate::addrbook::AddressBook;
-use oag_chain::chain::{AcceptOutcome, Chain, ChainError, HeaderOutcome, Retarget};
+use oag_chain::chain::{AcceptOutcome, Chain, ChainError, HeaderOutcome, Reorg, Retarget};
 use oag_consensus::lock::Lock;
 use oag_consensus::params;
 use oag_consensus::{Block, BlockHeader};
@@ -244,13 +244,54 @@ impl Node {
     /// 他所から来たブロックを受け取る。
     pub fn accept_block(&mut self, block: Block, now: i64) -> Result<AcceptOutcome, NodeError> {
         let height = block.header.height;
-        self.with_verifier(height, |node, verifier| {
-            let outcome = node.chain.accept_block(block.clone(), verifier, now)?;
-            if !matches!(outcome, AcceptOutcome::Duplicate) {
-                node.mempool.on_block_connected(&block);
+        let outcome = self.with_verifier(height, |node, verifier| {
+            Ok(node.chain.accept_block(block.clone(), verifier, now)?)
+        })?;
+        self.sync_mempool(&outcome, &block)?;
+        Ok(outcome)
+    }
+
+    /// ブロックを受け取った結果に合わせて mempool を直す。
+    ///
+    /// mempool は**アクティブチェーンの先を写したもの**である。先端が動いた
+    /// ときだけ直す。
+    fn sync_mempool(&mut self, outcome: &AcceptOutcome, block: &Block) -> Result<(), NodeError> {
+        match outcome {
+            // 知っていたもの。
+            AcceptOutcome::Duplicate => Ok(()),
+            // **負けた枝に入っただけのものは外さない。** そのブロックは
+            // アクティブチェーンに無く、入っているトランザクションは依然
+            // 未確認である。ここで外すと、まだ有効な支払いを中継しなくなり、
+            // 自分が掘るときにも詰めなくなる。
+            AcceptOutcome::SideChain => Ok(()),
+            AcceptOutcome::ExtendedTip => {
+                self.mempool.on_block_connected(block);
+                Ok(())
             }
-            Ok(outcome)
-        })
+            AcceptOutcome::Reorganized(reorg) => self.rebuild_mempool(reorg),
+        }
+    }
+
+    /// リオーグの後、mempool を組み直す。
+    ///
+    /// 取り消された枝のトランザクションを集めて戻し、残っているものも含めて
+    /// リオーグ後の UTXO で検証し直す ([`Mempool::rebuild_after_reorg`])。
+    ///
+    /// 受け取ったブロック 1 個だけを見て済ませるわけにはいかない。リオーグ
+    /// では複数のブロックが一度に繋がり、同時に複数が取り消されるためで
+    /// ある。取り消された枝にあった支払いを戻さなければ、それは誰の mempool
+    /// にも無いまま消える。新しい枝で確認済みになったものを外さなければ、
+    /// 次に自分で掘るブロックがその分だけ無効になる。
+    fn rebuild_mempool(&mut self, reorg: &Reorg) -> Result<(), NodeError> {
+        let orphaned = orphaned_transactions(reorg, |hash| self.chain.store().block(hash))?;
+
+        let tip = self.chain.tip()?;
+        let next_height = tip.height() + 1;
+        let median_time_past = self.chain.median_time_past_for_child_of(&tip.hash);
+        let view = self.chain.utxo_view()?;
+        self.mempool
+            .rebuild_after_reorg(orphaned, &view, next_height, median_time_past);
+        Ok(())
     }
 
     /// 他所から来たヘッダを受け取る。
@@ -396,7 +437,7 @@ impl Node {
                 let accepted = self
                     .chain
                     .accept_block(*block.clone(), verifier, timestamp)?;
-                self.mempool.on_block_connected(&block);
+                self.sync_mempool(&accepted, &block)?;
                 return match accepted {
                     AcceptOutcome::ExtendedTip | AcceptOutcome::Reorganized(_) => {
                         Ok(MinedBlock::Accepted {
@@ -419,5 +460,130 @@ impl Node {
     /// ブロックをファイルに書き出す。
     pub fn export_blocks(&self, dir: &Path) -> Result<usize, NodeError> {
         Ok(self.chain.store().export_blocks(dir)?)
+    }
+}
+
+/// 取り消された枝に入っていたトランザクションを、**古い順に**集める。
+///
+/// `Reorg::disconnected` は先端に近い順に並んでいる。そのまま戻すと子が親
+/// より先になり、親をまだ知らない時点で子を検証することになる。逆から見る。
+///
+/// コインベースは戻さない。取り消された枝のコインベースはもう存在しない
+/// 報酬であり、mempool は受け付けない (`docs/SPEC.md` §10.6)。
+///
+/// 本体を持っていないブロックは飛ばす。取り消したばかりの枝なので通常は
+/// 揃っているが、揃っていないことを失敗にはしない。戻せなかった支払いは
+/// 送った側が送り直せるが、ここで止まるとノードが先へ進めない。
+fn orphaned_transactions(
+    reorg: &Reorg,
+    mut block_of: impl FnMut(&Hash) -> Result<Option<Block>, StoreError>,
+) -> Result<Vec<oag_consensus::Transaction>, NodeError> {
+    let mut orphaned = Vec::new();
+    for hash in reorg.disconnected.iter().rev() {
+        if let Some(block) = block_of(hash)? {
+            orphaned.extend(Mempool::transactions_to_resubmit(&block));
+        }
+    }
+    Ok(orphaned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oag_consensus::tx::{OutPoint, TxInput, CURRENT_TX_VERSION};
+    use oag_consensus::{Transaction, TxOutput};
+    use oag_primitives::hash;
+    use std::collections::HashMap;
+
+    /// 指定した親を使うトランザクション。`tag` を変えれば別の txid になる。
+    fn spending(tag: &[u8], parent: Hash) -> Transaction {
+        let mut input = TxInput::new(OutPoint::new(parent, 0));
+        input.signature = tag.to_vec();
+        Transaction {
+            version: CURRENT_TX_VERSION,
+            inputs: vec![input],
+            outputs: vec![TxOutput::new("1".parse().unwrap(), Lock::unspendable())],
+            locktime: 0,
+        }
+    }
+
+    fn coinbase(tag: &[u8]) -> Transaction {
+        let mut input = TxInput::new(OutPoint::null());
+        input.signature = tag.to_vec();
+        Transaction {
+            version: CURRENT_TX_VERSION,
+            inputs: vec![input],
+            outputs: vec![TxOutput::new("50".parse().unwrap(), Lock::unspendable())],
+            locktime: 0,
+        }
+    }
+
+    fn block_of(transactions: Vec<Transaction>) -> Block {
+        Block {
+            header: BlockHeader {
+                version: 1,
+                prev_hash: Hash::ZERO,
+                merkle_root: Hash::ZERO,
+                timestamp: 0,
+                difficulty: 1,
+                height: 0,
+                nonce: 0,
+            },
+            transactions,
+        }
+    }
+
+    #[test]
+    fn the_undone_branch_is_collected_oldest_first() {
+        // `disconnected` は先端に近い順である。そのまま戻すと、子が親より
+        // 先に来る。
+        let parent = spending(b"parent", hash::txid(b"funding"));
+        let child = spending(b"child", parent.txid());
+        let older = block_of(vec![coinbase(b"cb1"), parent.clone()]);
+        let newer = block_of(vec![coinbase(b"cb2"), child.clone()]);
+
+        let blocks: HashMap<Hash, Block> =
+            HashMap::from([(hash::txid(b"older"), older), (hash::txid(b"newer"), newer)]);
+        let reorg = Reorg {
+            // 先端に近い順。
+            disconnected: vec![hash::txid(b"newer"), hash::txid(b"older")],
+            connected: Vec::new(),
+        };
+
+        let orphaned = orphaned_transactions(&reorg, |h| Ok(blocks.get(h).cloned())).unwrap();
+
+        assert_eq!(
+            orphaned,
+            vec![parent, child],
+            "古い順に並んでいない (親より子が先に来ている)"
+        );
+    }
+
+    #[test]
+    fn a_coinbase_from_the_undone_branch_is_not_put_back() {
+        // 取り消した枝のコインベースはもう存在しない報酬である。
+        let payment = spending(b"payment", hash::txid(b"funding"));
+        let block = block_of(vec![coinbase(b"cb"), payment.clone()]);
+        let blocks: HashMap<Hash, Block> = HashMap::from([(hash::txid(b"only"), block)]);
+        let reorg = Reorg {
+            disconnected: vec![hash::txid(b"only")],
+            connected: Vec::new(),
+        };
+
+        let orphaned = orphaned_transactions(&reorg, |h| Ok(blocks.get(h).cloned())).unwrap();
+
+        assert_eq!(orphaned, vec![payment]);
+    }
+
+    #[test]
+    fn a_missing_body_does_not_stop_the_reorg() {
+        let reorg = Reorg {
+            disconnected: vec![hash::txid(b"gone")],
+            connected: Vec::new(),
+        };
+
+        let orphaned = orphaned_transactions(&reorg, |_| Ok(None)).unwrap();
+
+        assert!(orphaned.is_empty());
     }
 }
