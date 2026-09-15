@@ -28,6 +28,10 @@ enum Command {
         #[command(flatten)]
         common: Common,
         /// 採掘する。`--payout` が必要。
+        ///
+        /// **既定では掘らない。** これを付けなければ、ブロックを検証して
+        /// 中継するだけのノードとして動く。検証は light モード (256 MB)
+        /// だけで済むので、2 GB を積んでいない機械でも構わない。
         #[arg(long)]
         mine: bool,
         /// 採掘に fast モード (2 GB) を使う。light モードのおよそ 6 倍速い。

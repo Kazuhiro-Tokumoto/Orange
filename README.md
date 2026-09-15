@@ -109,9 +109,24 @@ regtest** です。難易度が 1 なので 1 台ですぐにブロックが積�
 
 最初の 90 ブロックはこの難易度のままです (LWMA は窓が埋まるまで働かない)。
 
-採掘には `--fast` を付けると RandomX の fast モード (2 GB) を使います。
-省くと light モード (256 MB) です。**検証は常に light モードで行う**ので、
-2 GB 積んでいない機械でもノードは動きます。
+### 掘らないで動かす
+
+**採掘は任意です。既定では掘りません。** `--mine` を付けなければ、
+ブロックを検証して中継するだけのノードとして動きます。
+
+```sh
+./target/release/oag-node run --network mainnet --datadir ./oag-data
+```
+
+検証は RandomX の light モード (256 MB) だけで済みます。**2 GB を積んで
+いない機械でもフルノードを動かせます** (SPEC §11.2)。採掘するかどうかと、
+検証できるかどうかは別です。
+
+### 掘る
+
+`--mine` を付けたときだけ掘ります。報酬の受取先 `--payout` が要ります。
+さらに `--fast` を付けると RandomX の fast モード (2 GB) を使います。
+省くと light モード (256 MB) のまま掘ります。
 
 ```sh
 ./target/release/oag-node run --network mainnet --datadir ./oag-data \
