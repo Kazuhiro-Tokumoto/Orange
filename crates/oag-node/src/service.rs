@@ -443,9 +443,12 @@ impl NodeHandle {
     /// ここから数える。** 止まったあとに掘り増したいときも同じ呼び方で
     /// 済む。
     ///
-    /// `fast` を立てると 2 GB のデータセットを構築して掘る。light モードの
-    /// およそ 6 倍速い。**構築に 1 分前後かかり、その間ノードは他の要求に
-    /// 応えない。** 確保できなければ light モードのまま続ける。
+    /// `fast` を立てると 2 GB のデータセットを構築して掘る。light モードより
+    /// 速い (何倍かは機械による。[`RandomXMiner`] を見よ)。**構築に 1 分前後
+    /// かかり、その間ノードは他の要求に応えない。** 確保できなければ light
+    /// モードのまま続ける。
+    ///
+    /// [`RandomXMiner`]: oag_pow::randomx::RandomXMiner
     pub async fn start_mining(
         &self,
         payout: Lock,

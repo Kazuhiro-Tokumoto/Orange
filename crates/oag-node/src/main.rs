@@ -34,10 +34,13 @@ enum Command {
         /// だけで済むので、2 GB を積んでいない機械でも構わない。
         #[arg(long)]
         mine: bool,
-        /// 採掘に fast モード (2 GB) を使う。light モードのおよそ 6 倍速い。
+        /// 採掘に fast モード (2 GB) を使う。light モードより速い。
         ///
         /// データセットの構築に 1 分前後かかる。2 GB を確保できなければ
         /// light モードで続ける。**検証は常に light モードで行う。**
+        ///
+        /// 何倍速いかは機械による。手元で測るには
+        /// `cargo run --release -p oag-pow --features randomx --example hashrate`
         #[arg(long)]
         fast: bool,
         /// 報酬の受取先アドレス。
