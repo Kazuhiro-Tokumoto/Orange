@@ -15,7 +15,7 @@ use oag_consensus::codec::Encode;
 use oag_consensus::lock::Lock;
 use oag_consensus::params;
 use oag_consensus::TxOutput;
-use oag_node::service::{NodeEvent, NodeHandle, NodeService};
+use oag_node::service::{MiningMode, NodeEvent, NodeHandle, NodeService};
 use oag_node::start_rpc;
 use oag_primitives::{Address, Amount, Network};
 use oag_rpc::auth::read_cookie;
@@ -64,7 +64,11 @@ impl Drop for TempDir {
 async fn mine(handle: &NodeHandle, payout: &Address, blocks: u64) {
     let mut events = handle.subscribe();
     handle
-        .start_mining(Lock::from_address(payout), Some(blocks), false)
+        .start_mining(
+            Lock::from_address(payout),
+            Some(blocks),
+            MiningMode::light(),
+        )
         .await
         .unwrap();
 

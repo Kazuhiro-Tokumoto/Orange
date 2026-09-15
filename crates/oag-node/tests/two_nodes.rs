@@ -14,7 +14,7 @@ use oag_consensus::tx::{TxInput, CURRENT_TX_VERSION, SEQUENCE_FINAL};
 use oag_consensus::{Transaction, TxOutput};
 use oag_net::magic::magic_for;
 use oag_net::transport::Listener;
-use oag_node::service::{NodeHandle, NodeService};
+use oag_node::service::{MiningMode, NodeHandle, NodeService};
 use oag_node::{accept_loop, dial};
 use oag_primitives::{Address, Amount, Network, SecretKey};
 use std::net::SocketAddr;
@@ -133,7 +133,9 @@ fn a_new_node_catches_up_with_an_existing_chain() {
 
     runtime.block_on(async {
         // A に 5 ブロック積む。この時点で B は繋がっていない。
-        a.start_mining(payout(), Some(5), false).await.unwrap();
+        a.start_mining(payout(), Some(5), MiningMode::light())
+            .await
+            .unwrap();
         wait_for_mining(&a, 5).await;
         assert_eq!(b.status().await.unwrap().height, 0, "B はまだ空のはず");
 
@@ -172,7 +174,9 @@ fn a_block_mined_while_connected_reaches_the_peer() {
         assert_eq!(a.status().await.unwrap().height, 0);
         assert_eq!(b.status().await.unwrap().height, 0);
 
-        a.start_mining(payout(), Some(3), false).await.unwrap();
+        a.start_mining(payout(), Some(3), MiningMode::light())
+            .await
+            .unwrap();
         wait_for_mining(&a, 3).await;
 
         wait_for_height(&b, 3, "中継").await;
@@ -198,7 +202,9 @@ fn a_synced_node_rebuilds_the_utxo_set_itself() {
     let b = service_b.handle();
 
     runtime.block_on(async {
-        a.start_mining(payout(), Some(4), false).await.unwrap();
+        a.start_mining(payout(), Some(4), MiningMode::light())
+            .await
+            .unwrap();
         wait_for_mining(&a, 4).await;
 
         let addr = listen(a.clone()).await;
@@ -257,8 +263,12 @@ fn two_chains_that_disagree_converge_on_the_heavier_one() {
     runtime.block_on(async {
         // 繋がずにそれぞれ掘る。報酬の宛先が違うのでコインベースが違い、
         // 同じ高さでも別のブロックになる。
-        a.start_mining(payout(), Some(3), false).await.unwrap();
-        b.start_mining(payout(), Some(6), false).await.unwrap();
+        a.start_mining(payout(), Some(3), MiningMode::light())
+            .await
+            .unwrap();
+        b.start_mining(payout(), Some(6), MiningMode::light())
+            .await
+            .unwrap();
         wait_for_mining(&a, 3).await;
         wait_for_mining(&b, 6).await;
 
@@ -309,8 +319,12 @@ fn an_even_race_is_settled_by_the_next_block() {
 
     runtime.block_on(async {
         // 同じ高さまで、別々に掘る。
-        a.start_mining(payout(), Some(4), false).await.unwrap();
-        b.start_mining(payout(), Some(4), false).await.unwrap();
+        a.start_mining(payout(), Some(4), MiningMode::light())
+            .await
+            .unwrap();
+        b.start_mining(payout(), Some(4), MiningMode::light())
+            .await
+            .unwrap();
         wait_for_mining(&a, 4).await;
         wait_for_mining(&b, 4).await;
 
@@ -336,7 +350,9 @@ fn an_even_race_is_settled_by_the_next_block() {
         );
 
         // B が 1 つ積む。これで B の方が重くなる。
-        b.start_mining(payout(), Some(1), false).await.unwrap();
+        b.start_mining(payout(), Some(1), MiningMode::light())
+            .await
+            .unwrap();
         wait_for_mining(&b, 5).await;
 
         // A は 4 ブロックすべてを取り消して B の枝に乗り換える。
@@ -382,7 +398,7 @@ fn a_transaction_reaches_the_peers_mempool() {
 
     runtime.block_on(async {
         // A に成熟したコインベースができるまで掘る。B はまだ居ない。
-        a.start_mining(lock.clone(), Some(mine_to), false)
+        a.start_mining(lock.clone(), Some(mine_to), MiningMode::light())
             .await
             .unwrap();
         wait_for_height_within(&a, mine_to, "採掘", MATURITY_TIMEOUT).await;
@@ -534,13 +550,17 @@ fn a_block_travels_to_a_node_that_is_not_directly_connected() {
         // まず 1 個掘って、3 台が繋がって揃うのを待つ。ここを踏まずに
         // 掘ると、C が後から繋いで初期同期で追いついただけでも通って
         // しまい、中継を見たことにならない。
-        a.start_mining(payout(), Some(1), false).await.unwrap();
+        a.start_mining(payout(), Some(1), MiningMode::light())
+            .await
+            .unwrap();
         wait_for_mining(&a, 1).await;
         wait_for_height(&c, 1, "初期同期").await;
 
         // ここから先が中継である。C はすでに繋がっていて揃っており、
         // 取りに行く理由がない。**B が知らせなければ届かない。**
-        a.start_mining(payout(), Some(2), false).await.unwrap();
+        a.start_mining(payout(), Some(2), MiningMode::light())
+            .await
+            .unwrap();
         wait_for_mining(&a, 3).await;
         wait_for_height(&c, 3, "中継").await;
 

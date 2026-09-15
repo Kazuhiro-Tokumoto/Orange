@@ -20,19 +20,12 @@ use oag_consensus::lock::Lock;
 use oag_consensus::params;
 use oag_consensus::{Block, BlockHeader};
 use oag_mempool::Mempool;
-use oag_miner::mine::{MiningOutcome, NeverStop};
-use oag_miner::{build_template, TemplateError, TemplateRequest};
-use oag_pow::randomx::{RandomXMiner, RandomXPowError, RandomXVerifier};
+use oag_miner::{build_template, BlockTemplate, TemplateError, TemplateRequest};
+use oag_pow::randomx::{RandomXPowError, RandomXVerifier};
 use oag_pow::seed_height;
 use oag_primitives::{Hash, Network};
 use oag_store::{Store, StoreError};
 use std::path::Path;
-
-/// 1 回の探索で試す nonce の数。
-///
-/// これを試し切ったら追加ノンスを変えて組み直す。light モードの RandomX は
-/// 1 秒に数百回しか計算できないため、大きすぎると中断の判断が遅れる。
-const NONCE_BATCH: u64 = 1_000;
 
 /// ノードの失敗。
 #[derive(Debug, thiserror::Error)]
@@ -91,23 +84,13 @@ pub struct NodeStatus {
     pub known_addresses: usize,
 }
 
-/// 採掘の結果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MinedBlock {
-    /// 掘れて、先端になった。
-    Accepted {
-        /// 掘ったブロックのハッシュ。
-        hash: Hash,
-        /// 新しい高さ。
-        height: u64,
-        /// 試した回数。
-        attempts: u64,
-    },
-    /// 与えられた回数では見つからなかった。
-    NotFound {
-        /// 試した回数。
-        attempts: u64,
-    },
+/// 掘れて、先端になったブロック。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinedBlock {
+    /// 掘ったブロックのハッシュ。
+    pub hash: Hash,
+    /// 新しい高さ。
+    pub height: u64,
 }
 
 /// ノード。
@@ -122,12 +105,6 @@ pub struct Node {
     /// ことは `oag-pow` の試験で確かめてあるが、確かめてあることと
     /// 実際に通すことは別である。
     verifier: Option<(u64, RandomXVerifier)>,
-    /// 現在のシードエポックの採掘器 (fast、2 GB)。
-    ///
-    /// `None` なら light モードで掘る。
-    miner: Option<(u64, RandomXMiner)>,
-    /// fast モードで掘るか。
-    fast_mining: bool,
     /// ピアの住所帳。
     addresses: AddressBook,
 }
@@ -151,8 +128,6 @@ impl Node {
             mempool: Mempool::new(),
             network,
             verifier: None,
-            miner: None,
-            fast_mining: false,
             addresses,
         })
     }
@@ -306,80 +281,70 @@ impl Node {
         })
     }
 
-    /// 次のブロックを掘る。
+    /// 次のブロックを掘る土台を組む。
     ///
-    /// `now` はノードの現在時刻 (Unix 秒)。`max_attempts` を試して見つから
-    /// なければ諦めて戻る。呼び出し側が繰り返す。
-    pub fn mine_next(
-        &mut self,
+    /// `now` はノードの現在時刻 (Unix 秒)。組んだ土台は
+    /// [`MiningPool`](oag_miner::MiningPool) に配る。**組むのはここ、
+    /// 探すのは作業スレッドである。** チェーンと mempool に触るのは
+    /// ノードのスレッドだけに保つ。
+    ///
+    /// 時計が Median Time Past より大きく遅れていると組めない。掘れても
+    /// 他のノードが撥ねるブロックにしかならないためである。
+    pub fn mining_template(
+        &self,
         payout: &Lock,
         now: i64,
-        max_attempts: u64,
-    ) -> Result<MinedBlock, NodeError> {
+        extra_nonce: u64,
+    ) -> Result<BlockTemplate, NodeError> {
         let tip = self.chain.tip()?;
+        let prev_hash = tip.hash;
         let height = tip.height() + 1;
-        self.ensure_miner(height);
-        // 採掘器も一旦取り出す。検証器と同じ理由で、借りたままチェーンを
-        // 変更できないためである。失敗しても必ず戻す。
-        let miner = self.miner.take();
-        let result = self.with_verifier(height, |node, verifier| {
-            let fast = miner.as_ref().map(|(_, m)| m);
-            node.mine_with(verifier, fast, &tip.hash, height, payout, now, max_attempts)
-        });
-        self.miner = miner;
-        result
-    }
+        let difficulty = self.chain.expected_difficulty_for_child_of(&prev_hash)?;
+        let mtp = self.chain.median_time_past_for_child_of(&prev_hash);
 
-    /// fast モード (2 GB) で掘るようにする。
-    ///
-    /// データセットの構築に 1 分前後かかる。**ここで済ませておく。**
-    /// 掘り始めてから固まったように見えるのを避けるためである。
-    ///
-    /// 2 GB を確保できなければ誤りを返す。呼び出し側は light モードの
-    /// まま続けてよい。
-    pub fn enable_fast_mining(&mut self, height: u64) -> Result<(), NodeError> {
-        self.fast_mining = true;
-        let wanted = seed_height(height);
-        let seed = self.seed_for(wanted)?;
-        self.miner = Some((wanted, RandomXMiner::new(&seed, wanted)?));
-        Ok(())
-    }
-
-    /// fast モードで掘っているか。
-    pub fn is_fast_mining(&self) -> bool {
-        self.miner.is_some()
-    }
-
-    /// この高さのシードエポックに合う採掘器を用意する。
-    ///
-    /// fast モードでないなら何もしない。エポックが変わっていたら作り直す。
-    /// **作り直しには 1 分前後かかり、その間は掘れない。** 2048 ブロック
-    /// (約 34 時間) に 1 度である。
-    ///
-    /// 確保に失敗したら light モードに退き、以後 fast は試みない。
-    /// 採掘そのものは続く。
-    fn ensure_miner(&mut self, height: u64) {
-        if !self.fast_mining {
-            return;
+        // タイムスタンプは Median Time Past より後でなければならない。
+        let timestamp = now.max(mtp + 1);
+        if timestamp > now + params::MAX_FUTURE_TIME_DRIFT_SECS {
+            return Err(NodeError::ClockTooFarBehind { mtp, now });
         }
-        let wanted = seed_height(height);
-        if self.miner.as_ref().is_some_and(|(e, _)| *e == wanted) {
-            return;
-        }
-        let built = self
-            .seed_for(wanted)
-            .and_then(|seed| Ok(RandomXMiner::new(&seed, wanted)?));
-        match built {
-            Ok(miner) => self.miner = Some((wanted, miner)),
-            Err(e) => {
-                eprintln!(
-                    "fast モードのデータセットを用意できない: {e}\n\
-                     light モード (256 MB) で採掘を続ける。速さはおよそ 6 分の 1 になる。"
-                );
-                self.fast_mining = false;
-                self.miner = None;
+
+        let request = TemplateRequest {
+            prev_hash,
+            height,
+            difficulty,
+            timestamp,
+            payout: payout.clone(),
+            extra_nonce: extra_nonce.to_le_bytes().to_vec(),
+        };
+        Ok(build_template(&request, &self.mempool)?)
+    }
+
+    /// 自分で掘ったブロックを自分のチェーンに入れる。
+    ///
+    /// **他所から来たものと同じ道を通す。** 掘った側だからといって検証を
+    /// 省かない。省けば、自分だけが正しいと思っているブロックを撒くことに
+    /// なる。
+    ///
+    /// 先端にならなかったときは [`NodeError::SelfMinedRejected`] を返す。
+    pub fn accept_mined(&mut self, block: Block, now: i64) -> Result<MinedBlock, NodeError> {
+        let hash = block.header.hash();
+        let height = block.header.height;
+        match self.accept_block(block, now)? {
+            AcceptOutcome::ExtendedTip | AcceptOutcome::Reorganized(_) => {
+                Ok(MinedBlock { hash, height })
             }
+            other => Err(NodeError::SelfMinedRejected(other)),
         }
+    }
+
+    /// 次のブロックを掘るときの RandomX シード (高さと値)。
+    ///
+    /// 採掘器はこれで建てる。**エポックが変われば建て直しである。**
+    /// 呼び出し側は返ってきた高さを覚えておき、変わったかどうかを見る。
+    pub fn mining_seed(&self) -> Result<(u64, Hash), NodeError> {
+        let height = self.chain.tip()?.height() + 1;
+        let wanted = seed_height(height);
+        Ok((wanted, self.seed_for(wanted)?))
     }
 
     /// そのシード高さのブロックハッシュ。
@@ -388,73 +353,6 @@ impl Node {
             .chain
             .hash_at_height(seed_height)?
             .unwrap_or(self.chain.tip()?.hash))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn mine_with(
-        &mut self,
-        verifier: &RandomXVerifier,
-        fast: Option<&RandomXMiner>,
-        prev_hash: &Hash,
-        height: u64,
-        payout: &Lock,
-        now: i64,
-        max_attempts: u64,
-    ) -> Result<MinedBlock, NodeError> {
-        let difficulty = self.chain.expected_difficulty_for_child_of(prev_hash)?;
-        let mtp = self.chain.median_time_past_for_child_of(prev_hash);
-
-        // タイムスタンプは Median Time Past より後でなければならない。
-        let timestamp = now.max(mtp + 1);
-        if timestamp > now + params::MAX_FUTURE_TIME_DRIFT_SECS {
-            return Err(NodeError::ClockTooFarBehind { mtp, now });
-        }
-
-        let mut attempts = 0u64;
-        let mut extra_nonce: u64 = 0;
-
-        while attempts < max_attempts {
-            let request = TemplateRequest {
-                prev_hash: *prev_hash,
-                height,
-                difficulty,
-                timestamp,
-                payout: payout.clone(),
-                extra_nonce: extra_nonce.to_le_bytes().to_vec(),
-            };
-            let template = build_template(&request, &self.mempool)?;
-
-            let batch = NONCE_BATCH.min(max_attempts - attempts);
-            // 探すのは fast、確かめるのは light。どちらも同じハッシュを返す。
-            let hasher: &dyn oag_miner::mine::PowHasher =
-                fast.map_or(verifier as &dyn oag_miner::mine::PowHasher, |m| m);
-            let outcome = oag_miner::mine(&template, hasher, 0, batch, &NeverStop)?;
-            attempts += outcome.attempts();
-
-            if let MiningOutcome::Found { block, .. } = outcome {
-                let hash = block.header.hash();
-                // 自分で掘ったものも、他所から来たものと同じ道を通す。
-                let accepted = self
-                    .chain
-                    .accept_block(*block.clone(), verifier, timestamp)?;
-                self.sync_mempool(&accepted, &block)?;
-                return match accepted {
-                    AcceptOutcome::ExtendedTip | AcceptOutcome::Reorganized(_) => {
-                        Ok(MinedBlock::Accepted {
-                            hash,
-                            height,
-                            attempts,
-                        })
-                    }
-                    other => Err(NodeError::SelfMinedRejected(other)),
-                };
-            }
-
-            // この追加ノンスでは見つからなかった。組み直して続ける。
-            extra_nonce = extra_nonce.wrapping_add(1);
-        }
-
-        Ok(MinedBlock::NotFound { attempts })
     }
 
     /// ブロックをファイルに書き出す。

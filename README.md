@@ -139,6 +139,32 @@ regtest** です。難易度が 1 なので 1 台ですぐにブロックが積�
 cargo run --release -p oag-pow --features randomx --example hashrate
 ```
 
+#### 何スレッドで掘るか
+
+既定は 1 本です。`--mining-threads` で増やせます。`0` を渡すとコア数に
+合わせます。
+
+```sh
+./target/release/oag-node run --network mainnet --datadir ./oag-data \
+    --mine --payout <アドレス> --mining-threads 4
+```
+
+**本数を増やすと memory も増えます。** RandomX の採掘器はスレッドを
+またげないので、1 本ごとに自分の分を建てます。
+
+| モード | 1 本あたり | 4 本なら |
+| --- | ---: | ---: |
+| light | 256 MB | 1 GB |
+| fast | 2 GB | 8 GB |
+
+`--fast` と `--mining-threads 0` を同時に渡しても 1 本のままにします。
+積んでいる memory が分からないのに、2 GB ずつ確保しにいかないためです。
+fast を何本も建てたいときは本数を明示してください。
+
+light を何本も建てるのと fast を 1 本建てるのは、どちらも 2 GB 前後に
+なります。**どちらが速いかは機械によります。** 上の `hashrate` で
+light の 1 本あたりの速さを測り、本数を掛けて比べてください。
+
 ```sh
 cargo build --release -p oag-node
 

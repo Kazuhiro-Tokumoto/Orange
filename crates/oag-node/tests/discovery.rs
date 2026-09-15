@@ -16,7 +16,7 @@ use oag_consensus::lock::Lock;
 use oag_net::magic::magic_for;
 use oag_net::transport::Listener;
 use oag_node::connect::Outbound;
-use oag_node::service::{NodeHandle, NodeService};
+use oag_node::service::{MiningMode, NodeHandle, NodeService};
 use oag_node::{accept_loop, connect};
 use oag_primitives::{Address, Network, SecretKey};
 use std::net::SocketAddr;
@@ -121,7 +121,9 @@ fn a_node_reaches_a_peer_it_was_never_told_about() {
         let b_addr = listen(b.clone()).await;
 
         // B がチェーンを積む。**C には B のことを一切教えない。**
-        b.start_mining(payout(), Some(3), false).await.unwrap();
+        b.start_mining(payout(), Some(3), MiningMode::light())
+            .await
+            .unwrap();
 
         // A と B は自分の待ち受け住所を名乗る。これが無いと、A は B の
         // 住所を知っていても「実績のある住所」にならず、C に配らない。

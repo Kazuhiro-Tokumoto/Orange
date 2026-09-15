@@ -8,7 +8,7 @@ use oag_consensus::lock::Lock;
 use oag_net::magic::magic_for;
 use oag_net::transport::Listener;
 use oag_node::node::{self, Node};
-use oag_node::service::{NodeEvent, NodeHandle, NodeService};
+use oag_node::service::{MiningMode, NodeEvent, NodeHandle, NodeService};
 use oag_node::{accept_loop, dial};
 use oag_primitives::{Address, Network, SecretKey};
 use std::net::SocketAddr;
@@ -43,6 +43,16 @@ enum Command {
         /// `cargo run --release -p oag-pow --features randomx --example hashrate`
         #[arg(long)]
         fast: bool,
+        /// 何スレッドで掘るか。既定は 1。`0` なら機械のコア数に合わせる。
+        ///
+        /// **スレッドを増やすと memory も増える。** RandomX の採掘器は
+        /// スレッドをまたげないので、1 本ごとに自分の分を建てる。light
+        /// モードで 1 本 256 MB、fast モードで 1 本 2 GB である。
+        ///
+        /// `0` を渡しても fast モードでは 1 本のままにする。積んでいる
+        /// memory が分からないのに 2 GB ずつ確保しにいかないためである。
+        #[arg(long, default_value_t = 1)]
+        mining_threads: usize,
         /// 報酬の受取先アドレス。
         #[arg(long)]
         payout: Option<String>,
@@ -141,6 +151,7 @@ fn run() -> Result<(), String> {
             common,
             mine,
             fast,
+            mining_threads,
             external_addr,
             no_discovery,
             payout,
@@ -224,7 +235,11 @@ fn run() -> Result<(), String> {
 
                 if let Some(lock) = payout {
                     println!("採掘を開始する (Ctrl-C で中断してよい)");
-                    handle.start_mining(lock, blocks, fast).await?;
+                    let mode = MiningMode {
+                        fast,
+                        threads: mining_threads,
+                    };
+                    handle.start_mining(lock, blocks, mode).await?;
                 }
 
                 wait_for_shutdown(&handle, blocks.is_some(), exit_after).await;

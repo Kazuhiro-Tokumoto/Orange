@@ -30,19 +30,36 @@ use oag_consensus::lock::Lock;
 use oag_consensus::tx::OutPoint;
 use oag_consensus::utxo::UtxoEntry;
 use oag_consensus::{Block, BlockHeader, Transaction};
+use oag_miner::pool::{HasherFactory, MiningPool};
+use oag_miner::PowHasher;
 use oag_net::message::NetAddress;
 use oag_net::message::MAX_HEADERS;
 use oag_net::sync::{BlockDownload, PeerId, TxRequests};
+use oag_pow::randomx::{RandomXMiner, RandomXVerifier};
 use oag_primitives::{Hash, Network};
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-/// 1 度に試す nonce の数。
+/// 当たりを待ちながら要求を捌き直すまでの間。
 ///
-/// これを試すごとに要求を捌く。light モードの RandomX は 1 秒に数百回
-/// しか計算できないため、大きくすると応答が目に見えて遅れる。
-const MINING_SLICE: u64 = 32;
+/// 採掘そのものは作業スレッドが回しているので、ノードのスレッドはここで
+/// 眠っていられる。短すぎると起きるだけで CPU を使い、長すぎると要求への
+/// 応答が遅れる。
+const MINING_POLL: Duration = Duration::from_millis(20);
+
+/// 掘る土台を組み直すまでの間。
+///
+/// 先端が動いたときは待たずに組み直す。これは**それ以外の理由**、つまり
+/// mempool に取引が増えたことと、ヘッダの時刻が古くなることのためである。
+const TEMPLATE_REFRESH: Duration = Duration::from_secs(10);
+
+/// fast モードのデータセット 1 個分の目安 (GB)。運用者への表示に使う。
+const DATASET_GIB: f64 = oag_pow::randomx::DATASET_BYTES as f64 / (1 << 30) as f64;
 
 /// 報せを溜めておける数。
 ///
@@ -55,6 +72,69 @@ const REQUEST_CAPACITY: usize = 1_024;
 
 /// 終了を伝えるのを諦めるまでの試行回数。
 const SHUTDOWN_ATTEMPTS: usize = 100;
+
+/// 採掘のやり方。
+///
+/// スレッドを増やすと、その数だけ RandomX の採掘器が要る。**採掘器は
+/// スレッドをまたげない**ので、共有はできない (`oag-miner` の `pool`
+/// モジュールを見よ)。memory は掛け算で効く。
+///
+/// | モード | 1 スレッドあたり | 4 スレッドなら |
+/// | --- | ---: | ---: |
+/// | light | 256 MB | 1 GB |
+/// | fast | 2 GB | 8 GB |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MiningMode {
+    /// fast モード (2 GB) を使うか。
+    pub fast: bool,
+    /// 何スレッドで掘るか。`0` なら機械に合わせて決める。
+    pub threads: usize,
+}
+
+impl Default for MiningMode {
+    /// light モード、1 スレッド。**積んでいる memory を当てにしない。**
+    fn default() -> MiningMode {
+        MiningMode {
+            fast: false,
+            threads: 1,
+        }
+    }
+}
+
+impl MiningMode {
+    /// light モードで 1 スレッド。
+    pub fn light() -> MiningMode {
+        MiningMode::default()
+    }
+
+    /// fast モードで 1 スレッド。
+    pub fn fast() -> MiningMode {
+        MiningMode {
+            fast: true,
+            threads: 1,
+        }
+    }
+
+    /// スレッド数を指定する。
+    pub fn with_threads(self, threads: usize) -> MiningMode {
+        MiningMode { threads, ..self }
+    }
+
+    /// 実際に起こすスレッドの数。
+    ///
+    /// `threads` が `0` のときだけ機械を見る。**fast モードでは増やさない。**
+    /// 1 本あたり 2 GB 要るのに、積んでいる量が分からないためである。
+    /// 増やしたければ本数を明示する。
+    pub fn resolved_threads(self) -> NonZeroUsize {
+        if let Some(threads) = NonZeroUsize::new(self.threads) {
+            return threads;
+        }
+        if self.fast {
+            return NonZeroUsize::MIN;
+        }
+        std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
+    }
+}
 
 /// ノードからの報せ。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,8 +241,8 @@ enum Request {
         payout: Option<Lock>,
         /// この数だけ掘ったら止める。`None` なら止まらない。
         blocks: Option<u64>,
-        /// fast モード (2 GB) で掘るか。
-        fast: bool,
+        /// 掘り方。
+        mode: MiningMode,
     },
     /// 聞いた住所を住所帳に入れる。
     AddAddresses {
@@ -443,22 +523,26 @@ impl NodeHandle {
     /// ここから数える。** 止まったあとに掘り増したいときも同じ呼び方で
     /// 済む。
     ///
-    /// `fast` を立てると 2 GB のデータセットを構築して掘る。light モードより
-    /// 速い (何倍かは機械による。[`RandomXMiner`] を見よ)。**構築に 1 分前後
-    /// かかり、その間ノードは他の要求に応えない。** 確保できなければ light
-    /// モードのまま続ける。
+    /// `mode` で掘り方を決める ([`MiningMode`])。fast モードを立てると
+    /// 2 GB のデータセットを構築してから掘る。light モードより速い
+    /// (何倍かは機械による。[`RandomXMiner`] を見よ)。**構築に 1 分前後
+    /// かかり、その間ノードは他の要求に応えない。** 確保できなければ
+    /// light モードで掘る。
+    ///
+    /// スレッドを増やすと、その数だけ採掘器を建てる。**memory は掛け算で
+    /// 効く。**
     ///
     /// [`RandomXMiner`]: oag_pow::randomx::RandomXMiner
     pub async fn start_mining(
         &self,
         payout: Lock,
         blocks: Option<u64>,
-        fast: bool,
+        mode: MiningMode,
     ) -> Result<(), String> {
         self.tell(Request::SetMining {
             payout: Some(payout),
             blocks,
-            fast,
+            mode,
         })
         .await
     }
@@ -468,7 +552,7 @@ impl NodeHandle {
         self.tell(Request::SetMining {
             payout: None,
             blocks: None,
-            fast: false,
+            mode: MiningMode::light(),
         })
         .await
     }
@@ -552,15 +636,28 @@ struct Service {
     mined: u64,
     /// 外に名乗る自分自身の住所。運用者が明示したものだけを入れる。
     own_addresses: Vec<SocketAddr>,
-    /// 採掘を始めてからの試行回数と、始めた時刻。
+    /// 畳んだ採掘スレッドの試行回数。いま走っている分は足していない。
     ///
     /// 実効ハッシュレートを出すために持つ。**掘れたブロック数から
     /// 逆算すると振れが大きすぎて比較にならない** (難易度 1,000 で
     /// 5 ブロックなら 1 標準偏差が 45 % ある)。試行回数を直接数える。
-    attempts: u64,
-    mining_since: Option<std::time::Instant>,
+    attempts_base: u64,
+    /// 数え始めた時刻。**採掘器が建ってから**である。
+    mining_since: Option<Instant>,
     /// 掘った数がここに達したら止める。
     mine_until: Option<u64>,
+    /// 採掘スレッドの束。掘っていなければ `None`。
+    pool: Option<MiningPool>,
+    /// いまの束を建てたときのシードエポックと掘り方。
+    ///
+    /// **どちらかが変われば建て直しである。**
+    pool_built_for: Option<(u64, MiningMode)>,
+    /// 掘り方の指定。
+    mode: MiningMode,
+    /// 土台を組み直す必要があるか。先端が動いた可能性があれば立てる。
+    stale_template: bool,
+    /// いまの土台を組んだ時刻。
+    template_built: Option<Instant>,
 }
 
 /// 起動した専用スレッド。
@@ -604,9 +701,14 @@ impl NodeService {
                     events: events_for_thread,
                     mined: 0,
                     own_addresses: Vec::new(),
-                    attempts: 0,
+                    attempts_base: 0,
                     mining_since: None,
                     mine_until: None,
+                    pool: None,
+                    pool_built_for: None,
+                    mode: MiningMode::light(),
+                    stale_template: true,
+                    template_built: None,
                 }
                 .run(rx);
             })
@@ -681,9 +783,10 @@ impl Service {
             }
 
             if self.mining.is_some() {
-                self.mine_slice();
+                self.mine();
             } else {
-                // 掘らないなら、次の要求まで眠る。
+                // 掘らないなら、採掘スレッドを畳んで次の要求まで眠る。
+                self.retire_pool();
                 match rx.blocking_recv() {
                     Some(Request::Shutdown) | None => return,
                     Some(request) => self.handle(request),
@@ -692,33 +795,164 @@ impl Service {
         }
     }
 
-    /// nonce を少しだけ試す。
-    fn mine_slice(&mut self) {
+    /// 採掘スレッドを回す。
+    ///
+    /// ここでやるのは**配ることと受け取ること**だけである。ハッシュを
+    /// 計算するのは作業スレッドであり、このスレッドはその間眠っている。
+    fn mine(&mut self) {
         let Some(payout) = self.mining.clone() else {
             return;
         };
-        match self.node.mine_next(&payout, now(), MINING_SLICE) {
-            Ok(MinedBlock::Accepted {
-                hash,
-                height,
-                attempts,
-            }) => {
+        // シードエポックが変わるのは先端が動いたときだけである。先端が
+        // 動いていないなら、記憶域を引きに行く必要はない。
+        if (self.pool.is_none() || self.stale_template) && !self.ensure_pool() {
+            self.stop_mining();
+            return;
+        }
+
+        let aged = self
+            .template_built
+            .is_none_or(|built| built.elapsed() >= TEMPLATE_REFRESH);
+        if self.stale_template || aged {
+            match self.node.mining_template(&payout, now(), 0) {
+                Ok(template) => {
+                    if let Some(pool) = &mut self.pool {
+                        pool.dispatch(template);
+                    }
+                    self.stale_template = false;
+                    self.template_built = Some(Instant::now());
+                }
+                Err(e) => {
+                    eprintln!("採掘の土台を組めない: {e}。採掘を止める。");
+                    self.stop_mining();
+                    return;
+                }
+            }
+        }
+
+        // 当たるまで、あるいは要求を捌き直すまで眠る。
+        let Some(block) = self.pool.as_mut().and_then(|pool| pool.wait(MINING_POLL)) else {
+            return;
+        };
+
+        match self.node.accept_mined(block, now()) {
+            Ok(MinedBlock { hash, height }) => {
                 self.mined += 1;
-                self.attempts += attempts;
                 println!("掘れた: 高さ {height}  {hash}{}", self.rate_suffix());
                 self.announce_tip(None);
+                self.stale_template = true;
                 if self.mine_until.is_some_and(|limit| self.mined >= limit) {
                     self.stop_mining();
                 }
             }
-            Ok(MinedBlock::NotFound { attempts }) => {
-                self.attempts += attempts;
-            }
             Err(e) => {
-                eprintln!("採掘に失敗した: {e}。採掘を止める。");
-                self.stop_mining();
+                // 掘り当てたが先端になれなかった。**土台が古い。**
+                // 組み直して続ける。止める理由ではない。
+                eprintln!("掘ったブロックが先端にならなかった: {e}");
+                self.stale_template = true;
             }
         }
+    }
+
+    /// 掘れる採掘スレッドが揃っているか確かめ、無ければ建てる。
+    ///
+    /// シードエポックが変わったとき、掘り方が変わったときは建て直す。
+    /// **建て直しには fast モードで 1 分前後かかり、その間ノードは他の
+    /// 要求に応えない。** 2048 ブロック (約 34 時間) に 1 度である。
+    ///
+    /// 建てられなければ偽を返す。呼び出し側は採掘を止める。
+    fn ensure_pool(&mut self) -> bool {
+        let (epoch, seed) = match self.node.mining_seed() {
+            Ok(found) => found,
+            Err(e) => {
+                eprintln!("採掘のシードを引けない: {e}");
+                return false;
+            }
+        };
+
+        let wanted = (epoch, self.mode);
+        if self.pool.is_some() && self.pool_built_for == Some(wanted) {
+            return true;
+        }
+        self.retire_pool();
+
+        let threads = self.mode.resolved_threads();
+        let fast = self.mode.fast;
+        if fast {
+            println!(
+                "fast モードのデータセットを {threads} 個構築する \
+                 (合計 {:.1} GB、1 分前後かかる)",
+                DATASET_GIB * threads.get() as f64
+            );
+        }
+
+        // **採掘器の作り方を渡す。採掘器そのものは渡せない。**
+        // RandomX の VM もデータセットもスレッドをまたげないので、
+        // それぞれの作業スレッドが自分の分を建てる。
+        let fell_back = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&fell_back);
+        let factory: HasherFactory = Arc::new(move |_| {
+            if fast {
+                match RandomXMiner::new(&seed, epoch) {
+                    Ok(miner) => return Ok(Box::new(miner) as Box<dyn PowHasher>),
+                    // 2 GB を確保できない。この 1 本は light で掘る。
+                    Err(_) => {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+            RandomXVerifier::new(&seed, epoch)
+                .map(|verifier| Box::new(verifier) as Box<dyn PowHasher>)
+                .map_err(|e| e.to_string())
+        });
+
+        match MiningPool::spawn(threads, factory) {
+            Ok(pool) => {
+                let light = fell_back.load(Ordering::SeqCst);
+                let kind = if !fast {
+                    "light モード".to_string()
+                } else if light == 0 {
+                    "fast モード".to_string()
+                } else {
+                    format!("fast {} 本・light {light} 本", threads.get() - light)
+                };
+                println!("{threads} スレッドで採掘する ({kind})");
+                if fast && light > 0 {
+                    eprintln!(
+                        "2 GB を確保できなかった分は light モード (256 MB) で掘る。\n\
+                         本数を減らすか、積んでいる memory を確かめること。"
+                    );
+                }
+                self.pool = Some(pool);
+                self.pool_built_for = Some(wanted);
+                self.stale_template = true;
+                // 数え始めは**採掘器が建ってから**である。構築にかかった
+                // 1 分を混ぜると、ハッシュレートが低く出る。
+                if self.mining_since.is_none() {
+                    self.mining_since = Some(Instant::now());
+                }
+                true
+            }
+            Err(e) => {
+                eprintln!("採掘を始められない: {e}");
+                false
+            }
+        }
+    }
+
+    /// 採掘スレッドを畳む。試した回数は持ち越す。
+    fn retire_pool(&mut self) {
+        if let Some(pool) = self.pool.take() {
+            self.attempts_base = self.attempts_base.saturating_add(pool.attempts());
+        }
+        self.pool_built_for = None;
+        self.template_built = None;
+    }
+
+    /// これまでに試した回数。畳んだ分と、いま走っている分の合計。
+    fn attempts(&self) -> u64 {
+        self.attempts_base
+            .saturating_add(self.pool.as_ref().map_or(0, MiningPool::attempts))
     }
 
     /// 「  12,345 回、40 H/s」のような後置き。まだ数えていなければ空。
@@ -727,34 +961,16 @@ impl Service {
             return String::new();
         };
         let seconds = started.elapsed().as_secs_f64();
-        if seconds <= 0.0 || self.attempts == 0 {
+        let attempts = self.attempts();
+        if seconds <= 0.0 || attempts == 0 {
             return String::new();
         }
-        format!(
-            "  ({} 回、{:.0} H/s)",
-            self.attempts,
-            self.attempts as f64 / seconds
-        )
-    }
-
-    /// fast モードを用意する。**1 分前後かかる。**
-    ///
-    /// その間この関数を呼んだスレッド (ノードのスレッド) は他の要求に
-    /// 応えない。掘り始める合図を受けた直後に済ませてしまう。
-    fn enable_fast_mining(&mut self) {
-        let height = self.node.chain().height().unwrap_or(0) + 1;
-        println!("fast モードのデータセットを構築する (2 GB、1 分前後かかる)");
-        match self.node.enable_fast_mining(height) {
-            Ok(()) => println!("fast モードで採掘する"),
-            Err(e) => eprintln!(
-                "fast モードを用意できない: {e}\n\
-                 light モード (256 MB) で採掘する。速さはおよそ 6 分の 1 になる。"
-            ),
-        }
+        format!("  ({attempts} 回、{:.0} H/s)", attempts as f64 / seconds)
     }
 
     fn stop_mining(&mut self) {
         self.mining = None;
+        self.retire_pool();
         let _ = self.events.send(NodeEvent::MiningStopped);
     }
 
@@ -773,6 +989,17 @@ impl Service {
     }
 
     fn handle(&mut self, request: Request) {
+        // 先端か mempool が動きうる要求なら、掘る土台を組み直す。
+        // **先端が動いたのに組み直さないと、1 つ前の先端に繋がる
+        // ブロックを掘ることになる。** 逆に、動かない要求まで印を
+        // 付けると、問い合わせが来るたびに土台を組み直して採掘を
+        // 止めることになる。
+        if matches!(
+            request,
+            Request::AcceptBlock { .. } | Request::SubmitTx { .. }
+        ) {
+            self.stale_template = true;
+        }
         match request {
             Request::Status(reply) => {
                 let _ = reply.send(self.node.status().map_err(|e| e.to_string()));
@@ -826,18 +1053,19 @@ impl Service {
             Request::SetMining {
                 payout,
                 blocks,
-                fast,
+                mode,
             } => {
                 // 掘る数は「ここから」数える。前に掘った分は関係ない。
                 self.mine_until = blocks.map(|n| self.mined.saturating_add(n));
                 self.mining = payout;
-                if fast && self.mining.is_some() && !self.node.is_fast_mining() {
-                    self.enable_fast_mining();
+                self.mode = mode;
+                // 数え直す。始まりの時刻は採掘器が建ってから入れる
+                // ([`Service::ensure_pool`])。
+                self.attempts_base = 0;
+                self.mining_since = None;
+                if self.mining.is_none() {
+                    self.retire_pool();
                 }
-                // 数え始めは**データセットを用意したあと**である。構築に
-                // かかった 1 分を混ぜると、ハッシュレートが低く出る。
-                self.attempts = 0;
-                self.mining_since = self.mining.is_some().then(std::time::Instant::now);
             }
             Request::AddAddresses { addrs, source } => {
                 self.node.addresses_mut().add_many(&addrs, source, now());
@@ -1061,5 +1289,48 @@ impl Service {
         self.download.want(missing);
 
         Ok(self.download.assign(peer, now))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_is_one_light_thread() {
+        // **積んでいる memory を当てにしない。** 既定で 8 本建てると、
+        // light でも 2 GB を勝手に確保することになる。
+        let mode = MiningMode::default();
+        assert!(!mode.fast);
+        assert_eq!(mode.resolved_threads().get(), 1);
+    }
+
+    #[test]
+    fn a_thread_count_is_taken_as_given() {
+        let mode = MiningMode::light().with_threads(4);
+        assert_eq!(mode.resolved_threads().get(), 4);
+        let mode = MiningMode::fast().with_threads(3);
+        assert_eq!(mode.resolved_threads().get(), 3);
+    }
+
+    #[test]
+    fn zero_means_ask_the_machine() {
+        let mode = MiningMode::light().with_threads(0);
+        let wanted = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+        assert_eq!(mode.resolved_threads().get(), wanted);
+    }
+
+    #[test]
+    fn asking_the_machine_does_not_multiply_the_dataset() {
+        // fast は 1 本あたり 2 GB 要る。コア数だけ建てれば 16 コアで
+        // 32 GB である。**本数を明示しない限り増やさない。**
+        let mode = MiningMode::fast().with_threads(0);
+        assert_eq!(mode.resolved_threads().get(), 1);
+    }
+
+    #[test]
+    fn the_mode_carries_over_when_the_thread_count_changes() {
+        assert!(MiningMode::fast().with_threads(8).fast);
+        assert!(!MiningMode::light().with_threads(8).fast);
     }
 }
