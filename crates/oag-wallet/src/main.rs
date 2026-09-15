@@ -446,18 +446,29 @@ async fn run() -> Result<(), String> {
 
             let mut spendable = Amount::ZERO;
             let mut immature = Amount::ZERO;
+            // 使えるが、まだ目安の確認数に届いていない分。
+            let mut shallow = Amount::ZERO;
             for coin in &scan {
                 // 使えるかどうかは、次に入るブロックの高さで決まる。
                 if coin.is_spendable_at(height + 1) {
                     spendable = spendable
                         .checked_add(coin.output.amount)
                         .ok_or("桁あふれ")?;
+                    if confirmations(coin.height, height) < params::RECOMMENDED_CONFIRMATIONS {
+                        shallow = shallow.checked_add(coin.output.amount).ok_or("桁あふれ")?;
+                    }
                 } else {
                     immature = immature.checked_add(coin.output.amount).ok_or("桁あふれ")?;
                 }
             }
 
             println!("  使える残高    {spendable} OAG");
+            if shallow.to_atomic() > 0 {
+                println!(
+                    "  うち浅い      {shallow} OAG (確認数が目安の {} に届いていない)",
+                    params::RECOMMENDED_CONFIRMATIONS
+                );
+            }
             if immature.to_atomic() > 0 {
                 println!(
                     "  未成熟        {immature} OAG (コインベースは {} ブロック後に使える)",
@@ -471,18 +482,31 @@ async fn run() -> Result<(), String> {
             if verbose {
                 println!();
                 for coin in &scan {
-                    let mark = if coin.is_spendable_at(height + 1) {
-                        " "
-                    } else {
+                    let confirmations = confirmations(coin.height, height);
+                    let mark = if !coin.is_spendable_at(height + 1) {
                         "*"
+                    } else if confirmations < params::RECOMMENDED_CONFIRMATIONS {
+                        "!"
+                    } else {
+                        " "
                     };
                     println!(
-                        "  {mark} {} OAG  高さ {}  {}:{}",
-                        coin.output.amount, coin.height, coin.outpoint.txid, coin.outpoint.index
+                        "  {mark} {} OAG  高さ {}  承認 {}  {}:{}",
+                        coin.output.amount,
+                        coin.height,
+                        confirmations,
+                        coin.outpoint.txid,
+                        coin.outpoint.index
                     );
                 }
                 if immature.to_atomic() > 0 {
                     println!("  (* は未成熟)");
+                }
+                if shallow.to_atomic() > 0 {
+                    println!(
+                        "  (! は確認数 {} 未満。支払いとして受け取るなら待つこと)",
+                        params::RECOMMENDED_CONFIRMATIONS
+                    );
                 }
             }
             Ok(())
@@ -748,6 +772,16 @@ async fn block_count(client: &Client) -> Result<u64, String> {
         .ok_or_else(|| "getblockcount が数値を返さない".to_string())
 }
 
+/// 高さ `coin` のブロックに入った出力の、先端 `tip` から見た確認数。
+///
+/// **先端そのものに入った出力は 1 である。** 0 承認とは、まだどのブロック
+/// にも入っていないことを指す。ウォレットはチェーンの UTXO セットしか
+/// 見ないので、ここに現れる出力は必ず 1 以上である
+/// (`docs/SPEC.md` §10.7)。
+fn confirmations(coin: u64, tip: u64) -> u64 {
+    tip.saturating_sub(coin).saturating_add(1)
+}
+
 /// 自分の UTXO をノードに数えてもらう。
 ///
 /// 支払い条件から UTXO を引く索引が無いため、ノードは UTXO セットを
@@ -842,4 +876,35 @@ fn as_atomic(value: &Value) -> Result<Amount, String> {
 
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_coin_in_the_tip_block_has_one_confirmation() {
+        assert_eq!(confirmations(100, 100), 1);
+        assert_eq!(confirmations(100, 109), 10);
+        assert_eq!(confirmations(0, 0), 1);
+    }
+
+    #[test]
+    fn the_recommended_depth_is_reached_ten_blocks_later() {
+        // 高さ 100 で受け取った出力は、先端が 109 になった時点で目安を満たす。
+        let received_at = 100;
+        let enough = received_at + params::RECOMMENDED_CONFIRMATIONS - 1;
+        assert!(confirmations(received_at, enough - 1) < params::RECOMMENDED_CONFIRMATIONS);
+        assert_eq!(
+            confirmations(received_at, enough),
+            params::RECOMMENDED_CONFIRMATIONS
+        );
+    }
+
+    #[test]
+    fn a_coin_from_the_future_does_not_wrap_around() {
+        // 先端より高い出力は起こらないが、起きたときに「深い」と
+        // 誤らせるより 1 承認と見せるほうが安全である。
+        assert_eq!(confirmations(200, 100), 1);
+    }
 }

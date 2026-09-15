@@ -80,6 +80,24 @@ pub const MIN_RELAY_FEE_RATE_PER_BYTE: Amount = Amount::from_atomic_const(50_000
 /// これ未満の出力は UTXO セットを恒久的に汚染するため中継しない。
 pub const DUST_THRESHOLD: Amount = Amount::from_atomic_const(15_000_000_000_000);
 
+// ━━━ 受け取りの目安 (SPEC §10.7) ━━━
+//
+// コンセンサスルールでもノードポリシーでもない。**ノードはこれを根拠に
+// 何かを拒んだりしない。** 資金を受け取る側が「もう覆らない」と判断する
+// ための目安であり、表示に使う。
+
+/// 支払いを受け取ったと見なしてよい確認数の目安。
+///
+/// 覆る確率は攻撃者のハッシュレート比と承認数だけで決まり、**ブロック
+/// 間隔には依存しない**。したがって「1 ブロックが 60 秒だから Bitcoin の
+/// 10 倍待つ」という換算は誤りである。Bitcoin の慣習は 6 で、同じ占有率に
+/// 対する確率は 10 でおよそ 1 桁下がる。
+///
+/// 6 ではなく 10 にしたのは確率ではなく費用の都合である。占有率を買う
+/// 値段はネットワーク全体のハッシュレートに比例するため、**若いチェーン
+/// では同じ占有率が安く買える**。確率の式に映らないその差を承認数で埋める。
+pub const RECOMMENDED_CONFIRMATIONS: u64 = 10;
+
 /// `size` バイトのトランザクションに対する最低手数料。
 pub fn min_relay_fee(size: usize) -> Option<Amount> {
     MIN_RELAY_FEE_RATE_PER_BYTE.checked_mul(u64::try_from(size).ok()?)
