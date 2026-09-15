@@ -81,16 +81,58 @@ pub enum Reject {
         /// 版数。
         version: u8,
     },
-    /// すでに mempool にあるトランザクションと同じ UTXO を使う。
+    /// 置き換えが、追い出す側に無かった未確認の入力を加えている。
     ///
-    /// 手数料を上げた置き換え (RBF) には対応していない。
-    #[error("UTXO {outpoint:?} はすでに {existing} が使っている")]
-    Conflict {
-        /// 競合する参照先。
+    /// BIP125 規則 2。未確認の入力を足されると、置き換えの可否を決めるのに
+    /// 必要な手数料の合計が、まだ確定していない祖先の可否に依存する。
+    #[error("置き換えが新たな未確認入力 {outpoint:?} を加えている")]
+    ReplacementAddsUnconfirmedInput {
+        /// 加えられた参照先。
         outpoint: OutPoint,
-        /// すでに使っているトランザクション。
-        existing: Hash,
     },
+    /// 置き換えの手数料が、追い出す分の合計に満たない。
+    ///
+    /// BIP125 規則 3。
+    #[error("置き換えの手数料 {paid} が、追い出す {count} 件の合計 {replaced} に満たない")]
+    ReplacementPaysLess {
+        /// 置き換えが払う手数料。
+        paid: Amount,
+        /// 追い出す側の合計手数料。
+        replaced: Amount,
+        /// 追い出す件数。
+        count: usize,
+    },
+    /// 置き換えが自分自身を運ぶ帯域の代金を払っていない。
+    ///
+    /// BIP125 規則 4。
+    #[error("手数料の増分 {increment} が、{size} バイト分の要求 {required} に満たない")]
+    ReplacementIncrementTooLow {
+        /// 追い出す側の合計を超えた分。
+        increment: Amount,
+        /// 要求される増分。
+        required: Amount,
+        /// 置き換えのサイズ。
+        size: usize,
+    },
+    /// 1 度の置き換えで追い出す件数が多すぎる。
+    ///
+    /// BIP125 規則 5。
+    #[error("置き換えが {count} 件を追い出そうとしている (上限 {max})")]
+    TooManyReplacements {
+        /// 追い出そうとしている件数 (子孫を含む)。
+        count: usize,
+        /// 上限。
+        max: usize,
+    },
+}
+
+/// [`Mempool::accept_with_replacements`] が受け入れた結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Accepted {
+    /// 受け入れたトランザクションの ID。
+    pub txid: Hash,
+    /// 置き換えで取り除いた ID (子孫を含む)。置き換えでなければ空。
+    pub replaced: Vec<Hash>,
 }
 
 /// mempool の 1 件。
@@ -144,15 +186,25 @@ struct PoolView<'a> {
     base: &'a dyn UtxoView,
     pool: &'a Mempool,
     next_height: u64,
+    /// 置き換えで消える予定のトランザクション。**居ないものとして見る。**
+    ///
+    /// 置き換えの検証は、追い出す側をまだ取り除かないまま行う。先に取り除くと、
+    /// 検証に落ちたときに戻さなければならず、戻し損ねれば手数料の高いほうを
+    /// 捨てたうえで低いほうも失う。ここで見えなくするほうが安全である。
+    replacing: &'a HashSet<Hash>,
 }
 
 impl UtxoView for PoolView<'_> {
     fn get(&self, outpoint: &OutPoint) -> Result<Option<UtxoEntry>, UtxoError> {
-        if self.pool.spent.contains_key(outpoint) {
-            return Ok(None);
+        if let Some(spender) = self.pool.spent.get(outpoint) {
+            if !self.replacing.contains(spender) {
+                return Ok(None);
+            }
         }
-        if let Some(entry) = self.pool.output_at(outpoint, self.next_height) {
-            return Ok(Some(entry));
+        if !self.replacing.contains(&outpoint.txid) {
+            if let Some(entry) = self.pool.output_at(outpoint, self.next_height) {
+                return Ok(Some(entry));
+            }
         }
         self.base.get(outpoint)
     }
@@ -224,11 +276,117 @@ impl Mempool {
         })
     }
 
-    /// トランザクションを受け入れる。
+    /// 置き換えで消えることになる集合 (直接の競合とその子孫)。
     ///
-    /// `chain_utxo` は確定済みチェーンの UTXO、`next_height` はこの
-    /// トランザクションが入りうる最初のブロックの高さ、`median_time_past` は
-    /// 現在の先端のものを渡す。
+    /// `cutoff` を超えたところで数え上げをやめる。上限を超えていることが
+    /// 分かれば断ると決まるので、それ以上たどる意味がない。**再帰では
+    /// 書かない。** 依存の鎖の長さに上限は無く、深さがそのまま
+    /// スタックの深さになる。
+    fn replacement_set(&self, conflicts: &HashSet<Hash>, cutoff: usize) -> HashSet<Hash> {
+        let mut set = conflicts.clone();
+        let mut frontier: Vec<Hash> = conflicts.iter().copied().collect();
+        while let Some(current) = frontier.pop() {
+            if set.len() > cutoff {
+                break;
+            }
+            let children: Vec<Hash> = self
+                .spent
+                .iter()
+                .filter(|(outpoint, _)| outpoint.txid == current)
+                .map(|(_, child)| *child)
+                .collect();
+            for child in children {
+                if set.insert(child) {
+                    frontier.push(child);
+                }
+            }
+        }
+        set
+    }
+
+    /// 置き換えとして受け入れてよいかを調べる。
+    ///
+    /// BIP125 の規則 2 から 5 にあたる。規則 1 (置き換え可能の表明) は
+    /// 適用しない。詳しくは [`Mempool::accept_with_replacements`] を参照。
+    fn check_replacement(
+        &self,
+        tx: &Transaction,
+        fee: Amount,
+        size: usize,
+        conflicts: &HashSet<Hash>,
+        replacing: &HashSet<Hash>,
+    ) -> Result<(), Reject> {
+        // 規則 5: 追い出す件数の上限。
+        if replacing.len() > self.policy.max_replacement_count {
+            return Err(Reject::TooManyReplacements {
+                count: replacing.len(),
+                max: self.policy.max_replacement_count,
+            });
+        }
+
+        // 規則 2: 追い出す側に無かった未確認の入力を加えない。
+        //
+        // 未確認の入力を足されると、この置き換えが割に合うかどうかが、
+        // まだ mempool にいる祖先の運命に左右される。追い出す側が既に
+        // 使っていた参照先なら、その判断は済んでいる。
+        let already_spent_by_originals: HashSet<OutPoint> = conflicts
+            .iter()
+            .filter_map(|txid| self.entries.get(txid))
+            .flat_map(|entry| entry.tx.inputs.iter().map(|input| input.prev_out))
+            .collect();
+        for input in &tx.inputs {
+            let unconfirmed = self.entries.contains_key(&input.prev_out.txid);
+            if unconfirmed && !already_spent_by_originals.contains(&input.prev_out) {
+                return Err(Reject::ReplacementAddsUnconfirmedInput {
+                    outpoint: input.prev_out,
+                });
+            }
+        }
+
+        // 規則 3: 追い出す分の合計手数料を下回らない。
+        let replaced_fee = Amount::sum(
+            replacing
+                .iter()
+                .filter_map(|txid| self.entries.get(txid))
+                .map(|entry| entry.fee),
+        )
+        .ok_or(Reject::ReplacementPaysLess {
+            paid: fee,
+            replaced: Amount::MAX,
+            count: replacing.len(),
+        })?;
+        let Some(increment) = fee.checked_sub(replaced_fee) else {
+            return Err(Reject::ReplacementPaysLess {
+                paid: fee,
+                replaced: replaced_fee,
+                count: replacing.len(),
+            });
+        };
+
+        // 規則 4: 自分自身を運ぶ帯域の代金を、上乗せして払う。
+        let required =
+            self.policy
+                .required_increment(size)
+                .ok_or(Reject::ReplacementIncrementTooLow {
+                    increment,
+                    required: Amount::MAX,
+                    size,
+                })?;
+        if increment < required {
+            return Err(Reject::ReplacementIncrementTooLow {
+                increment,
+                required,
+                size,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// トランザクションを受け入れる。受け入れた ID を返す。
+    ///
+    /// 置き換えで何が消えたかを知りたい場合は
+    /// [`Mempool::accept_with_replacements`] を使う。
     pub fn accept(
         &mut self,
         tx: Transaction,
@@ -236,6 +394,42 @@ impl Mempool {
         next_height: u64,
         median_time_past: i64,
     ) -> Result<Hash, Reject> {
+        self.accept_with_replacements(tx, chain_utxo, next_height, median_time_past)
+            .map(|accepted| accepted.txid)
+    }
+
+    /// トランザクションを受け入れ、置き換えで消えた ID も返す。
+    ///
+    /// `chain_utxo` は確定済みチェーンの UTXO、`next_height` はこの
+    /// トランザクションが入りうる最初のブロックの高さ、`median_time_past` は
+    /// 現在の先端のものを渡す。
+    ///
+    /// # 手数料を上げた置き換え (RBF)
+    ///
+    /// すでに mempool にあるものと同じ UTXO を使うトランザクションは、
+    /// BIP125 の規則 2 から 5 を満たせば、先に来たものを**追い出して**
+    /// 入る。子孫も道連れになる。
+    ///
+    /// **規則 1 (置き換え可能の表明) は適用しない。** Bitcoin が最後に
+    /// 落ち着いた形と同じである。`sequence` による表明は、表明していない
+    /// トランザクションが 0 承認で安全であるかのような見かけを作るが、
+    /// その保証は元々存在しない。採掘者は手数料の高いほうを選べばよく、
+    /// 表明を見ないノードが 1 つでも中継すれば置き換えは伝わる。守れない
+    /// 約束を掲げるより、置き換えは常に起こりうるものとして扱う。
+    ///
+    /// **0 承認のトランザクションを支払いとして受け取ってはならない。**
+    ///
+    /// 規則 3 と 4 が見ているのは**手数料の総額**であって料率ではない。
+    /// したがって、大きくて料率の低い置き換えが、小さくて料率の高いものを
+    /// 追い出せる。BIP125 が抱えたままの弱点であり、Bitcoin も同じである
+    /// (`docs/SPEC.md` §13.3.2)。
+    pub fn accept_with_replacements(
+        &mut self,
+        tx: Transaction,
+        chain_utxo: &dyn UtxoView,
+        next_height: u64,
+        median_time_past: i64,
+    ) -> Result<Accepted, Reject> {
         let txid = tx.txid();
         if self.entries.contains_key(&txid) {
             return Err(Reject::AlreadyKnown);
@@ -252,20 +446,19 @@ impl Mempool {
             });
         }
 
-        // 二重使用。手数料を上げた置き換え (RBF) には対応していない。
-        for input in &tx.inputs {
-            if let Some(existing) = self.spent.get(&input.prev_out) {
-                return Err(Reject::Conflict {
-                    outpoint: input.prev_out,
-                    existing: *existing,
-                });
-            }
-        }
+        // 同じ UTXO を使っているものを集める。空でなければ置き換えである。
+        let conflicts: HashSet<Hash> = tx
+            .inputs
+            .iter()
+            .filter_map(|input| self.spent.get(&input.prev_out).copied())
+            .collect();
+        let replacing = self.replacement_set(&conflicts, self.policy.max_replacement_count);
 
         let view = PoolView {
             base: chain_utxo,
             pool: self,
             next_height,
+            replacing: &replacing,
         };
 
         // 使用対象の支払い条件を、コンセンサス検証の前に集めておく。
@@ -318,7 +511,18 @@ impl Mempool {
             }
         }
 
-        // 受け入れる。
+        if !replacing.is_empty() {
+            self.check_replacement(&tx, summary.fee, size, &conflicts, &replacing)?;
+        }
+
+        // ここから先は失敗しない。**追い出すのはこの時点である。**
+        let mut replaced = Vec::new();
+        for conflict in &conflicts {
+            replaced.extend(self.remove_recursive(conflict));
+        }
+        replaced.sort_unstable();
+        replaced.dedup();
+
         let entry = MempoolEntry {
             txid,
             fee: summary.fee,
@@ -334,7 +538,7 @@ impl Mempool {
         self.entries.insert(txid, entry);
 
         self.evict_until_within_limit();
-        Ok(txid)
+        Ok(Accepted { txid, replaced })
     }
 
     /// 1 件と、その出力に依存する子孫を取り除く。
@@ -768,20 +972,198 @@ mod tests {
 
     // ━━━━━━━━ 競合と依存 ━━━━━━━━
 
-    #[test]
-    fn rejects_a_double_spend() {
-        let (mut pool, utxo, funds) = setup();
-        let first = simple_spend(&funds, "0.01");
-        let first_id = pool.accept(first, &utxo, HEIGHT, MTP).unwrap();
+    // ━━━━━━━━ 手数料を上げた置き換え (RBF) ━━━━━━━━
 
-        // 同じ UTXO を使う別のトランザクション。
-        let second = spend(&[&funds], vec![to("9.98")]);
+    /// mempool にあるトランザクションの出力を、次の資金として扱う。
+    fn from_pool(txid: Hash, tx: &Transaction, key: SecretKey) -> Funds {
+        Funds {
+            outpoint: OutPoint::new(txid, 0),
+            output: tx.outputs[0].clone(),
+            key,
+        }
+    }
+
+    /// 親を 1 件、その出力を使う子を 1 件、mempool に入れる。
+    fn parent_and_child(pool: &mut Mempool, utxo: &UtxoSet, funds: &Funds) -> (Hash, Hash) {
+        let parent_key = SecretKey::generate();
+        let parent = spend(
+            &[funds],
+            vec![TxOutput::new(
+                "9.99".parse().unwrap(),
+                Lock::pay_to_pubkey(&parent_key.public_key()),
+            )],
+        );
+        let parent_id = pool.accept(parent.clone(), utxo, HEIGHT, MTP).unwrap();
+        let child_funds = from_pool(parent_id, &parent, parent_key);
+        let child_id = pool
+            .accept(simple_spend(&child_funds, "0.01"), utxo, HEIGHT, MTP)
+            .unwrap();
+        (parent_id, child_id)
+    }
+
+    #[test]
+    fn a_higher_fee_replaces_the_original() {
+        let (mut pool, utxo, funds) = setup();
+        let first_id = pool
+            .accept(simple_spend(&funds, "0.01"), &utxo, HEIGHT, MTP)
+            .unwrap();
+
+        let accepted = pool
+            .accept_with_replacements(simple_spend(&funds, "0.02"), &utxo, HEIGHT, MTP)
+            .unwrap();
+
+        assert_eq!(accepted.replaced, vec![first_id]);
+        assert!(!pool.contains(&first_id), "追い出されている");
+        assert!(pool.contains(&accepted.txid));
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn a_replacement_that_pays_less_is_refused() {
+        let (mut pool, utxo, funds) = setup();
+        let first_id = pool
+            .accept(simple_spend(&funds, "0.02"), &utxo, HEIGHT, MTP)
+            .unwrap();
+
+        let err = pool
+            .accept(simple_spend(&funds, "0.01"), &utxo, HEIGHT, MTP)
+            .unwrap_err();
+        assert!(
+            matches!(err, Reject::ReplacementPaysLess { count: 1, .. }),
+            "{err}"
+        );
+        assert!(pool.contains(&first_id), "元のものが残っている");
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn a_replacement_must_pay_for_its_own_bandwidth() {
+        let (mut pool, utxo, funds) = setup();
+        pool.accept(simple_spend(&funds, "0.01"), &utxo, HEIGHT, MTP)
+            .unwrap();
+
+        // 手数料は上がっているが、上乗せが自分のサイズ分に足りない。
+        // これを許すと、1 atomic ずつ上げるだけで同じ資金を何度でも
+        // 中継させられる。
+        let err = pool
+            .accept(simple_spend(&funds, "0.0100001"), &utxo, HEIGHT, MTP)
+            .unwrap_err();
+        match err {
+            Reject::ReplacementIncrementTooLow {
+                increment,
+                required,
+                size,
+            } => {
+                assert!(increment < required, "{increment} < {required}");
+                assert_eq!(
+                    required,
+                    Policy::default().required_increment(size).unwrap()
+                );
+            }
+            other => panic!("{other}"),
+        }
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn a_replacement_takes_the_descendants_with_it() {
+        let (mut pool, utxo, funds) = setup();
+        let (parent_id, child_id) = parent_and_child(&mut pool, &utxo, &funds);
+        assert_eq!(pool.len(), 2);
+
+        // 親を置き換えると、親の出力を使っていた子も行き場を失う。
+        let accepted = pool
+            .accept_with_replacements(simple_spend(&funds, "0.5"), &utxo, HEIGHT, MTP)
+            .unwrap();
+
+        let mut expected = vec![parent_id, child_id];
+        expected.sort_unstable();
+        assert_eq!(accepted.replaced, expected);
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn a_replacement_pays_for_the_descendants_too() {
+        let (mut pool, utxo, funds) = setup();
+        parent_and_child(&mut pool, &utxo, &funds);
+
+        // 親の手数料 0.01 だけを上回っても足りない。子の 0.01 も含めた
+        // 合計を超える必要がある。
+        let err = pool
+            .accept(simple_spend(&funds, "0.015"), &utxo, HEIGHT, MTP)
+            .unwrap_err();
+        assert!(
+            matches!(err, Reject::ReplacementPaysLess { count: 2, .. }),
+            "{err}"
+        );
+        assert_eq!(pool.len(), 2);
+    }
+
+    #[test]
+    fn a_replacement_may_not_add_an_unconfirmed_input() {
+        let mut utxo = UtxoSet::new();
+        let a = fund(&mut utxo, "10", b"a");
+        let b = fund(&mut utxo, "10", b"b");
+        let mut pool = Mempool::new();
+        pool.accept(simple_spend(&a, "0.01"), &utxo, HEIGHT, MTP)
+            .unwrap();
+
+        let other_key = SecretKey::generate();
+        let other = spend(
+            &[&b],
+            vec![TxOutput::new(
+                "9.99".parse().unwrap(),
+                Lock::pay_to_pubkey(&other_key.public_key()),
+            )],
+        );
+        let other_id = pool.accept(other.clone(), &utxo, HEIGHT, MTP).unwrap();
+        let unconfirmed = from_pool(other_id, &other, other_key);
+
+        // a を置き換えつつ、mempool にしかない出力を新たに使う。手数料は
+        // 十分だが、この置き換えが割に合うかどうかが other の運命に
+        // 左右されることになる。
+        let replacement = spend(&[&a, &unconfirmed], vec![to("19.5")]);
         assert_eq!(
-            pool.accept(second, &utxo, HEIGHT, MTP),
-            Err(Reject::Conflict {
-                outpoint: funds.outpoint,
-                existing: first_id
+            pool.accept(replacement, &utxo, HEIGHT, MTP),
+            Err(Reject::ReplacementAddsUnconfirmedInput {
+                outpoint: unconfirmed.outpoint
             })
+        );
+        assert_eq!(pool.len(), 2);
+    }
+
+    #[test]
+    fn a_replacement_that_would_evict_too_many_is_refused() {
+        let mut utxo = UtxoSet::new();
+        let funds = fund(&mut utxo, "10", b"a");
+        let mut pool = Mempool::with_policy(Policy {
+            max_replacement_count: 1,
+            ..Policy::default()
+        });
+        parent_and_child(&mut pool, &utxo, &funds);
+
+        assert_eq!(
+            pool.accept(simple_spend(&funds, "0.5"), &utxo, HEIGHT, MTP),
+            Err(Reject::TooManyReplacements { count: 2, max: 1 })
+        );
+        assert_eq!(pool.len(), 2);
+    }
+
+    #[test]
+    fn a_replacement_that_fails_validation_leaves_the_original_alone() {
+        let (mut pool, utxo, funds) = setup();
+        let first_id = pool
+            .accept(simple_spend(&funds, "0.01"), &utxo, HEIGHT, MTP)
+            .unwrap();
+
+        // 手数料は申し分ないが、署名が通らない。
+        let mut bad = simple_spend(&funds, "0.5");
+        bad.inputs[0].signature = vec![0u8; 64];
+        assert!(pool.accept(bad, &utxo, HEIGHT, MTP).is_err());
+
+        assert!(
+            pool.contains(&first_id),
+            "落ちた置き換えのために元を捨ててはならない"
         );
         assert_eq!(pool.len(), 1);
     }

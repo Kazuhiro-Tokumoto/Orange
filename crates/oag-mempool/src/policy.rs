@@ -20,6 +20,17 @@ pub struct Policy {
     pub min_relay_fee_rate: Amount,
     /// ダスト閾値。これ未満の出力を含むトランザクションは中継しない。
     pub dust_threshold: Amount,
+    /// 置き換えが**増分として**払うべき料率 (atomic / バイト)。
+    ///
+    /// 置き換えは、追い出す分の手数料に加えて、自分自身を運ぶ帯域の代金を
+    /// 払う。これが無いと、手数料を 1 atomic ずつ上げるだけで同じ資金を
+    /// 何度でも中継させられる (BIP125 規則 4)。
+    pub incremental_relay_fee_rate: Amount,
+    /// 1 度の置き換えで追い出せる件数の上限 (子孫を含む)。
+    ///
+    /// 置き換えの可否を決めるには、追い出す側の合計手数料を数える必要が
+    /// ある。上限が無いと、この数え上げ自体を攻撃に使える (BIP125 規則 5)。
+    pub max_replacement_count: usize,
     /// mempool が保持するトランザクションの合計バイト数の上限。
     pub max_mempool_bytes: usize,
     /// 未知の版数の支払い条件を許すか。
@@ -37,6 +48,10 @@ impl Default for Policy {
             dust_threshold: params::DUST_THRESHOLD,
             // 200,000 バイトのブロック 300 個分。約 5 時間分の需要にあたる。
             max_mempool_bytes: params::MAX_BLOCK_SIZE * 300,
+            // 最低中継料率と同じ。Bitcoin の incrementalRelayFee も既定では
+            // minRelayTxFee と同じ値である。
+            incremental_relay_fee_rate: params::MIN_RELAY_FEE_RATE_PER_BYTE,
+            max_replacement_count: 100,
             allow_unknown_lock_versions: false,
         }
     }
@@ -46,6 +61,13 @@ impl Policy {
     /// `size` バイトのトランザクションに要求される最低手数料。
     pub fn required_fee(&self, size: usize) -> Option<Amount> {
         self.min_relay_fee_rate
+            .checked_mul(u64::try_from(size).ok()?)
+    }
+
+    /// `size` バイトの置き換えが、追い出す分の手数料に**上乗せして**
+    /// 払うべき額。
+    pub fn required_increment(&self, size: usize) -> Option<Amount> {
+        self.incremental_relay_fee_rate
             .checked_mul(u64::try_from(size).ok()?)
     }
 }

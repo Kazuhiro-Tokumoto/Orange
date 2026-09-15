@@ -16,4 +16,4 @@ pub mod policy;
 pub mod pool;
 
 pub use policy::Policy;
-pub use pool::{Mempool, MempoolEntry, Reject};
+pub use pool::{Accepted, Mempool, MempoolEntry, Reject};
