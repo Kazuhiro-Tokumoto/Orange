@@ -233,6 +233,11 @@ enum Request {
         now: i64,
         reply: oneshot::Sender<Result<Vec<Hash>, String>>,
     },
+    /// ピアが「そのブロックは持っていない」と答えた。待ち行列に戻す。
+    BlocksNotFound {
+        peer: PeerId,
+        hashes: Vec<Hash>,
+    },
     /// ピアが切れた。頼んでいた分を待ち行列に戻す。
     PeerGone(PeerId),
     /// 採掘を始める、または止める。
@@ -456,6 +461,13 @@ impl NodeHandle {
     pub async fn assign_downloads(&self, peer: PeerId, now: i64) -> Result<Vec<Hash>, String> {
         self.ask(|reply| Request::AssignDownloads { peer, now, reply })
             .await
+    }
+
+    /// ピアが「持っていない」と答えたブロックを待ち行列に戻す。
+    ///
+    /// **戻さないと、返事は来ているのに時間切れまで待つことになる。**
+    pub async fn blocks_not_found(&self, peer: PeerId, hashes: Vec<Hash>) -> Result<(), String> {
+        self.tell(Request::BlocksNotFound { peer, hashes }).await
     }
 
     /// ピアが切れたことを伝える。
@@ -1045,6 +1057,11 @@ impl Service {
             }
             Request::AssignDownloads { peer, now, reply } => {
                 let _ = reply.send(self.assign_downloads(peer, now));
+            }
+            Request::BlocksNotFound { peer, hashes } => {
+                for hash in hashes {
+                    self.download.not_found(&hash, peer);
+                }
             }
             Request::PeerGone(peer) => {
                 self.download.peer_disconnected(peer);

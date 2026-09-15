@@ -163,6 +163,27 @@ impl BlockDownload {
         }
     }
 
+    /// 頼んだ相手が「持っていない」と答えた。待ち行列に戻す。
+    ///
+    /// **戻さなければ、返事は来ているのに [`REQUEST_TIMEOUT_SECS`] だけ
+    /// 待つことになる。** ブロックは親から順にしか繋げないので、その間は
+    /// 後続をいくら集めても繋げられない。
+    ///
+    /// 持っていない相手に頼んでしまうのは避けようがない。先端を知らせて
+    /// くれた相手と、本体を頼む相手は同じとは限らないためである。**避け
+    /// られないなら、断られたときに直ちに回し直せなければならない。**
+    ///
+    /// 頼んだ相手からの答えでなければ何もしない。誰の `notfound` でも
+    /// 効くようにすると、無関係なピアが他人への依頼を剥がせてしまう。
+    /// 戻したときだけ真を返す。
+    pub fn not_found(&mut self, hash: &Hash, peer: PeerId) -> bool {
+        if self.in_flight.get(hash).is_none_or(|f| f.peer != peer) {
+            return false;
+        }
+        self.requeue(*hash);
+        true
+    }
+
     /// 応答が返らなかったものを待ち行列に戻す。
     ///
     /// 戻したブロックを返す。
@@ -471,6 +492,67 @@ mod tests {
 
         // 別のピアに頼み直せる。
         assert_eq!(download.assign(2, REQUEST_TIMEOUT_SECS).len(), 3);
+    }
+
+    #[test]
+    fn a_peer_that_does_not_have_it_gives_it_up_at_once() {
+        // **時間切れを待ってはならない。** 返事は来ているのだから、
+        // 60 秒後ではなく直ちに別のピアへ回せなければならない。
+        let mut download = BlockDownload::new();
+        download.want(hashes(0..1));
+        assert_eq!(download.assign(1, 0), hashes(0..1));
+        assert!(
+            download.assign(2, 0).is_empty(),
+            "依頼中のものが二重に配られている"
+        );
+
+        assert!(download.not_found(&block_hash(0), 1));
+        assert_eq!(download.in_flight_len(), 0);
+        assert_eq!(
+            download.assign(2, 0),
+            hashes(0..1),
+            "断られた直後に別のピアへ回せていない"
+        );
+    }
+
+    #[test]
+    fn only_the_peer_we_asked_can_give_it_up() {
+        // 誰の notfound でも効くなら、無関係なピアが他人への依頼を
+        // 剥がして横取りできる。
+        let mut download = BlockDownload::new();
+        download.want(hashes(0..1));
+        download.assign(1, 0);
+
+        assert!(!download.not_found(&block_hash(0), 2));
+        assert_eq!(download.in_flight_len(), 1);
+        assert!(download.assign(3, 0).is_empty());
+    }
+
+    #[test]
+    fn giving_up_something_we_never_asked_for_changes_nothing() {
+        let mut download = BlockDownload::new();
+        download.want(hashes(0..2));
+        download.assign(1, 0);
+
+        assert!(!download.not_found(&block_hash(99), 1));
+        assert_eq!(download.in_flight_len(), 2);
+        assert_eq!(download.queued_len(), 0);
+    }
+
+    #[test]
+    fn a_block_given_up_keeps_its_place_in_the_chain() {
+        // 戻す先は元の位置である。後ろに回すと、チェーンの頭が埋まらない
+        // まま後続だけが溜まる。
+        let mut download = BlockDownload::new();
+        download.want(hashes(0..3));
+        download.assign(1, 0);
+        download.not_found(&block_hash(0), 1);
+
+        assert_eq!(
+            download.assign(2, 0),
+            hashes(0..1),
+            "戻したものが後回しになっている"
+        );
     }
 
     #[test]

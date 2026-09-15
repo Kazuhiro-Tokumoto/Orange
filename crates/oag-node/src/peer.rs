@@ -395,9 +395,11 @@ impl Session {
                 handle.add_addresses(addrs, self.source).await
             }
 
+            // 頼んだものを相手が持っていなかった。**待ち行列に戻す。**
+            Message::NotFound(items) => self.on_notfound(handle, items).await,
+
             // まだ扱わないもの。無視してよい。相手を切る理由にはならない。
-            Message::NotFound(_)
-            | Message::Mempool
+            Message::Mempool
             | Message::SendCompact(_)
             | Message::CompactBlock(_)
             | Message::GetBlockTxn(_)
@@ -432,6 +434,34 @@ impl Session {
             self.request_headers(handle, out).await?;
         }
         self.request_bodies(handle, out).await
+    }
+
+    /// 「そのブロックは持っていない」と言われた。
+    ///
+    /// 頼んだ分を待ち行列に戻し、次の見直しで別の相手に回す。**戻さないと、
+    /// 返事は来ているのに時間切れまでそのブロックは止まったままになる**
+    /// ([`oag_net::sync::BlockDownload::not_found`])。ブロックは親から順に
+    /// しか繋げないので、止まるのはその 1 個では済まない。
+    ///
+    /// この接続へ頼み直しはしない。相手は持っていないのだから、同じ相手に
+    /// すぐ聞き直しても同じ答えが返るだけである。
+    ///
+    /// トランザクションは戻さない。**1 度で諦める方針** (SPEC §14.5) なので、
+    /// 戻したところで次に頼む先がない。
+    async fn on_notfound(
+        &mut self,
+        handle: &NodeHandle,
+        items: Vec<InvItem>,
+    ) -> Result<(), String> {
+        let blocks: Vec<Hash> = items
+            .into_iter()
+            .filter(|item| item.kind == InvKind::Block)
+            .map(|item| item.hash)
+            .collect();
+        if blocks.is_empty() {
+            return Ok(());
+        }
+        handle.blocks_not_found(self.peer, blocks).await
     }
 
     async fn on_getdata(

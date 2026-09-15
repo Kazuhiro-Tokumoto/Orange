@@ -118,6 +118,59 @@ async fn assert_same_tip(a: &NodeHandle, b: &NodeHandle) {
     );
 }
 
+/// 持っていないと言われたブロックを、時間切れを待たずに別の相手へ回すこと。
+///
+/// 先端を知らせてくれた相手と、本体を頼む相手は同じとは限らない。**持って
+/// いない相手に当たること自体は避けられない。** 避けられないなら、断られた
+/// ときに直ちに回し直せなければならない。返事を無視して時間切れ (60 秒) を
+/// 待つ作りだと、その間チェーンは 1 個も伸びない。ブロックは親から順にしか
+/// 繋げないので、止まるのはその 1 個では済まない。
+#[test]
+fn a_block_the_peer_does_not_have_goes_back_to_the_queue() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (_dir_a, service_a) = start("notfound-src");
+    let (_dir_b, service_b) = start("notfound-dst");
+    let a = service_a.handle();
+    let b = service_b.handle();
+
+    runtime.block_on(async {
+        // A で 1 個掘り、**ヘッダだけ**を B に渡す。B は本体を欲しがる。
+        a.start_mining(payout(), Some(1), MiningMode::light())
+            .await
+            .unwrap();
+        wait_for_mining(&a, 1).await;
+        let tip = a.status().await.unwrap().tip;
+        let block = a.block(tip).await.unwrap().expect("掘ったブロックがある");
+        let accepted = b.accept_headers(vec![block.header]).await.unwrap();
+        assert_eq!(accepted.new, 1, "ヘッダが入っていない");
+
+        // 持っていないピア (7) に割り振られてしまった状況を作る。時刻は
+        // 固定してよい。ここで見たいのは時間切れ**ではない**経路である。
+        assert_eq!(
+            b.assign_downloads(7, 0).await.unwrap(),
+            vec![tip],
+            "本体が要るはずのブロックが割り振られない"
+        );
+        assert!(
+            b.assign_downloads(8, 0).await.unwrap().is_empty(),
+            "依頼中のものが二重に配られている"
+        );
+
+        // 7 が「持っていない」と答える。
+        b.blocks_not_found(7, vec![tip]).await.unwrap();
+
+        assert_eq!(
+            b.assign_downloads(8, 0).await.unwrap(),
+            vec![tip],
+            "断られたのに、時間切れまで他の相手へ回されない"
+        );
+    });
+}
+
 /// 先に積まれたチェーンに、後から繋いだノードが追いつくこと。
 #[test]
 fn a_new_node_catches_up_with_an_existing_chain() {
