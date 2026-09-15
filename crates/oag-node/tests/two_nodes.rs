@@ -497,3 +497,54 @@ fn an_unrequested_transaction_is_refused_without_being_verified() {
         );
     });
 }
+
+/// 受け取ったブロックを、**くれた相手以外へ中継すること**。
+///
+/// 2 台の試験では、掘った側が自分の相手へ知らせるところまでしか見ていない。
+/// **繋がっていない相手へ届くかどうかは、間に 1 台挟まないと分からない。**
+/// ここが動いていなければ、ネットワークは直接繋がった組でしか揃わない。
+///
+/// ```text
+/// A ── B ── C        A と C は互いを知らない
+/// ```
+///
+/// A が掘り、C が持てば中継が働いている。
+#[test]
+fn a_block_travels_to_a_node_that_is_not_directly_connected() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (_dir_a, service_a) = start("relay-miner");
+    let (_dir_b, service_b) = start("relay-middle");
+    let (_dir_c, service_c) = start("relay-far");
+    let a = service_a.handle();
+    let b = service_b.handle();
+    let c = service_c.handle();
+
+    runtime.block_on(async {
+        // B だけが待ち受ける。A と C は B にしか繋がない。互いの住所を
+        // 教えていないうえ、外向きの接続を回す仕掛けも動かしていないので、
+        // A と C が直接繋がることはない。
+        let b_addr = listen(b.clone()).await;
+        tokio::spawn(dial(a.clone(), b_addr));
+        tokio::spawn(dial(c.clone(), b_addr));
+
+        // まず 1 個掘って、3 台が繋がって揃うのを待つ。ここを踏まずに
+        // 掘ると、C が後から繋いで初期同期で追いついただけでも通って
+        // しまい、中継を見たことにならない。
+        a.start_mining(payout(), Some(1), false).await.unwrap();
+        wait_for_mining(&a, 1).await;
+        wait_for_height(&c, 1, "初期同期").await;
+
+        // ここから先が中継である。C はすでに繋がっていて揃っており、
+        // 取りに行く理由がない。**B が知らせなければ届かない。**
+        a.start_mining(payout(), Some(2), false).await.unwrap();
+        wait_for_mining(&a, 3).await;
+        wait_for_height(&c, 3, "中継").await;
+
+        assert_same_tip(&a, &c).await;
+        assert_same_tip(&b, &c).await;
+    });
+}
