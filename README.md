@@ -203,6 +203,27 @@ cargo build --release -p oag-wallet
     send $(./target/release/oag-wallet --wallet ./bob.json address) 12.5
 ```
 
+鍵を持つ機械とノードに繋がる機械を分けたい場合は、**部分署名トランザクション
+(PST)** を経由します。Bitcoin の PSBT 相当で、署名に要るもの (使う出力の金額と
+支払い条件) を一緒に運ぶため、署名する側はチェーンを見に行く必要がありません。
+
+```sh
+# 繋がる側: 組み立てるだけ。署名しない
+./target/release/oag-wallet --wallet ./alice.json --datadir ./oag-data \
+    pst create $(./target/release/oag-wallet --wallet ./bob.json address) 12.5 \
+    --out ./payment.pst
+
+# 鍵を持つ側: ノードに繋がずに署名する
+./target/release/oag-wallet --wallet ./alice.json pst sign ./payment.pst
+
+# 繋がる側: 仕上げて送る
+./target/release/oag-wallet --wallet ./alice.json --datadir ./oag-data \
+    pst send ./payment.pst
+```
+
+複数の持ち主がそれぞれ署名した場合は `pst combine` で束ねます。中身はいつでも
+`pst show` で確かめられます。**署名する前に手数料を見てください。**
+
 RPC は**ループバックのみ**で待ち受け、合言葉による認証を要求します
 (合言葉は起動のたびに作られ、`<datadir>/.cookie` に書かれます)。
 `curl` からも呼べます。

@@ -18,6 +18,7 @@ use oag_rpc::client::Client;
 use oag_wallet::bip39::Mnemonic;
 use oag_wallet::build::{build, sign, Coin, Spend};
 use oag_wallet::keystore::{Keystore, MIN_PASSPHRASE_LEN};
+use oag_wallet::pst::Pst;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -138,8 +139,62 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// 部分署名トランザクション (PSBT 相当) を扱う。
+    ///
+    /// 鍵を持つ機械と、ノードに繋がる機械を分けたいときに使う。
+    /// 複数の持ち主が順に署名する場合にも使う。
+    Pst {
+        #[command(subcommand)]
+        action: PstCommand,
+    },
     /// ノードの状態を表示する。
     Info,
+}
+
+#[derive(Subcommand)]
+enum PstCommand {
+    /// 送金を組み立てて PST を書き出す。**署名はしない。**
+    Create {
+        /// 宛先アドレス。
+        to: String,
+        /// 送る額 (OAG)。
+        amount: String,
+        /// 書き出し先。省略すると標準出力へ。
+        #[arg(long, value_name = "パス")]
+        out: Option<PathBuf>,
+    },
+    /// PST に自分の持ち分の署名を入れる。
+    ///
+    /// **ノードに繋がなくてよい。** 署名に要るものは PST が運んでいる。
+    Sign {
+        /// 読み込む PST。
+        file: PathBuf,
+        /// 書き出し先。省略すると元のファイルに書き戻す。
+        #[arg(long, value_name = "パス")]
+        out: Option<PathBuf>,
+    },
+    /// 別々に署名された PST を 1 つに束ねる。
+    Combine {
+        /// 束ねる PST。2 つ以上。
+        #[arg(required = true, num_args = 2..)]
+        files: Vec<PathBuf>,
+        /// 書き出し先。省略すると標準出力へ。
+        #[arg(long, value_name = "パス")]
+        out: Option<PathBuf>,
+    },
+    /// PST の中身を表示する。
+    Show {
+        /// 読み込む PST。
+        file: PathBuf,
+    },
+    /// PST を仕上げて送る。
+    Send {
+        /// 読み込む PST。
+        file: PathBuf,
+        /// 仕上げるだけで送らない。
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() {
@@ -488,6 +543,8 @@ async fn run() -> Result<(), String> {
             Ok(())
         }
 
+        Command::Pst { action } => pst(&cli.common, network, action).await,
+
         Command::Info => {
             let client = cli.common.client(network)?;
             let info = client
@@ -501,6 +558,184 @@ async fn run() -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// PST を読む。16 進のテキストとして持ち運ぶ。
+fn read_pst(path: &std::path::Path) -> Result<Pst, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("{} を読めない: {e}", path.display()))?;
+    let bytes = from_hex(text.trim())?;
+    Pst::decode(&bytes).map_err(|e| format!("{} を PST として読めない: {e}", path.display()))
+}
+
+/// PST を書く。書き出し先が無ければ標準出力へ。
+fn write_pst(pst: &Pst, out: &Option<PathBuf>) -> Result<(), String> {
+    let text = to_hex(&pst.encode());
+    match out {
+        Some(path) => {
+            std::fs::write(path, format!("{text}\n"))
+                .map_err(|e| format!("{} に書けない: {e}", path.display()))?;
+            println!("{} に書き出した", path.display());
+        }
+        None => println!("{text}"),
+    }
+    Ok(())
+}
+
+/// PST の中身を表示する。
+fn show_pst(pst: &Pst, network: Network) -> Result<(), String> {
+    let tx = pst.unsigned();
+    println!("  入力          {} 件", pst.inputs().len());
+    for (index, input) in pst.inputs().iter().enumerate() {
+        let where_ = input
+            .utxo
+            .lock
+            .to_address(network)
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| "(この実装が知らない条件)".to_string());
+        let state = if input.signature.is_some() {
+            "署名済み"
+        } else {
+            "**未署名**"
+        };
+        println!("    [{index}] {} OAG  {where_}  {state}", input.utxo.amount);
+    }
+    println!("  出力          {} 件", tx.outputs.len());
+    for (index, output) in tx.outputs.iter().enumerate() {
+        let where_ = output
+            .lock
+            .to_address(network)
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| "(この実装が知らない条件)".to_string());
+        println!("    [{index}] {} OAG  {where_}", output.amount);
+    }
+    // **署名する前にこれを見ること。** 出来上がる取引が手放す額である。
+    println!(
+        "  手数料        {} OAG",
+        pst.fee().map_err(|e| e.to_string())?
+    );
+    println!(
+        "  署名          {}",
+        if pst.is_complete() {
+            "揃っている".to_string()
+        } else {
+            format!(
+                "{} / {} 件",
+                pst.inputs()
+                    .iter()
+                    .filter(|i| i.signature.is_some())
+                    .count(),
+                pst.inputs().len()
+            )
+        }
+    );
+    Ok(())
+}
+
+async fn pst(common: &Common, network: Network, action: PstCommand) -> Result<(), String> {
+    match action {
+        PstCommand::Create { to, amount, out } => {
+            let pass = passphrase(&common.passphrase_file, "パスフレーズ: ")?;
+            let store =
+                Keystore::open(&common.wallet, network, &pass).map_err(|e| e.to_string())?;
+            let to_address =
+                Address::decode_on(network, &to).map_err(|e| format!("宛先アドレスが不正: {e}"))?;
+            let amount = amount
+                .parse::<Amount>()
+                .map_err(|e| format!("額が不正: {e}"))?;
+
+            let client = common.client(network)?;
+            let height = block_count(&client).await?;
+            let coins = scan(&client, &store).await?;
+
+            let spend = Spend {
+                to: Lock::from_address(&to_address),
+                amount,
+                change_to: Lock::from_address(&store.default_address().map_err(|e| e.to_string())?),
+                next_height: height + 1,
+                fee_rate: params::MIN_RELAY_FEE_RATE_PER_BYTE,
+            };
+            let draft = build(&coins, &spend).map_err(|e| e.to_string())?;
+            let pst = Pst::from_draft(&draft);
+            show_pst(&pst, network)?;
+            println!();
+            write_pst(&pst, &out)
+        }
+
+        PstCommand::Sign { file, out } => {
+            let pass = passphrase(&common.passphrase_file, "パスフレーズ: ")?;
+            let store =
+                Keystore::open(&common.wallet, network, &pass).map_err(|e| e.to_string())?;
+            let mut pst = read_pst(&file)?;
+
+            // **署名する前に中身を見せる。** 何に署名するのかを知らずに
+            // 署名させてはならない。
+            show_pst(&pst, network)?;
+            let added = pst
+                .sign_with(|lock| store.key_for(lock))
+                .map_err(|e| e.to_string())?;
+            println!();
+            println!("{added} 件に署名した");
+            if !pst.is_complete() {
+                println!("まだ揃っていない。残りの持ち主へ回すこと。");
+            }
+            write_pst(&pst, &Some(out.unwrap_or(file)))
+        }
+
+        PstCommand::Combine { files, out } => {
+            let mut parts = files.iter();
+            let first = parts.next().expect("2 つ以上あることは clap が保証する");
+            let mut combined = read_pst(first)?;
+            let mut taken = 0;
+            for path in parts {
+                taken += combined
+                    .combine(&read_pst(path)?)
+                    .map_err(|e| format!("{} を束ねられない: {e}", path.display()))?;
+            }
+            println!("{taken} 件の署名を取り込んだ");
+            show_pst(&combined, network)?;
+            println!();
+            write_pst(&combined, &out)
+        }
+
+        PstCommand::Show { file } => show_pst(&read_pst(&file)?, network),
+
+        PstCommand::Send { file, dry_run } => {
+            let pst = read_pst(&file)?;
+            show_pst(&pst, network)?;
+            // **すべての署名を検証してから取り出す。**
+            let tx = pst.finalize().map_err(|e| e.to_string())?;
+            let raw = tx.encode();
+            println!("  大きさ        {} バイト", raw.len());
+            println!("  txid          {}", tx.txid());
+
+            if dry_run {
+                println!();
+                println!("--dry-run のため送らない。生の取引:");
+                println!("{}", to_hex(&raw));
+                return Ok(());
+            }
+            let client = common.client(network)?;
+            let txid = client
+                .call("sendrawtransaction", json!([to_hex(&raw)]))
+                .await
+                .map_err(|e| format!("送信を断られた: {e}"))?;
+            println!();
+            println!("送信した: {}", as_str(&txid, "txid")?);
+            Ok(())
+        }
+    }
+}
+
+/// 16 進のテキストをバイト列にする。
+fn from_hex(text: &str) -> Result<Vec<u8>, String> {
+    if !text.len().is_multiple_of(2) {
+        return Err("16 進の桁数が奇数である".to_string());
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).map_err(|e| format!("16 進が不正: {e}")))
+        .collect()
 }
 
 async fn block_count(client: &Client) -> Result<u64, String> {

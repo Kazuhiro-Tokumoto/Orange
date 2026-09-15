@@ -2,6 +2,7 @@
 //!
 //! - [`mod@build`] — 支払いの組み立てと署名
 //! - [`keystore`] — 鍵の保管 (パスフレーズで暗号化)
+//! - [`pst`] — 部分署名トランザクション (PSBT 相当)
 //! - [`seed`] — 種と、そこからの鍵の導出
 //!
 //! **ノードとは JSON-RPC でしか話さない。** チェーンの状態を持たず、
@@ -15,9 +16,11 @@ pub mod bip32;
 pub mod bip39;
 pub mod build;
 pub mod keystore;
+pub mod pst;
 pub mod seed;
 
 pub use bip39::{Bip39Error, Mnemonic};
 pub use build::{build, sign, BuildError, Coin, Draft, Spend};
 pub use keystore::{Keystore, KeystoreError};
+pub use pst::{Pst, PstError};
 pub use seed::{Seed, SeedError};

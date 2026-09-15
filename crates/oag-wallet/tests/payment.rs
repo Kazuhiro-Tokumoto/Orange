@@ -22,6 +22,7 @@ use oag_rpc::auth::read_cookie;
 use oag_rpc::client::Client;
 use oag_wallet::build::{build, sign, Coin, Spend};
 use oag_wallet::keystore::Keystore;
+use oag_wallet::pst::Pst;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -258,6 +259,95 @@ fn a_mined_coin_can_be_spent_to_another_wallet() {
                 spent.prev_out
             );
         }
+    });
+}
+
+/// PST を経由しても送金が通ること。
+///
+/// **署名する側はノードに触れない。** 署名に要るもの (使う出力の金額と
+/// 支払い条件) は PST が運ぶ。16 進のテキストに直して読み戻すところまで
+/// 通し、別の機械へ持ち出す経路を実際に辿る。
+#[test]
+fn a_payment_can_go_through_a_partially_signed_transaction() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let dir = TempDir::new("pst");
+    let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
+    let handle = service.handle();
+
+    let (alice, _) = Keystore::create(&dir.0.join("alice.json"), NETWORK, PASS, "").unwrap();
+    let (bob, _) = Keystore::create(&dir.0.join("bob.json"), NETWORK, PASS, "").unwrap();
+
+    runtime.block_on(async {
+        let client = rpc(&handle, &dir.0).await;
+        mine(&handle, &alice.default_address().unwrap(), MINE_TO).await;
+        let height = block_count(&client).await;
+
+        let amount = "7.25".parse::<Amount>().unwrap();
+        let spend = Spend {
+            to: Lock::from_address(&bob.default_address().unwrap()),
+            amount,
+            change_to: Lock::from_address(&alice.default_address().unwrap()),
+            next_height: height + 1,
+            fee_rate: params::MIN_RELAY_FEE_RATE_PER_BYTE,
+        };
+        let draft = build(&coins(&client, &alice).await, &spend).expect("組み立てられる");
+
+        // ── ここまでがノードに繋がる側。以降は鍵を持つ側 ──
+        let carried = Pst::from_draft(&draft).encode();
+        let mut offline = Pst::decode(&carried).expect("PST として読める");
+        assert!(!offline.is_complete(), "作った直後に署名が入っている");
+        assert_eq!(offline.fee().unwrap(), draft.fee, "手数料が見えていない");
+
+        let added = offline
+            .sign_with(|lock| alice.key_for(lock))
+            .expect("署名できる");
+        assert_eq!(added, draft.spent.len(), "署名の数が入力の数と合わない");
+        assert!(offline.is_complete());
+
+        // ── 署名済みの PST を持ち帰る ──
+        let returned = Pst::decode(&offline.encode()).expect("署名済みでも読める");
+        let signed = returned.finalize().expect("仕上げられる");
+
+        // 直に署名したものと、署名以外は同じであること。
+        //
+        // **署名そのものは一致しない。** BIP340 のノンス生成は補助乱数を
+        // 混ぜるので、同じ鍵で同じ対象に署名しても毎回違うバイト列になる。
+        // 本チェーンの txid は署名を含むため、txid も変わる (SPEC §5.3)。
+        // 第三者が書き換えられないことは変わらない。
+        let direct = sign(&draft, |lock| alice.key_for(lock)).unwrap();
+        let bare = |tx: &oag_consensus::Transaction| {
+            let mut tx = tx.clone();
+            for input in &mut tx.inputs {
+                input.signature.clear();
+            }
+            tx
+        };
+        assert_eq!(
+            bare(&signed),
+            bare(&direct),
+            "PST を通した結果が、直に署名したものと違う"
+        );
+        assert_eq!(signed.inputs[0].signature.len(), 64);
+        assert_ne!(
+            signed.inputs[0].signature, direct.inputs[0].signature,
+            "補助乱数が効いていない"
+        );
+
+        let hex: String = signed.encode().iter().map(|b| format!("{b:02x}")).collect();
+        let txid = client
+            .call("sendrawtransaction", json!([hex]))
+            .await
+            .expect("mempool が受け付ける");
+        assert_eq!(txid.as_str().unwrap(), signed.txid().to_string());
+
+        mine(&handle, &alice.default_address().unwrap(), 1).await;
+        let bob_coins = coins(&client, &bob).await;
+        assert_eq!(bob_coins.len(), 1, "bob の UTXO が 1 件でない");
+        assert_eq!(bob_coins[0].output.amount, amount);
     });
 }
 
