@@ -153,7 +153,10 @@ async fn top_up(handle: &NodeHandle, outbound: &Outbound) -> Result<(), String> 
             .iter()
             .map(|a| oag_net::message::NetAddress::from_socket(*a, 0, at))
             .collect();
-        handle.add_addresses(addrs).await?;
+        // 出どころは指定しない。シードが答えた住所は、それぞれ自分の
+        // 括りでバケットが決まる。**シードを 1 つの出どころとして扱うと、
+        // 答え全体が 64 バケットに押し込まれる。**
+        handle.add_addresses(addrs, None).await?;
         picked = handle.address_candidates(want, busy).await?;
     }
 

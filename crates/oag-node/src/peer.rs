@@ -33,6 +33,7 @@ use oag_net::message::{
 use oag_net::sync::PeerId;
 use oag_net::transport::{Connection, TransportError};
 use oag_primitives::Hash;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -119,7 +120,8 @@ pub async fn run_as(
         theirs.user_agent, theirs.start_height
     );
 
-    let result = session(&handle, peer, conn, theirs.start_height, direction).await;
+    let source = conn.peer_addr().ok();
+    let result = session(&handle, peer, conn, theirs.start_height, direction, source).await;
     handle.peer_gone(peer).await?;
     println!("ピア {addr} との接続が切れた");
     result
@@ -131,6 +133,7 @@ async fn session(
     conn: Connection,
     peer_height: u64,
     direction: Direction,
+    source: Option<SocketAddr>,
 ) -> Result<(), String> {
     let (mut reader, mut writer) = conn.split();
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(SEND_QUEUE);
@@ -169,6 +172,7 @@ async fn session(
 
     let mut state = Session {
         peer,
+        source,
         peer_height,
         asked_headers_at: 0,
         addr_requests: 0,
@@ -259,6 +263,11 @@ async fn session(
 /// 1 本の接続についての覚え書き。
 struct Session {
     peer: PeerId,
+    /// 相手の住所。`addr` で聞いた住所の**出どころ**として住所帳に渡す。
+    ///
+    /// 相手から繋がれた接続では送信元ポートが一時的なものだが、
+    /// 括りに使うのは /16 なので差し支えない。
+    source: Option<SocketAddr>,
     /// 相手が名乗った高さ。`inv` や `headers` が来るたびに更新する。
     peer_height: u64,
     /// 最後に `getheaders` を送った時刻。
@@ -380,8 +389,10 @@ impl Session {
             }
 
             Message::Addr(addrs) => {
-                // 中身は相手が決める。住所帳の側で上限と括りに従わせる。
-                handle.add_addresses(addrs).await
+                // 中身は相手が決める。住所帳の側でバケットと上限に
+                // 従わせる。誰から聞いたかを渡すのが要で、これが無いと
+                // 1 つの相手が new 表の好きな場所を狙える。
+                handle.add_addresses(addrs, self.source).await
             }
 
             // まだ扱わないもの。無視してよい。相手を切る理由にはならない。

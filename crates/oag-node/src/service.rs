@@ -165,7 +165,13 @@ enum Request {
         fast: bool,
     },
     /// 聞いた住所を住所帳に入れる。
-    AddAddresses(Vec<NetAddress>),
+    AddAddresses {
+        /// 聞いた住所。
+        addrs: Vec<NetAddress>,
+        /// 教えてくれた相手。`new` 表のどのバケットに入るかを決める。
+        /// **これが無いと、1 つの相手が `new` 表の好きな場所を狙える。**
+        source: Option<SocketAddr>,
+    },
     /// `getaddr` に返す住所を選ぶ。
     AddressesToShare(oneshot::Sender<Result<Vec<NetAddress>, String>>),
     /// 次に繋ぎに行く候補を選ぶ。
@@ -378,8 +384,15 @@ impl NodeHandle {
     }
 
     /// `addr` で聞いた住所を住所帳に入れる。
-    pub async fn add_addresses(&self, addrs: Vec<NetAddress>) -> Result<(), String> {
-        self.tell(Request::AddAddresses(addrs)).await
+    ///
+    /// `source` は教えてくれた相手。住所帳の `new` 表でどのバケットに
+    /// 入るかがこれで決まる。
+    pub async fn add_addresses(
+        &self,
+        addrs: Vec<NetAddress>,
+        source: Option<SocketAddr>,
+    ) -> Result<(), String> {
+        self.tell(Request::AddAddresses { addrs, source }).await
     }
 
     /// `getaddr` に返す住所。
@@ -824,8 +837,8 @@ impl Service {
                 self.attempts = 0;
                 self.mining_since = self.mining.is_some().then(std::time::Instant::now);
             }
-            Request::AddAddresses(addrs) => {
-                self.node.addresses_mut().add_many(&addrs, now());
+            Request::AddAddresses { addrs, source } => {
+                self.node.addresses_mut().add_many(&addrs, source, now());
             }
             Request::AddressesToShare(reply) => {
                 let addrs = self
