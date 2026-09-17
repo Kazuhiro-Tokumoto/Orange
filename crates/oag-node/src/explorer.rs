@@ -167,7 +167,7 @@ async fn route(handle: &NodeHandle, target: &str) -> Response {
     match segments.as_slice() {
         [""] => overview(handle).await,
         ["search"] => search(handle, query).await,
-        ["block", rest @ ..] => block_page(handle, &rest.join("/")).await,
+        ["block", rest @ ..] => block_page(handle, &rest.join("/"), query).await,
         ["tx", rest @ ..] => tx_page(handle, &rest.join("/")).await,
         ["address", rest @ ..] => address_page(handle, &rest.join("/"), query).await,
         ["mempool"] => mempool_page(handle).await,
@@ -218,26 +218,27 @@ async fn overview(handle: &NodeHandle) -> Response {
     // 最近のブロック。
     body.push_str("<h2>最近のブロック</h2><div class=\"wrap\"><table>");
     body.push_str("<tr><th>高さ</th><th>時刻 (UTC)</th><th>取引</th><th>大きさ</th><th>難易度</th><th>ハッシュ</th></tr>");
-    let lowest = status.height.saturating_sub(RECENT_BLOCKS as u64 - 1);
-    for height in (lowest..=status.height).rev() {
-        let Ok(Some(hash)) = handle.hash_at_height(height).await else {
-            continue;
-        };
-        let Ok(Some(block)) = handle.block(hash).await else {
-            continue;
-        };
+    // **本体は引かない。** 高さごとに 2 往復して 25 個のブロックを丸ごと
+    // 復号すると、満杯の鎖では 5 MB を読んで 16,000 件あまりの取引を組み
+    // 立てることになる。表に出すのは 1 行 5 項目だけである。
+    for summary in handle
+        .recent_blocks(RECENT_BLOCKS)
+        .await
+        .unwrap_or_default()
+    {
+        let hash = summary.hash.to_string();
         let _ = write!(
             body,
             "<tr><td><a href=\"/block/{h}\">{h}</a></td><td class=\"mono\">{t}</td>\
              <td>{n}</td><td>{s} B</td><td>{d}</td>\
              <td class=\"mono trunc\"><a href=\"/block/{hash}\">{short}</a></td></tr>",
-            h = height,
-            t = utc(block.header.timestamp),
-            n = block.transactions.len(),
-            s = group(block.size() as u64),
-            d = group(block.header.difficulty),
-            hash = esc(&hash.to_string()),
-            short = esc(&shorten(&hash.to_string())),
+            h = summary.height,
+            t = utc(summary.header.timestamp),
+            n = summary.transactions,
+            s = group(summary.size as u64),
+            d = group(summary.header.difficulty),
+            hash = esc(&hash),
+            short = esc(&shorten(&hash)),
         );
     }
     body.push_str("</table></div>");
@@ -261,13 +262,13 @@ async fn search(handle: &NodeHandle, query: &str) -> Response {
 
     // 数字だけなら高さ。
     if q.chars().all(|c| c.is_ascii_digit()) {
-        return block_page(handle, &q).await;
+        return block_page(handle, &q, "").await;
     }
     // 64 文字の 16 進はブロックか取引。ブロックを先に見る。
     if q.len() == 64 && q.chars().all(|c| c.is_ascii_hexdigit()) {
         if let Ok(hash) = q.parse::<Hash>() {
             if matches!(handle.entry(hash).await, Ok(Some(_))) {
-                return block_page(handle, &q).await;
+                return block_page(handle, &q, "").await;
             }
         }
         return tx_page(handle, &q).await;
@@ -275,7 +276,7 @@ async fn search(handle: &NodeHandle, query: &str) -> Response {
     address_page(handle, &q, "").await
 }
 
-async fn block_page(handle: &NodeHandle, key: &str) -> Response {
+async fn block_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
     let hash = if key.chars().all(|c| c.is_ascii_digit()) {
         let Ok(height) = key.parse::<u64>() else {
             return not_found(&format!("{key} は高さとして読めない"));
@@ -340,8 +341,27 @@ async fn block_page(handle: &NodeHandle, key: &str) -> Response {
     }
     body.push_str("</table></div>");
 
+    // 満杯のブロックは約 670 取引を持ちうる。全部を 1 枚に吐くと
+    // 130 KB の表になるので、アドレス履歴と同じ幅で区切る。
+    let from: usize = query_value(query, "from")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+        .min(block.transactions.len());
+    let upto = (from + PAGE).min(block.transactions.len());
+
     body.push_str("<h2>取引</h2>");
-    body.push_str(&tx_table(&block, handle.network()));
+    if block.transactions.len() > PAGE && upto > from {
+        let _ = write!(
+            body,
+            "<p class=\"note\">{} 件中 {}〜{} 件目</p>",
+            group(block.transactions.len() as u64),
+            from + 1,
+            upto
+        );
+    }
+    body.push_str(&tx_table(&block, handle.network(), from, upto));
+
+    body.push_str(&tx_pager(&hash, from, upto, block.transactions.len()));
 
     let mut nav = String::new();
     if block.header.height > 0 {
@@ -534,10 +554,47 @@ async fn mempool_page(handle: &NodeHandle) -> Response {
 
 // ━━━━━━━━ 部品 ━━━━━━━━
 
-fn tx_table(block: &Block, network: Network) -> String {
+/// ブロック内の取引表の頁送り。区切る必要が無ければ空文字列を返す。
+///
+/// # なぜ高さではなくハッシュで繋ぐのか
+///
+/// 高さで繋ぐと、**サイドチェーンのブロックを開いているときに、続きが
+/// アクティブチェーンの同じ高さの別のブロックへ飛ぶ。** ハッシュなら
+/// 開いている当のブロックを指す。
+fn tx_pager(hash: &Hash, from: usize, upto: usize, total: usize) -> String {
+    let here = esc(&hash.to_string());
+    let mut pager = String::new();
+    if from > 0 {
+        let _ = write!(
+            pager,
+            "<a href=\"/block/{here}?from={f}\">← 前の {p} 件</a> ",
+            f = from.saturating_sub(PAGE),
+            p = PAGE
+        );
+    }
+    if upto < total {
+        let _ = write!(
+            pager,
+            "<a href=\"/block/{here}?from={f}\">次の {p} 件 →</a>",
+            f = upto,
+            p = PAGE
+        );
+    }
+    if pager.is_empty() {
+        return String::new();
+    }
+    format!("<p class=\"nav\">{pager}</p>")
+}
+
+/// ブロック内の取引を `from` 番目から `upto` 番目の手前まで並べる。
+///
+/// 位置の番号は**ブロック内の通し番号**であり、頁の中の番号ではない。
+/// 0 は必ずコインベースである。
+fn tx_table(block: &Block, network: Network, from: usize, upto: usize) -> String {
     let mut out = String::from("<div class=\"wrap\"><table>");
     out.push_str("<tr><th>#</th><th>取引 ID</th><th>入力</th><th>出力</th><th>合計</th></tr>");
-    for (position, tx) in block.transactions.iter().enumerate() {
+    for (position, tx) in block.transactions[from..upto].iter().enumerate() {
+        let position = from + position;
         let total = Amount::sum(tx.outputs.iter().map(|o| o.amount));
         let _ = write!(
             out,
@@ -1038,6 +1095,104 @@ mod tests {
         assert!(short.len() < hash.len());
         // 短いものはそのまま。
         assert_eq!(shorten("abc"), "abc");
+    }
+
+    /// 取引を `count` 件持つブロック。0 番目はコインベースにする。
+    fn block_of(count: usize) -> Block {
+        use oag_consensus::tx::{OutPoint, TxInput, TxOutput, CURRENT_TX_VERSION};
+        use oag_consensus::BlockHeader;
+        use oag_primitives::{hash, SecretKey};
+
+        let lock = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
+        let transactions = (0..count)
+            .map(|i| Transaction {
+                version: CURRENT_TX_VERSION,
+                inputs: vec![if i == 0 {
+                    TxInput::new(OutPoint::null())
+                } else {
+                    TxInput::new(OutPoint::new(hash::txid(&[i as u8]), 0))
+                }],
+                outputs: vec![TxOutput::new(
+                    Amount::from_atomic(i as u128 + 1).unwrap(),
+                    lock.clone(),
+                )],
+                locktime: 0,
+            })
+            .collect();
+        Block {
+            header: BlockHeader {
+                version: 0,
+                prev_hash: Hash::ZERO,
+                merkle_root: Hash::ZERO,
+                timestamp: 1_800_000_000,
+                difficulty: 1,
+                height: 7,
+                nonce: 0,
+            },
+            transactions,
+        }
+    }
+
+    #[test]
+    fn a_page_of_transactions_keeps_the_numbering_of_the_whole_block() {
+        // **頁の中の番号ではなく、ブロック内の通し番号を出す。** ここが
+        // ずれると、表の `#` が索引の位置と食い違い、`/tx/` の照合結果と
+        // 説明がつかなくなる。
+        let block = block_of(5);
+        let table = tx_table(&block, Network::Mainnet, 2, 5);
+
+        assert!(table.contains("<td>2</td>"), "2 番目から始まっていない");
+        assert!(table.contains("<td>4</td>"), "最後の 4 番目が無い");
+        assert!(!table.contains("<td>0</td>"), "頁の外の 0 番目が出ている");
+        assert!(!table.contains("<td>5</td>"), "存在しない 5 番目が出ている");
+
+        // 採掘の印は 0 番目だけのもの。2 件目以降の頁には出ない。
+        assert!(
+            !table.contains("採掘"),
+            "コインベースでないのに採掘と出ている"
+        );
+
+        // 先頭の頁には出る。
+        let first = tx_table(&block, Network::Mainnet, 0, 2);
+        assert!(first.contains("採掘"));
+    }
+
+    #[test]
+    fn the_pager_points_at_the_block_being_read_not_at_a_height() {
+        // **高さで繋ぐと、サイドチェーンのブロックを開いているとき、
+        // 続きがアクティブチェーンの別のブロックへ飛ぶ。**
+        let hash = block_of(1).header.hash();
+        let here = hash.to_string();
+
+        // 真ん中の頁。前にも次にも行ける。
+        let mid = tx_pager(&hash, PAGE, PAGE * 2, PAGE * 3);
+        assert!(mid.contains(&format!("/block/{here}?from=0")), "{mid}");
+        assert!(
+            mid.contains(&format!("/block/{here}?from={}", PAGE * 2)),
+            "{mid}"
+        );
+
+        // 先頭の頁に「前」は無い。
+        let first = tx_pager(&hash, 0, PAGE, PAGE * 2);
+        assert!(!first.contains("前の"));
+        assert!(first.contains("次の"));
+
+        // 末尾の頁に「次」は無い。
+        let last = tx_pager(&hash, PAGE, PAGE * 2, PAGE * 2);
+        assert!(last.contains("前の"));
+        assert!(!last.contains("次の"));
+
+        // 区切る必要が無ければ何も出さない。
+        assert_eq!(tx_pager(&hash, 0, 3, 3), "");
+    }
+
+    #[test]
+    fn an_empty_range_renders_a_table_with_no_rows() {
+        // 高さの末尾を越えて `from` を指定されても落ちない。
+        let block = block_of(3);
+        let table = tx_table(&block, Network::Mainnet, 3, 3);
+        assert!(table.contains("<th>#</th>"));
+        assert!(!table.contains("<td>0</td>"));
     }
 
     #[test]

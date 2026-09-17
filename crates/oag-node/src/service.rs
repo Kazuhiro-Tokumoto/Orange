@@ -37,7 +37,7 @@ use oag_net::message::MAX_HEADERS;
 use oag_net::sync::{BlockDownload, PeerId, TxRequests};
 use oag_pow::randomx::{RandomXMiner, RandomXVerifier};
 use oag_primitives::{Hash, Network};
-use oag_store::{IndexStats, TxLocation};
+use oag_store::{BlockSummary, IndexStats, TxLocation};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -286,6 +286,11 @@ enum Request {
     HashAtHeight {
         height: u64,
         reply: oneshot::Sender<Result<Option<Hash>, String>>,
+    },
+    /// 先端から遡って何件かの要約を、新しい順に引く。
+    RecentBlocks {
+        max: usize,
+        reply: oneshot::Sender<Result<Vec<BlockSummary>, String>>,
     },
     /// インデックスの 1 件を引く。
     GetEntry {
@@ -607,6 +612,14 @@ impl NodeHandle {
     pub async fn hash_at_height(&self, height: u64) -> Result<Option<Hash>, String> {
         self.ask(|reply| Request::HashAtHeight { height, reply })
             .await
+    }
+
+    /// 先端から遡って `max` 件ぶんの要約。新しい順。
+    ///
+    /// 一覧を描くためのもの。高さごとに往復する代わりに 1 回で済み、
+    /// 返ってくる並びは**ひとつの断面**である。
+    pub async fn recent_blocks(&self, max: usize) -> Result<Vec<BlockSummary>, String> {
+        self.ask(|reply| Request::RecentBlocks { max, reply }).await
     }
 
     /// インデックスの 1 件。
@@ -1210,6 +1223,15 @@ impl Service {
                         eprintln!("住所帳を書き出せない: {e}");
                     }
                 }
+            }
+            Request::RecentBlocks { max, reply } => {
+                let result = self
+                    .node
+                    .chain()
+                    .store()
+                    .recent_summaries(max)
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(result);
             }
             Request::HashAtHeight { height, reply } => {
                 let result = self

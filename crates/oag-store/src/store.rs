@@ -1,14 +1,15 @@
 //! redb を用いた記憶域。
 
 use oag_chain::index::BlockIndexEntry;
-use oag_consensus::codec::{CodecError, Decode, Encode};
+use oag_consensus::block::BLOCK_HEADER_LEN;
+use oag_consensus::codec::{CodecError, Decode, Encode, Reader};
 use oag_consensus::lock::Lock;
 use oag_consensus::tx::OutPoint;
 use oag_consensus::tx::TxOutput;
 use oag_consensus::utxo::{
     apply_block_to, undo_block_from, UndoBlock, UtxoEntry, UtxoError, UtxoView, UtxoWrite,
 };
-use oag_consensus::{Block, Transaction};
+use oag_consensus::{Block, BlockHeader, Transaction};
 use oag_primitives::Hash;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::collections::HashMap;
@@ -274,6 +275,33 @@ pub struct TxLocation {
     pub block: Hash,
 }
 
+/// 一覧に並べるための、ブロック 1 個の要約。
+///
+/// # なぜ本体を返さないのか
+///
+/// 一覧が要るのは高さ・時刻・難易度・取引数・大きさだけである。ところが
+/// 本体を丸ごと復号すると、**表に出さない取引まで全部組み立ててしまう**。
+/// 満杯のブロック (200 KB, 約 670 取引) を 25 個並べると、25 行を描く
+/// ために 16,000 件あまりの [`Transaction`] を確保して即座に捨てることに
+/// なる。
+///
+/// 上の 3 つはブロックインデックスのヘッダにある。残る 2 つも、保存して
+/// あるバイト列から**復号せずに**取れる。大きさは記録の長さそのもので、
+/// 取引数はヘッダ直後の varint 1 個である。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockSummary {
+    /// アクティブチェーン上の高さ。
+    pub height: u64,
+    /// ブロックハッシュ。
+    pub hash: Hash,
+    /// ヘッダ。時刻と難易度はここから取る。
+    pub header: BlockHeader,
+    /// 入っている取引の数。
+    pub transactions: usize,
+    /// 符号化した大きさ (バイト)。
+    pub size: usize,
+}
+
 /// 索引を組み直した結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct IndexStats {
@@ -369,6 +397,63 @@ impl Store {
             )),
             None => Ok(None),
         }
+    }
+
+    /// 先端から遡って `max` 件ぶんの要約を、**新しい順に**返す。
+    ///
+    /// # なぜ 1 つの呼び出しにまとめるのか
+    ///
+    /// 呼ぶ側 (エクスプローラの一覧) は高さごとにハッシュを引き、次に
+    /// ブロックを引く、を繰り返していた。25 行で 50 往復になるうえ、
+    /// **1 往復ごとに別の読み取りトランザクションを張る**ので、描いて
+    /// いる途中にブロックが届くと上の行と下の行が違う時点を映す。
+    ///
+    /// ここでまとめると往復は 1 回、断面も 1 つになる。
+    ///
+    /// 本体は [`Block::decode`] に渡さない。要約に必要な 2 つの数は、
+    /// 保存してあるバイト列から直に取れる ([`BlockSummary`])。
+    pub fn recent_summaries(&self, max: usize) -> Result<Vec<BlockSummary>, StoreError> {
+        if max == 0 {
+            return Ok(Vec::new());
+        }
+        let txn = self.db.begin_read().map_err(db_err)?;
+        let active = txn.open_table(ACTIVE).map_err(db_err)?;
+        let index = txn.open_table(INDEX).map_err(db_err)?;
+        let blocks = txn.open_table(BLOCKS).map_err(db_err)?;
+
+        let mut out = Vec::new();
+        for row in active.iter().map_err(db_err)?.rev() {
+            if out.len() == max {
+                break;
+            }
+            let (height, hash_bytes) = row.map_err(db_err)?;
+            let hash = Hash::from_slice(hash_bytes.value()).map_err(|_| StoreError::NoTip)?;
+
+            let Some(entry) = index.get(hash.as_bytes().as_slice()).map_err(db_err)? else {
+                continue;
+            };
+            let header = BlockIndexEntry::decode(entry.value())?.header;
+
+            let Some(body) = blocks.get(hash.as_bytes().as_slice()).map_err(db_err)? else {
+                continue;
+            };
+            let raw = body.value();
+            let size = raw.len();
+            // ヘッダの直後に取引数の varint が 1 個。そこまでで読むのをやめる。
+            let rest = raw
+                .get(BLOCK_HEADER_LEN..)
+                .ok_or_else(|| StoreError::Db(format!("ブロック {hash} の記録がヘッダより短い")))?;
+            let transactions = Reader::new(rest).read_count::<Transaction>("block.transactions")?;
+
+            out.push(BlockSummary {
+                height: height.value(),
+                hash,
+                header,
+                transactions,
+                size,
+            });
+        }
+        Ok(out)
     }
 
     /// アクティブチェーンの高さ。ジェネシスのみなら 0。
@@ -1399,6 +1484,79 @@ mod tests {
     fn put_and_connect(store: &Store, block: &Block) {
         store.put_block(block, &entry_for(block, 1)).unwrap();
         store.connect_block(block).unwrap();
+    }
+
+    #[test]
+    fn a_summary_reports_what_the_block_really_holds() {
+        // **復号せずに数えている**ので、本物のブロックと突き合わせる。
+        // ずれれば、一覧が嘘の取引数や大きさを出していることになる。
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let to = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
+        let mut prev = Hash::ZERO;
+        let mut blocks = Vec::new();
+
+        // 高さ 0 はコインベースだけ。1 以降は 0 の出力を使う取引を足す。
+        let genesis = block_with(0, prev, &to, Vec::new());
+        put_and_connect(&store, &genesis);
+        prev = genesis.header.hash();
+        blocks.push(genesis.clone());
+
+        let out = OutPoint {
+            txid: genesis.transactions[0].txid(),
+            index: 0,
+        };
+        let block = block_with(1, prev, &to, vec![spend(out, &to)]);
+        put_and_connect(&store, &block);
+        blocks.push(block);
+
+        let summaries = store.recent_summaries(10).unwrap();
+        // 新しい順。
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].height, 1);
+        assert_eq!(summaries[1].height, 0);
+
+        for summary in &summaries {
+            let block = &blocks[summary.height as usize];
+            assert_eq!(summary.hash, block.header.hash());
+            assert_eq!(summary.header, block.header);
+            assert_eq!(
+                summary.transactions,
+                block.transactions.len(),
+                "高さ {} の取引数が本体と合わない",
+                summary.height
+            );
+            assert_eq!(
+                summary.size,
+                block.size(),
+                "高さ {} の大きさが本体と合わない",
+                summary.height
+            );
+        }
+        assert_eq!(summaries[0].transactions, 2);
+        assert_eq!(summaries[1].transactions, 1);
+    }
+
+    #[test]
+    fn a_summary_list_stops_at_the_asked_for_count() {
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let mut prev = Hash::ZERO;
+        for height in 0..6u64 {
+            let block = block_at(height, prev, height);
+            put_and_connect(&store, &block);
+            prev = block.header.hash();
+        }
+
+        // 先端から数えて 3 件。古い側ではない。
+        let summaries = store.recent_summaries(3).unwrap();
+        let heights: Vec<u64> = summaries.iter().map(|s| s.height).collect();
+        assert_eq!(heights, vec![5, 4, 3]);
+
+        // 0 件を求めたら読みに行かない。
+        assert!(store.recent_summaries(0).unwrap().is_empty());
+        // 鎖より多く求めても、あるぶんだけ返る。
+        assert_eq!(store.recent_summaries(100).unwrap().len(), 6);
     }
 
     #[test]
