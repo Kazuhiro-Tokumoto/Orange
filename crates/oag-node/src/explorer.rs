@@ -1,0 +1,1051 @@
+//! ブロックエクスプローラ。
+//!
+//! ブラウザで鎖の中身を見るための、読むだけの HTTP である。既定では
+//! `127.0.0.1:8080` で待ち受ける。
+//!
+//! # なぜ RPC の HTTP を使い回さないのか
+//!
+//! [`oag_rpc::http`] は「`POST /` に JSON を 1 個、合言葉つき」だけを
+//! 受け付ける。**その狭さがあの層の安全性そのもの**であり (SPEC §14.1)、
+//! `GET` と任意のパスを通すために広げると、資金を動かせる入口の作りを
+//! 弱めることになる。
+//!
+//! こちらは読むだけで、状態を変える経路を一切持たない。別の口として
+//! 分けておけば、片方を緩めてももう片方は緩まない。
+//!
+//! # 何ができないか
+//!
+//! - **書き込みは無い。** 送金も採掘操作もここからはできない。
+//! - **索引が要る。** 取引とアドレスの照会は `--index` で作った索引に
+//!   頼る。無ければその旨を表示して、ブロックの閲覧だけを提供する。
+//! - 待ち受けは既定でループバックのみである。外に出すなら住所を明示する。
+//!
+//! # 表示の向き
+//!
+//! アドレスの履歴は**古い順**に出す。索引の鍵が高さ順に並んでいるため、
+//! その順に読むのが最も安く、続きから読むだけで頁送りになるからである。
+//! 新しい順に並べ替えるには全件を数える必要があり、それは「途中で
+//! 打ち切った」ことを利用者に隠したまま行うには危うい。
+
+use crate::service::{NodeHandle, TxRecord};
+use oag_consensus::lock::Lock;
+use oag_consensus::{Block, Transaction};
+use oag_primitives::{Address, Amount, Hash, Network};
+use std::fmt::Write as _;
+use std::net::SocketAddr;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+
+/// 要求の頭の上限。
+const MAX_REQUEST: usize = 8 * 1024;
+/// 要求が来ないまま接続を保つ上限。
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 一覧に出す最近のブロックの数。
+const RECENT_BLOCKS: usize = 25;
+/// 履歴 1 頁の件数。
+const PAGE: usize = 50;
+/// アドレス頁に出す UTXO の上限。
+const MAX_UTXOS: usize = 500;
+
+/// 待ち受けを始める。実際に結びついた住所を返す。
+pub async fn start_explorer(handle: NodeHandle, addr: SocketAddr) -> Result<SocketAddr, String> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|e| format!("{addr} でエクスプローラを待ち受けられない: {e}"))?;
+    let bound = listener
+        .local_addr()
+        .map_err(|e| format!("住所を確かめられない: {e}"))?;
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    eprintln!("エクスプローラの接続を受け入れられない: {e}");
+                    return;
+                }
+            };
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                let _ = serve_connection(stream, handle).await;
+            });
+        }
+    });
+    Ok(bound)
+}
+
+/// 応答 1 個。
+struct Response {
+    status: &'static str,
+    body: String,
+}
+
+async fn serve_connection(mut stream: TcpStream, handle: NodeHandle) -> std::io::Result<()> {
+    stream.set_nodelay(true)?;
+    let mut buffer = Vec::with_capacity(1024);
+
+    // 1 要求 1 接続とする。使い回しに応じないぶん、扱いが単純になる。
+    let target = match read_target(&mut stream, &mut buffer).await {
+        Some(target) => target,
+        None => {
+            let body = page("400", "<h1>要求を読めない</h1>");
+            return write_response(
+                &mut stream,
+                &Response {
+                    status: "400 Bad Request",
+                    body,
+                },
+            )
+            .await;
+        }
+    };
+
+    let response = route(&handle, &target).await;
+    write_response(&mut stream, &response).await
+}
+
+/// 要求行から要求先を取り出す。`GET` 以外は `None`。
+async fn read_target(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Option<String> {
+    let mut chunk = [0u8; 1024];
+    loop {
+        if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if buffer.len() > MAX_REQUEST {
+            return None;
+        }
+        let read = tokio::time::timeout(IDLE_TIMEOUT, stream.read(&mut chunk))
+            .await
+            .ok()?
+            .ok()?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+
+    let text = String::from_utf8_lossy(buffer);
+    let line = text.lines().next()?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?;
+    let target = parts.next()?;
+    // 読むだけの口なので、読む動詞しか受けない。
+    if method != "GET" && method != "HEAD" {
+        return None;
+    }
+    Some(target.to_string())
+}
+
+async fn write_response(stream: &mut TcpStream, response: &Response) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 {}\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         X-Robots-Tag: noindex, nofollow\r\n\
+         Connection: close\r\n\r\n",
+        response.status,
+        response.body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(response.body.as_bytes()).await?;
+    stream.flush().await
+}
+
+// ━━━━━━━━ 経路 ━━━━━━━━
+
+async fn route(handle: &NodeHandle, target: &str) -> Response {
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (target, ""),
+    };
+    let path = percent_decode(path);
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+
+    match segments.as_slice() {
+        [""] => overview(handle).await,
+        ["search"] => search(handle, query).await,
+        ["block", rest @ ..] => block_page(handle, &rest.join("/")).await,
+        ["tx", rest @ ..] => tx_page(handle, &rest.join("/")).await,
+        ["address", rest @ ..] => address_page(handle, &rest.join("/"), query).await,
+        ["mempool"] => mempool_page(handle).await,
+        _ => not_found("そのような頁は無い"),
+    }
+}
+
+async fn overview(handle: &NodeHandle) -> Response {
+    let status = match handle.status().await {
+        Ok(status) => status,
+        Err(e) => return error_page(&e),
+    };
+    let indexed = handle.index_from().await.unwrap_or(None);
+    let mempool = handle.mempool_txids().await.unwrap_or_default();
+
+    let mut body = String::new();
+    body.push_str(&search_box(""));
+
+    body.push_str("<div class=\"grid\">");
+    stat(&mut body, "ネットワーク", &esc(&status.network.to_string()));
+    stat(&mut body, "高さ", &status.height.to_string());
+    stat(&mut body, "次の難易度", &group(status.next_difficulty));
+    stat(&mut body, "UTXO", &group(status.utxo_count));
+    stat(&mut body, "mempool", &mempool.len().to_string());
+    stat(
+        &mut body,
+        "索引",
+        match indexed {
+            Some(_) => "<span class=\"ok\">あり</span>",
+            None => "<span class=\"warn\">なし</span>",
+        },
+    );
+    body.push_str("</div>");
+
+    if indexed.is_none() {
+        body.push_str(
+            "<p class=\"note\">索引を持っていないので、取引 ID とアドレスでは引けません。\
+             <code>--index</code> を付けて起動すると使えるようになります。</p>",
+        );
+    }
+
+    body.push_str("<h2>先端</h2>");
+    body.push_str(&format!(
+        "<p class=\"mono break\">{}</p>",
+        esc(&status.tip.to_string())
+    ));
+
+    // 最近のブロック。
+    body.push_str("<h2>最近のブロック</h2><div class=\"wrap\"><table>");
+    body.push_str("<tr><th>高さ</th><th>時刻 (UTC)</th><th>取引</th><th>大きさ</th><th>難易度</th><th>ハッシュ</th></tr>");
+    let lowest = status.height.saturating_sub(RECENT_BLOCKS as u64 - 1);
+    for height in (lowest..=status.height).rev() {
+        let Ok(Some(hash)) = handle.hash_at_height(height).await else {
+            continue;
+        };
+        let Ok(Some(block)) = handle.block(hash).await else {
+            continue;
+        };
+        let _ = write!(
+            body,
+            "<tr><td><a href=\"/block/{h}\">{h}</a></td><td class=\"mono\">{t}</td>\
+             <td>{n}</td><td>{s} B</td><td>{d}</td>\
+             <td class=\"mono trunc\"><a href=\"/block/{hash}\">{short}</a></td></tr>",
+            h = height,
+            t = utc(block.header.timestamp),
+            n = block.transactions.len(),
+            s = group(block.size() as u64),
+            d = group(block.header.difficulty),
+            hash = esc(&hash.to_string()),
+            short = esc(&shorten(&hash.to_string())),
+        );
+    }
+    body.push_str("</table></div>");
+
+    if !mempool.is_empty() {
+        body.push_str(&format!(
+            "<h2>mempool</h2><p><a href=\"/mempool\">未確定の取引 {} 件</a></p>",
+            mempool.len()
+        ));
+    }
+
+    ok(page("Orange エクスプローラ", &body))
+}
+
+async fn search(handle: &NodeHandle, query: &str) -> Response {
+    let q = query_value(query, "q").unwrap_or_default();
+    let q = q.trim().to_string();
+    if q.is_empty() {
+        return not_found("何も入力されていない");
+    }
+
+    // 数字だけなら高さ。
+    if q.chars().all(|c| c.is_ascii_digit()) {
+        return block_page(handle, &q).await;
+    }
+    // 64 文字の 16 進はブロックか取引。ブロックを先に見る。
+    if q.len() == 64 && q.chars().all(|c| c.is_ascii_hexdigit()) {
+        if let Ok(hash) = q.parse::<Hash>() {
+            if matches!(handle.entry(hash).await, Ok(Some(_))) {
+                return block_page(handle, &q).await;
+            }
+        }
+        return tx_page(handle, &q).await;
+    }
+    address_page(handle, &q, "").await
+}
+
+async fn block_page(handle: &NodeHandle, key: &str) -> Response {
+    let hash = if key.chars().all(|c| c.is_ascii_digit()) {
+        let Ok(height) = key.parse::<u64>() else {
+            return not_found(&format!("{key} は高さとして読めない"));
+        };
+        match handle.hash_at_height(height).await {
+            Ok(Some(hash)) => hash,
+            Ok(None) => return not_found(&format!("高さ {height} のブロックは無い")),
+            Err(e) => return error_page(&e),
+        }
+    } else {
+        match key.parse::<Hash>() {
+            Ok(hash) => hash,
+            Err(_) => return not_found(&format!("{key} はブロックハッシュとして読めない")),
+        }
+    };
+
+    let block = match handle.block(hash).await {
+        Ok(Some(block)) => block,
+        Ok(None) => return not_found("そのブロックの本体を持っていない"),
+        Err(e) => return error_page(&e),
+    };
+
+    let mut body = String::new();
+    body.push_str(&search_box(""));
+    let _ = write!(body, "<h1>ブロック {}</h1>", block.header.height);
+    body.push_str(&format!(
+        "<p class=\"mono break\">{}</p>",
+        esc(&hash.to_string())
+    ));
+
+    body.push_str("<div class=\"wrap\"><table>");
+    row(&mut body, "高さ", &block.header.height.to_string());
+    row(&mut body, "時刻 (UTC)", &utc(block.header.timestamp));
+    row(&mut body, "unix 秒", &block.header.timestamp.to_string());
+    row(&mut body, "難易度", &group(block.header.difficulty));
+    row(&mut body, "ノンス", &group(block.header.nonce));
+    row(&mut body, "版数", &block.header.version.to_string());
+    row(
+        &mut body,
+        "大きさ",
+        &format!("{} B", group(block.size() as u64)),
+    );
+    row(&mut body, "取引数", &block.transactions.len().to_string());
+    row_raw(
+        &mut body,
+        "マークル根",
+        &format!(
+            "<span class=\"mono break\">{}</span>",
+            esc(&block.header.merkle_root.to_string())
+        ),
+    );
+    let prev = block.header.prev_hash;
+    if block.header.height > 0 {
+        row_raw(
+            &mut body,
+            "親",
+            &format!(
+                "<a class=\"mono break\" href=\"/block/{p}\">{p}</a>",
+                p = esc(&prev.to_string())
+            ),
+        );
+    }
+    body.push_str("</table></div>");
+
+    body.push_str("<h2>取引</h2>");
+    body.push_str(&tx_table(&block, handle.network()));
+
+    let mut nav = String::new();
+    if block.header.height > 0 {
+        let _ = write!(
+            nav,
+            "<a href=\"/block/{}\">← 前</a> ",
+            block.header.height - 1
+        );
+    }
+    let _ = write!(
+        nav,
+        "<a href=\"/block/{}\">次 →</a>",
+        block.header.height + 1
+    );
+    let _ = write!(body, "<p class=\"nav\">{nav}</p>");
+
+    ok(page(&format!("ブロック {}", block.header.height), &body))
+}
+
+async fn tx_page(handle: &NodeHandle, key: &str) -> Response {
+    let Ok(txid) = key.parse::<Hash>() else {
+        return not_found(&format!("{key} は取引 ID として読めない"));
+    };
+    let network = handle.network();
+
+    let indexed = handle.index_from().await.unwrap_or(None).is_some();
+    let record = if indexed {
+        handle.tx_record(txid).await.unwrap_or(None)
+    } else {
+        None
+    };
+
+    let mut body = String::new();
+    body.push_str(&search_box(""));
+    body.push_str("<h1>取引</h1>");
+    body.push_str(&format!(
+        "<p class=\"mono break\">{}</p>",
+        esc(&txid.to_string())
+    ));
+
+    if let Some(record) = record {
+        body.push_str(&record_detail(&record, network));
+        return ok(page("取引", &body));
+    }
+
+    // 索引に無ければ mempool を見る。
+    match handle.mempool_tx(txid).await {
+        Ok(Some(tx)) => {
+            body.push_str("<p class=\"warn\">未確定 (mempool にある)</p>");
+            body.push_str(&tx_detail(&tx, &[], network));
+            ok(page("取引", &body))
+        }
+        Ok(None) if !indexed => not_found(
+            "索引が無いので、確定した取引を ID では引けない。--index を付けて起動すること",
+        ),
+        Ok(None) => not_found("そのような取引は無い"),
+        Err(e) => error_page(&e),
+    }
+}
+
+async fn address_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
+    let network = handle.network();
+    let address = match Address::decode_on(network, key) {
+        Ok(address) => address,
+        Err(e) => return not_found(&format!("{key} はアドレスとして読めない: {e}")),
+    };
+    let lock = Lock::from_address(&address);
+    let from: u64 = query_value(query, "from")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    let mut body = String::new();
+    body.push_str(&search_box(key));
+    body.push_str("<h1>アドレス</h1>");
+    body.push_str(&format!("<p class=\"mono break\">{}</p>", esc(key)));
+
+    // 残高は索引に頼らない。UTXO セットを丸ごと見て拾う。
+    let utxos = handle
+        .scan_utxos(vec![lock.clone()], MAX_UTXOS)
+        .await
+        .unwrap_or_default();
+    let balance = Amount::sum(utxos.iter().map(|u| u.entry.output.amount));
+
+    body.push_str("<div class=\"grid\">");
+    stat(
+        &mut body,
+        "残高",
+        &match balance {
+            Some(amount) => format!("{} OAG", esc(&amount.to_string())),
+            None => "計算できない".to_string(),
+        },
+    );
+    stat(&mut body, "UTXO", &utxos.len().to_string());
+    body.push_str("</div>");
+    if utxos.len() >= MAX_UTXOS {
+        body.push_str(
+            "<p class=\"warn\">UTXO が上限に達したため、残高は実際より少なく出ています。</p>",
+        );
+    }
+
+    // 履歴は索引に頼る。
+    match handle.index_from().await {
+        Ok(Some(_)) => {
+            let history = handle
+                .address_history(lock.clone(), from, PAGE + 1)
+                .await
+                .unwrap_or_default();
+            let more = history.len() > PAGE;
+            let shown = &history[..history.len().min(PAGE)];
+
+            body.push_str("<h2>履歴 <span class=\"note\">(古い順)</span></h2>");
+            if shown.is_empty() {
+                body.push_str("<p class=\"note\">この範囲に取引はありません。</p>");
+            } else {
+                body.push_str(&history_table(shown, &lock, network));
+            }
+            if more {
+                let next = shown.last().map(|r| r.location.height + 1).unwrap_or(from);
+                let _ = write!(
+                    body,
+                    "<p class=\"nav\"><a href=\"/address/{}?from={}\">続き →</a></p>",
+                    esc(key),
+                    next
+                );
+            }
+            if from > 0 {
+                let _ = write!(
+                    body,
+                    "<p class=\"nav\"><a href=\"/address/{}\">← 先頭へ</a></p>",
+                    esc(key)
+                );
+            }
+        }
+        _ => body.push_str(
+            "<h2>履歴</h2><p class=\"warn\">索引を持っていないので履歴を出せません。\
+             <code>--index</code> を付けて起動してください。</p>",
+        ),
+    }
+
+    // 保有中の UTXO。
+    if !utxos.is_empty() {
+        body.push_str("<h2>未使用の出力</h2><div class=\"wrap\"><table>");
+        body.push_str("<tr><th>取引</th><th>番号</th><th>金額</th><th>高さ</th><th>種別</th></tr>");
+        for utxo in &utxos {
+            let _ = write!(
+                body,
+                "<tr><td class=\"mono trunc\"><a href=\"/tx/{full}\">{short}</a></td>\
+                 <td>{i}</td><td class=\"num\">{a} OAG</td><td>{h}</td><td>{c}</td></tr>",
+                full = esc(&utxo.outpoint.txid.to_string()),
+                short = esc(&shorten(&utxo.outpoint.txid.to_string())),
+                i = utxo.outpoint.index,
+                a = esc(&utxo.entry.output.amount.to_string()),
+                h = utxo.entry.height,
+                c = if utxo.entry.is_coinbase {
+                    "採掘"
+                } else {
+                    "通常"
+                },
+            );
+        }
+        body.push_str("</table></div>");
+    }
+
+    ok(page("アドレス", &body))
+}
+
+async fn mempool_page(handle: &NodeHandle) -> Response {
+    let txids = match handle.mempool_txids().await {
+        Ok(txids) => txids,
+        Err(e) => return error_page(&e),
+    };
+    let mut body = String::new();
+    body.push_str(&search_box(""));
+    let _ = write!(body, "<h1>mempool ({} 件)</h1>", txids.len());
+    if txids.is_empty() {
+        body.push_str("<p class=\"note\">未確定の取引はありません。</p>");
+    } else {
+        body.push_str("<div class=\"wrap\"><table><tr><th>取引 ID</th></tr>");
+        for txid in &txids {
+            let _ = write!(
+                body,
+                "<tr><td class=\"mono trunc\"><a href=\"/tx/{full}\">{full}</a></td></tr>",
+                full = esc(&txid.to_string())
+            );
+        }
+        body.push_str("</table></div>");
+    }
+    ok(page("mempool", &body))
+}
+
+// ━━━━━━━━ 部品 ━━━━━━━━
+
+fn tx_table(block: &Block, network: Network) -> String {
+    let mut out = String::from("<div class=\"wrap\"><table>");
+    out.push_str("<tr><th>#</th><th>取引 ID</th><th>入力</th><th>出力</th><th>合計</th></tr>");
+    for (position, tx) in block.transactions.iter().enumerate() {
+        let total = Amount::sum(tx.outputs.iter().map(|o| o.amount));
+        let _ = write!(
+            out,
+            "<tr><td>{p}{cb}</td><td class=\"mono trunc\"><a href=\"/tx/{full}\">{short}</a></td>\
+             <td>{i}</td><td>{o}</td><td class=\"num\">{t} OAG</td></tr>",
+            p = position,
+            cb = if tx.is_coinbase() {
+                " <span class=\"tag\">採掘</span>"
+            } else {
+                ""
+            },
+            full = esc(&tx.txid().to_string()),
+            short = esc(&shorten(&tx.txid().to_string())),
+            i = tx.inputs.len(),
+            o = tx.outputs.len(),
+            t = total
+                .map(|a| esc(&a.to_string()))
+                .unwrap_or_else(|| "?".to_string()),
+        );
+    }
+    let _ = network;
+    out.push_str("</table></div>");
+    out
+}
+
+fn history_table(records: &[TxRecord], lock: &Lock, network: Network) -> String {
+    let mut out = String::from("<div class=\"wrap\"><table>");
+    out.push_str("<tr><th>高さ</th><th>取引 ID</th><th>増減</th></tr>");
+    for record in records {
+        // このアドレスから見た増減を出す。受け取った出力の合計から、
+        // 使った入力の合計を引く。
+        let received: u128 = record
+            .tx
+            .outputs
+            .iter()
+            .filter(|o| o.lock == *lock)
+            .map(|o| o.amount.to_atomic())
+            .sum();
+        let sent: u128 = record
+            .spent
+            .iter()
+            .flatten()
+            .filter(|o| o.lock == *lock)
+            .map(|o| o.amount.to_atomic())
+            .sum();
+        let delta = received as i128 - sent as i128;
+        let class = if delta >= 0 { "plus" } else { "minus" };
+        let _ = write!(
+            out,
+            "<tr><td><a href=\"/block/{h}\">{h}</a></td>\
+             <td class=\"mono trunc\"><a href=\"/tx/{full}\">{short}</a></td>\
+             <td class=\"num {class}\">{sign}{amount} OAG</td></tr>",
+            h = record.location.height,
+            full = esc(&record.txid_text()),
+            short = esc(&shorten(&record.txid_text())),
+            class = class,
+            sign = if delta >= 0 { "+" } else { "−" },
+            amount = esc(&atomic_to_oag(delta.unsigned_abs())),
+        );
+    }
+    let _ = network;
+    out.push_str("</table></div>");
+    out
+}
+
+fn record_detail(record: &TxRecord, network: Network) -> String {
+    let mut out = String::new();
+    out.push_str("<div class=\"wrap\"><table>");
+    row_raw(&mut out, "状態", "<span class=\"ok\">確定済み</span>");
+    row_raw(
+        &mut out,
+        "ブロック",
+        &format!("<a href=\"/block/{h}\">{h}</a>", h = record.location.height),
+    );
+    row_raw(
+        &mut out,
+        "ブロックハッシュ",
+        &format!(
+            "<a class=\"mono break\" href=\"/block/{b}\">{b}</a>",
+            b = esc(&record.location.block.to_string())
+        ),
+    );
+    row(
+        &mut out,
+        "ブロック内の位置",
+        &record.location.position.to_string(),
+    );
+    out.push_str("</table></div>");
+    out.push_str(&tx_detail(&record.tx, &record.spent, network));
+    out
+}
+
+fn tx_detail(
+    tx: &Transaction,
+    spent: &[Option<oag_consensus::tx::TxOutput>],
+    network: Network,
+) -> String {
+    let mut out = String::new();
+
+    out.push_str("<div class=\"wrap\"><table>");
+    row(&mut out, "版数", &tx.version.to_string());
+    row(
+        &mut out,
+        "大きさ",
+        &format!("{} B", group(tx.size() as u64)),
+    );
+    row(&mut out, "locktime", &tx.locktime.to_string());
+    row(
+        &mut out,
+        "種別",
+        if tx.is_coinbase() {
+            "採掘 (コインベース)"
+        } else {
+            "通常"
+        },
+    );
+
+    let out_total: u128 = tx.outputs.iter().map(|o| o.amount.to_atomic()).sum();
+    // 入力側が全部引けているときだけ手数料を出す。1 つでも欠けていれば
+    // 出さない。引けなかった分を 0 として足すと、手数料を多く見せる。
+    let in_known =
+        !tx.is_coinbase() && spent.len() == tx.inputs.len() && spent.iter().all(|s| s.is_some());
+    if in_known {
+        let in_total: u128 = spent.iter().flatten().map(|o| o.amount.to_atomic()).sum();
+        row(
+            &mut out,
+            "手数料",
+            &format!("{} OAG", atomic_to_oag(in_total.saturating_sub(out_total))),
+        );
+    }
+    row(
+        &mut out,
+        "出力の合計",
+        &format!("{} OAG", atomic_to_oag(out_total)),
+    );
+    out.push_str("</table></div>");
+
+    // 入力。
+    out.push_str("<h2>入力</h2><div class=\"wrap\"><table>");
+    if tx.is_coinbase() {
+        out.push_str(
+            "<tr><td class=\"note\">採掘による新規発行。使用した出力はありません。</td></tr>",
+        );
+    } else {
+        out.push_str("<tr><th>元の取引</th><th>番号</th><th>アドレス</th><th>金額</th></tr>");
+        for (n, input) in tx.inputs.iter().enumerate() {
+            let prev = spent.get(n).and_then(|s| s.as_ref());
+            let (addr, amount) = match prev {
+                Some(prev) => (
+                    prev.lock
+                        .to_address(network)
+                        .ok()
+                        .map(|a| a.to_string())
+                        .unwrap_or_else(|| format!("版数 {}", prev.lock.version())),
+                    format!("{} OAG", prev.amount),
+                ),
+                // 索引が無い、あるいは未確定の取引では引けない。
+                None => ("不明".to_string(), "不明".to_string()),
+            };
+            let _ = write!(
+                out,
+                "<tr><td class=\"mono trunc\"><a href=\"/tx/{full}\">{short}</a></td><td>{i}</td>\
+                 <td class=\"mono trunc\"><a href=\"/address/{a}\">{a_short}</a></td>\
+                 <td class=\"num\">{amount}</td></tr>",
+                full = esc(&input.prev_out.txid.to_string()),
+                short = esc(&shorten(&input.prev_out.txid.to_string())),
+                i = input.prev_out.index,
+                a = esc(&addr),
+                a_short = esc(&shorten(&addr)),
+                amount = esc(&amount),
+            );
+        }
+    }
+    out.push_str("</table></div>");
+
+    // 出力。
+    out.push_str("<h2>出力</h2><div class=\"wrap\"><table>");
+    out.push_str("<tr><th>#</th><th>アドレス</th><th>金額</th></tr>");
+    for (n, output) in tx.outputs.iter().enumerate() {
+        let addr = output
+            .lock
+            .to_address(network)
+            .ok()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| format!("版数 {} (未知)", output.lock.version()));
+        let _ = write!(
+            out,
+            "<tr><td>{n}</td><td class=\"mono trunc\"><a href=\"/address/{a}\">{a_short}</a></td>\
+             <td class=\"num\">{amount} OAG</td></tr>",
+            n = n,
+            a = esc(&addr),
+            a_short = esc(&shorten(&addr)),
+            amount = esc(&output.amount.to_string()),
+        );
+    }
+    out.push_str("</table></div>");
+    out
+}
+
+fn search_box(value: &str) -> String {
+    format!(
+        "<form class=\"search\" action=\"/search\" method=\"get\">\
+         <input name=\"q\" value=\"{}\" placeholder=\"高さ・ブロック・取引 ID・アドレス\" \
+         autocapitalize=\"off\" autocomplete=\"off\" spellcheck=\"false\">\
+         <button type=\"submit\">探す</button></form>",
+        esc(value)
+    )
+}
+
+fn stat(out: &mut String, label: &str, value: &str) {
+    let _ = write!(
+        out,
+        "<div class=\"stat\"><div class=\"label\">{}</div><div class=\"value\">{}</div></div>",
+        esc(label),
+        value
+    );
+}
+
+fn row(out: &mut String, label: &str, value: &str) {
+    let _ = write!(
+        out,
+        "<tr><th>{}</th><td>{}</td></tr>",
+        esc(label),
+        esc(value)
+    );
+}
+
+fn row_raw(out: &mut String, label: &str, value: &str) {
+    let _ = write!(out, "<tr><th>{}</th><td>{}</td></tr>", esc(label), value);
+}
+
+fn ok(body: String) -> Response {
+    Response {
+        status: "200 OK",
+        body,
+    }
+}
+
+fn not_found(message: &str) -> Response {
+    Response {
+        status: "404 Not Found",
+        body: page(
+            "見つからない",
+            &format!(
+                "{}<h1>見つからない</h1><p>{}</p>",
+                search_box(""),
+                esc(message)
+            ),
+        ),
+    }
+}
+
+fn error_page(message: &str) -> Response {
+    Response {
+        status: "500 Internal Server Error",
+        body: page(
+            "誤り",
+            &format!("{}<h1>誤り</h1><p>{}</p>", search_box(""), esc(message)),
+        ),
+    }
+}
+
+fn page(title: &str, body: &str) -> String {
+    format!(
+        "<!doctype html><html lang=\"ja\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <meta name=\"robots\" content=\"noindex, nofollow\">\
+         <title>{title} · Orange</title><style>{css}</style></head>\
+         <body><header><a class=\"brand\" href=\"/\">Orange <span>OAG</span></a>\
+         <nav><a href=\"/\">概要</a> <a href=\"/mempool\">mempool</a></nav></header>\
+         <main>{body}</main>\
+         <footer>読むだけの局所エクスプローラ。送金も設定変更もできません。</footer>\
+         </body></html>",
+        title = esc(title),
+        css = CSS,
+        body = body,
+    )
+}
+
+const CSS: &str = "\
+:root{--bg:#fff;--fg:#1a1a1a;--dim:#666;--line:#e3e3e3;--accent:#e8720c;--card:#faf9f7;}\
+@media (prefers-color-scheme:dark){:root{--bg:#16150f;--fg:#ececec;--dim:#9a9a9a;--line:#333;--accent:#ff9f45;--card:#1f1e18;}}\
+*{box-sizing:border-box}\
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,-apple-system,'Hiragino Sans','Noto Sans JP',sans-serif;}\
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;justify-content:space-between;\
+padding:14px 16px;border-bottom:1px solid var(--line);}\
+.brand{font-weight:700;font-size:18px;color:var(--accent);text-decoration:none}\
+.brand span{color:var(--dim);font-weight:400;font-size:13px}\
+nav a{color:var(--dim);text-decoration:none;margin-left:12px}\
+nav a:hover{color:var(--accent)}\
+main{max-width:960px;margin:0 auto;padding:16px;}\
+footer{max-width:960px;margin:0 auto;padding:24px 16px;color:var(--dim);font-size:12px}\
+h1{font-size:20px;margin:16px 0 4px}h2{font-size:16px;margin:28px 0 8px}\
+a{color:var(--accent)}\
+.search{display:flex;gap:8px;margin:8px 0 20px}\
+.search input{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;\
+background:var(--card);color:var(--fg);font-size:16px}\
+.search button{padding:10px 16px;border:0;border-radius:8px;background:var(--accent);color:#fff;font-size:15px;cursor:pointer}\
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin:12px 0}\
+.stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}\
+.stat .label{color:var(--dim);font-size:12px}\
+.stat .value{font-size:18px;font-variant-numeric:tabular-nums;margin-top:2px}\
+.wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--line);border-radius:10px}\
+table{border-collapse:collapse;width:100%;min-width:480px}\
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}\
+tr:last-child th,tr:last-child td{border-bottom:0}\
+th{color:var(--dim);font-weight:500;font-size:13px}\
+.num{text-align:right;font-variant-numeric:tabular-nums}\
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}\
+.break{word-break:break-all;white-space:normal}\
+.trunc{max-width:22ch;overflow:hidden;text-overflow:ellipsis}\
+.note{color:var(--dim);font-size:13px}\
+.warn{color:#d97706}.ok{color:#16a34a}\
+.plus{color:#16a34a}.minus{color:#dc2626}\
+.tag{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:11px;color:var(--dim)}\
+.nav{margin:16px 0}\
+code{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:13px}\
+";
+
+// ━━━━━━━━ 変換 ━━━━━━━━
+
+/// HTML に埋め込むための逃がし。
+///
+/// **経路もクエリも利用者が決める文字列である。** そのまま埋めると、
+/// 局所の頁とはいえ任意の script を仕込める。すべての埋め込みはここを通す。
+fn esc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// 長い識別子を頭と尻だけにする。
+fn shorten(s: &str) -> String {
+    if s.chars().count() <= 20 {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let head: String = chars[..10].iter().collect();
+    let tail: String = chars[chars.len() - 6..].iter().collect();
+    format!("{head}…{tail}")
+}
+
+/// 3 桁ごとに区切る。
+fn group(n: u64) -> String {
+    let text = n.to_string();
+    let mut out = String::with_capacity(text.len() + text.len() / 3);
+    for (i, c) in text.chars().enumerate() {
+        if i > 0 && (text.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// 最小単位を OAG の表記にする。
+fn atomic_to_oag(atomic: u128) -> String {
+    match Amount::from_atomic(atomic) {
+        Ok(amount) => amount.to_string(),
+        Err(_) => atomic.to_string(),
+    }
+}
+
+/// Unix 秒を UTC の表記にする。
+///
+/// 暦の変換は Howard Hinnant の `civil_from_days` による。外部の暦を
+/// 引き込むほどの用途ではない。
+fn utc(timestamp: i64) -> String {
+    let days = timestamp.div_euclid(86_400);
+    let secs = timestamp.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// パーセント符号化を戻す。
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// クエリ文字列から 1 つ取り出す。
+fn query_value(query: &str, name: &str) -> Option<String> {
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=')?;
+        if key == name {
+            return Some(percent_decode(value));
+        }
+    }
+    None
+}
+
+impl TxRecord {
+    fn txid_text(&self) -> String {
+        self.location.txid.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn everything_that_goes_into_a_page_is_escaped() {
+        assert_eq!(esc("<script>"), "&lt;script&gt;");
+        assert_eq!(esc("a&b"), "a&amp;b");
+        assert_eq!(esc("\"><svg"), "&quot;&gt;&lt;svg");
+        assert_eq!(esc("it's"), "it&#39;s");
+        // 日本語はそのまま通る。
+        assert_eq!(esc("高さ"), "高さ");
+    }
+
+    #[test]
+    fn percent_encoding_is_undone() {
+        assert_eq!(percent_decode("/address/%3Cscript%3E"), "/address/<script>");
+        assert_eq!(percent_decode("a+b"), "a b");
+        // 半端な % はそのまま残す。落とすと別の文字列になる。
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn a_query_value_is_picked_out_by_name() {
+        assert_eq!(query_value("q=abc&from=5", "q").as_deref(), Some("abc"));
+        assert_eq!(query_value("q=abc&from=5", "from").as_deref(), Some("5"));
+        assert_eq!(query_value("q=abc", "missing"), None);
+        assert_eq!(query_value("", "q"), None);
+    }
+
+    #[test]
+    fn timestamps_are_shown_as_utc() {
+        assert_eq!(utc(0), "1970-01-01 00:00:00");
+        assert_eq!(utc(1_700_000_000), "2023-11-14 22:13:20");
+        // 閏年の 2 月 29 日を跨ぐところ。
+        assert_eq!(utc(1_709_164_800), "2024-02-29 00:00:00");
+        // 1970 より前も崩れない。
+        assert_eq!(utc(-1), "1969-12-31 23:59:59");
+    }
+
+    #[test]
+    fn long_identifiers_are_shortened_in_the_middle() {
+        let hash = "0".repeat(64);
+        let short = shorten(&hash);
+        assert!(short.contains('…'));
+        assert!(short.len() < hash.len());
+        // 短いものはそのまま。
+        assert_eq!(shorten("abc"), "abc");
+    }
+
+    #[test]
+    fn numbers_are_grouped_in_threes() {
+        assert_eq!(group(0), "0");
+        assert_eq!(group(999), "999");
+        assert_eq!(group(1_000), "1,000");
+        assert_eq!(group(24_850), "24,850");
+        assert_eq!(group(1_234_567), "1,234,567");
+    }
+}

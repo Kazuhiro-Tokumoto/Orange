@@ -13,25 +13,34 @@
 //! | `getblockhash` | `[高さ]` | その高さのブロックハッシュ |
 //! | `getblockheader` | `[ハッシュ]` | ヘッダの中身 |
 //! | `getblock` | `[ハッシュ, 詳細=true]` | ブロック。`false` なら 16 進 |
-//! | `getrawtransaction` | `[txid]` | mempool にあれば 16 進 |
+//! | `getrawtransaction` | `[txid, 詳細=false]` | 取引。索引が無ければ mempool のみ |
+//! | `getaddresshistory` | `[アドレス, 開始=0, 件数=100]` | そのアドレスに触れた取引 |
+//! | `getindexinfo` | なし | 索引を持っているか |
 //! | `getmempool` | なし | mempool の txid 一覧 |
 //! | `sendrawtransaction` | `[16 進]` | 受理された txid |
 //! | `scanutxos` | `[[アドレス, …]]` | 一致する UTXO |
 //!
-//! # `getrawtransaction` が mempool しか見ない理由
+//! # 索引は任意である
 //!
-//! txid から取引を引く索引を持っていない (`docs/SPEC.md` の未決事項)。
-//! コンセンサスが必要とする索引は UTXO セットだけであり、全取引の索引は
-//! チェーンの 1/3 に相当する容量を要する。**確定した取引を引きたい場合は、
-//! それが入っているブロックを `getblock` で取り、その中から探す。**
+//! コンセンサスが必要とする索引は UTXO セットだけである。txid から取引を
+//! 引く索引も、支払い条件から取引を引く索引も、**検証には要らない**
+//! (`docs/SPEC.md` §19)。満杯のブロックが続けば年 37 GB を要するので、
+//! 既定では作らない。
+//!
+//! 運用者が `--index` を付けたときだけ作られ、そのとき
+//! `getrawtransaction` は確定した取引も引けるようになり、
+//! `getaddresshistory` が使えるようになる。
+//!
+//! **索引が無いときは、空の答えではなく誤りを返す。** 「見つからない」と
+//! 答えると、呼び出し側はそれを「その取引は存在しない」と受け取るためで
+//! ある。索引の有無は `getindexinfo` で分かる。
 //!
 //! # `scanutxos` が全件走査である理由
 //!
-//! 同じ理由で、支払い条件から UTXO を引く索引も無い。ウォレットは
-//! UTXO セットを丸ごと見て自分のものを拾う。bitcoind の `scantxoutset`
-//! と同じ方式である。
+//! 残高は UTXO セットを丸ごと見て拾う。こちらは索引の有無によらず動く。
+//! bitcoind の `scantxoutset` と同じ方式である。
 
-use crate::service::{NodeHandle, UtxoRecord};
+use crate::service::{NodeHandle, TxRecord, UtxoRecord};
 use oag_consensus::codec::{Decode, Encode};
 use oag_consensus::lock::Lock;
 use oag_consensus::{Block, BlockHeader, Transaction};
@@ -164,13 +173,11 @@ async fn call(handle: &NodeHandle, method: &str, params: Value) -> Result<Value,
             }))
         }
         "getblock" => get_block(handle, &params).await,
-        "getrawtransaction" => {
-            let txid = as_hash(&arg(&params, 0, "txid")?, "txid")?;
-            let tx = handle.mempool_tx(txid).await.map_err(node_error)?;
-            tx.map(|tx| json!(to_hex(&tx.encode())))
-                .ok_or_else(|| RpcError::not_found(
-                    format!("{txid} は mempool に無い。確定した取引はそれが入っているブロックを getblock で取って探すこと"),
-                ))
+        "getrawtransaction" => get_raw_transaction(handle, &params).await,
+        "getaddresshistory" => get_address_history(handle, &params).await,
+        "getindexinfo" => {
+            let from = handle.index_from().await.map_err(node_error)?;
+            Ok(json!({ "indexed": from.is_some(), "from": from }))
         }
         "getmempool" => {
             let txids = handle.mempool_txids().await.map_err(node_error)?;
@@ -233,6 +240,93 @@ async fn send_raw_transaction(handle: &NodeHandle, params: &Value) -> Result<Val
     Ok(json!(txid.to_string()))
 }
 
+/// 1 度に返す履歴の上限。
+///
+/// 応答が際限なく膨らまないようにする。続きは `開始` をずらして呼ぶ。
+const MAX_HISTORY_RESULTS: usize = 1_000;
+
+async fn get_raw_transaction(handle: &NodeHandle, params: &Value) -> Result<Value, RpcError> {
+    let txid = as_hash(&arg(params, 0, "txid")?, "txid")?;
+    let verbose = params.get(1).and_then(Value::as_bool).unwrap_or(false);
+    let network = handle.network();
+
+    // 確定したものを先に見る。索引が無ければ mempool だけになる。
+    if handle.index_from().await.map_err(node_error)?.is_some() {
+        if let Some(record) = handle.tx_record(txid).await.map_err(node_error)? {
+            return Ok(if verbose {
+                record_json(&record, network)
+            } else {
+                json!(to_hex(&record.tx.encode()))
+            });
+        }
+    }
+
+    if let Some(tx) = handle.mempool_tx(txid).await.map_err(node_error)? {
+        let mut value = if verbose {
+            tx_json(&tx, network)
+        } else {
+            return Ok(json!(to_hex(&tx.encode())));
+        };
+        if let Some(map) = value.as_object_mut() {
+            map.insert("confirmed".to_string(), json!(false));
+        }
+        return Ok(value);
+    }
+
+    // 索引が無い場合は「無い」ではなく「引けない」と答える。取り違えると
+    // 呼び出し側が、確定済みの取引を存在しないものとして扱う。
+    if handle.index_from().await.map_err(node_error)?.is_none() {
+        return Err(RpcError::not_found(format!(
+            "{txid} は mempool に無い。確定した取引を txid で引くには索引が要る (--index を付けて起動する)。\
+             索引を持たないまま探すなら、入っているブロックを getblock で取ってその中から探すこと"
+        )));
+    }
+    Err(RpcError::not_found(format!("{txid} という取引は無い")))
+}
+
+async fn get_address_history(handle: &NodeHandle, params: &Value) -> Result<Value, RpcError> {
+    let text = as_str(&arg(params, 0, "address")?, "address")?;
+    let network = handle.network();
+    let address = Address::decode_on(network, &text)
+        .map_err(|e| RpcError::invalid_params(format!("アドレス {text} が不正: {e}")))?;
+    let lock = Lock::from_address(&address);
+
+    let from = match params.get(1) {
+        Some(value) if !value.is_null() => as_u64(value, "from")?,
+        _ => 0,
+    };
+    let count = match params.get(2) {
+        Some(value) if !value.is_null() => as_u64(value, "count")? as usize,
+        _ => 100,
+    }
+    .min(MAX_HISTORY_RESULTS);
+
+    if handle.index_from().await.map_err(node_error)?.is_none() {
+        return Err(node_error(
+            "索引を持っていないので履歴を引けない (--index を付けて起動すること)".to_string(),
+        ));
+    }
+
+    let history = handle
+        .address_history(lock, from, count)
+        .await
+        .map_err(node_error)?;
+
+    Ok(json!({
+        "address": text,
+        "from": from,
+        "count": history.len(),
+        // 上限に達したなら、返した分がすべてではない。次は最後の高さから
+        // 続きを頼む。呼び出し側がそれを知らないまま履歴を出すと、途中で
+        // 切れたものを全部だと思い込む。
+        "truncated": history.len() >= count,
+        "tx": history
+            .iter()
+            .map(|record| record_json(record, network))
+            .collect::<Vec<Value>>(),
+    }))
+}
+
 async fn scan_utxos(handle: &NodeHandle, params: &Value) -> Result<Value, RpcError> {
     let list = arg(params, 0, "addresses")?;
     let entries = list
@@ -288,6 +382,41 @@ fn utxo_json(record: &UtxoRecord, locks: &[Lock], texts: &[String]) -> Value {
         "lockversion": record.entry.output.lock.version(),
         "lock": to_hex(record.entry.output.lock.payload()),
     })
+}
+
+/// 索引が見つけた取引。入力側の金額と相手まで埋めて返す。
+fn record_json(record: &TxRecord, network: Network) -> Value {
+    let mut value = tx_json(&record.tx, network);
+    if let Some(map) = value.as_object_mut() {
+        map.insert("confirmed".to_string(), json!(true));
+        map.insert("height".to_string(), json!(record.location.height));
+        map.insert(
+            "blockhash".to_string(),
+            json!(record.location.block.to_string()),
+        );
+        map.insert("position".to_string(), json!(record.location.position));
+
+        // 入力が指す出力を、同じ並びで vin に足す。これが無いと
+        // 「いくら・誰から」が表示できない。
+        if let Some(Value::Array(vin)) = map.get_mut("vin") {
+            for (slot, spent) in vin.iter_mut().zip(record.spent.iter()) {
+                let Some(prev) = spent else { continue };
+                let Some(slot) = slot.as_object_mut() else {
+                    continue;
+                };
+                slot.insert(
+                    "amount".to_string(),
+                    json!(prev.amount.to_atomic().to_string()),
+                );
+                slot.insert("amountoag".to_string(), json!(prev.amount.to_string()));
+                slot.insert(
+                    "address".to_string(),
+                    json!(prev.lock.to_address(network).ok().map(|a| a.to_string())),
+                );
+            }
+        }
+    }
+    value
 }
 
 fn header_json(header: &BlockHeader) -> Value {

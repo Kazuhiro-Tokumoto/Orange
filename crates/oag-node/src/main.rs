@@ -90,6 +90,30 @@ enum Command {
         /// RPC を待ち受けない。
         #[arg(long)]
         no_rpc: bool,
+        /// 取引索引とアドレス索引を作る。
+        ///
+        /// **既定では作らない。** コンセンサスはこれを必要とせず
+        /// (`docs/SPEC.md` §19)、満杯のブロックが続けば年 37 GB を要する。
+        /// 作ると `getrawtransaction` が確定した取引も引けるようになり、
+        /// `getaddresshistory` とエクスプローラが使えるようになる。
+        ///
+        /// 初回は鎖全体を走査する。索引は以後、ブロックの接続と同じ
+        /// トランザクションの中で更新されるので、組み直す必要はない。
+        #[arg(long)]
+        index: bool,
+        /// 索引を捨てる。`--index` と同時には指定できない。
+        #[arg(long, conflicts_with = "index")]
+        drop_index: bool,
+        /// エクスプローラを待ち受ける住所。既定は `127.0.0.1:8080`。
+        ///
+        /// **読むだけの口である。** 送金も設定変更もできない。索引が要る
+        /// ので、渡すと `--index` も指定したものとして扱う。
+        ///
+        /// ループバック以外を指定すると外から見えるようになる。中身は
+        /// 公開情報だが、自分のノードが動いていること自体を晒すことになる。
+        #[arg(long, value_name = "住所", num_args = 0..=1,
+              default_missing_value = "127.0.0.1:8080")]
+        explorer: Option<SocketAddr>,
         /// 採掘も接続も終わったら、この秒数で終了する。
         ///
         /// 試験のためのもの。省略すると終了しない。
@@ -161,6 +185,9 @@ fn run() -> Result<(), String> {
             connect,
             rpc,
             no_rpc,
+            index,
+            drop_index,
+            explorer,
             exit_after,
         } => {
             let network = common.network()?;
@@ -205,11 +232,37 @@ fn run() -> Result<(), String> {
                     tokio::spawn(accept_loop(handle.clone(), listener));
                 }
 
+                if drop_index {
+                    handle.drop_index().await?;
+                    println!("索引を捨てた");
+                }
+
+                // エクスプローラは索引に頼る。無いまま開いても取引と
+                // アドレスが引けないので、暗黙に作る。
+                if index || explorer.is_some() {
+                    match handle.index_from().await? {
+                        Some(0) => println!("索引は既にある"),
+                        _ => {
+                            println!("索引を作る (鎖全体を走査する)");
+                            let stats = handle.build_index().await?;
+                            println!(
+                                "索引を作った: ブロック {} 件、取引 {} 件、アドレス項目 {} 件",
+                                stats.blocks, stats.transactions, stats.addr_entries
+                            );
+                        }
+                    }
+                }
+
                 if !no_rpc {
                     let addr = rpc.unwrap_or_else(|| {
                         SocketAddr::new(network.rpc_bind_default(), network.rpc_port())
                     });
                     oag_node::start_rpc(handle.clone(), addr, &common.datadir).await?;
+                }
+
+                if let Some(addr) = explorer {
+                    let bound = oag_node::explorer::start_explorer(handle.clone(), addr).await?;
+                    println!("エクスプローラを http://{bound}/ で開いた");
                 }
 
                 if !external_addr.is_empty() {

@@ -34,5 +34,6 @@
 #![warn(missing_docs, clippy::all)]
 
 mod store;
+pub mod txindex;
 
-pub use store::{Store, StoreError, StoreView};
+pub use store::{IndexStats, Store, StoreError, StoreView, TxLocation};

@@ -4,13 +4,17 @@ use oag_chain::index::BlockIndexEntry;
 use oag_consensus::codec::{CodecError, Decode, Encode};
 use oag_consensus::lock::Lock;
 use oag_consensus::tx::OutPoint;
+use oag_consensus::tx::TxOutput;
 use oag_consensus::utxo::{
     apply_block_to, undo_block_from, UndoBlock, UtxoEntry, UtxoError, UtxoView, UtxoWrite,
 };
-use oag_consensus::Block;
+use oag_consensus::{Block, Transaction};
 use oag_primitives::Hash;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+use std::collections::HashMap;
 use std::path::Path;
+
+use crate::txindex::{self, KEY_LEN};
 
 type Bytes = &'static [u8];
 
@@ -26,8 +30,26 @@ const UTXO: TableDefinition<'static, Bytes, Bytes> = TableDefinition::new("utxo"
 const ACTIVE: TableDefinition<'static, u64, Bytes> = TableDefinition::new("active_chain");
 /// その他の記録。
 const META: TableDefinition<'static, &'static str, Bytes> = TableDefinition::new("meta");
+/// 取引索引。txid の接頭辞 ++ 高さ ++ 位置 → なし。
+///
+/// **既定では空である。** 運用者が索引を有効にしたときだけ作られる
+/// (SPEC §19)。値を持たないのは、鍵そのものが位置を表すためである。
+const TX_INDEX: TableDefinition<'static, Bytes, ()> = TableDefinition::new("tx_index");
+/// アドレス索引。lock の接頭辞 ++ 高さ ++ 位置 → なし。
+///
+/// 同じく既定では空である。1 つの取引が同じアドレスへ複数の出力を持つ
+/// 場合、鍵は同一になって 1 件に潰れる。**それでよい。** ここが答える
+/// のは「どの取引がこのアドレスに触れたか」であって、何回触れたかは
+/// 取引そのものを読めば分かる。
+const ADDR_INDEX: TableDefinition<'static, Bytes, ()> = TableDefinition::new("addr_index");
 
 const META_TIP: &str = "tip";
+/// 索引がどの高さから作られているか。**この鍵が無ければ索引は無い。**
+///
+/// 値が 0 なら索引はジェネシスから揃っている。0 でない値は「途中から
+/// 作られた索引」であり、照会は答えを返してはならない。足りない範囲を
+/// 黙って省いた履歴は、無い履歴より悪い。利用者はそれを信じてしまう。
+const META_INDEX_FROM: &str = "index_from";
 
 /// 記憶域の操作で起きうる誤り。
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +75,15 @@ pub enum StoreError {
     /// 入出力に失敗した。
     #[error("入出力に失敗した: {0}")]
     Io(String),
+    /// 索引を持っていない。
+    #[error("索引を持っていない (--index を付けて起動すること)")]
+    NoIndex,
+    /// 索引が途中からしか無い。
+    #[error("索引は高さ {0} からしか無い。組み直しが要る")]
+    PartialIndex(u64),
+    /// 索引の鍵に収まらない値があった。
+    #[error(transparent)]
+    Key(#[from] crate::txindex::KeyError),
 }
 
 fn db_err<E: std::fmt::Display>(e: E) -> StoreError {
@@ -126,6 +157,134 @@ impl UtxoView for StoreView {
     }
 }
 
+// ━━━━━━━━ 索引 ━━━━━━━━
+
+/// ブロック 1 個分の索引の鍵。`(取引索引, アドレス索引)`。
+type IndexKeys = (Vec<[u8; KEY_LEN]>, Vec<[u8; KEY_LEN]>);
+
+/// ブロック 1 個分の索引の鍵。
+///
+/// `(取引索引の鍵, アドレス索引の鍵)` を返す。接続でも切断でも**同じ関数
+/// から作る**。別々に書くと、入れた鍵と消す鍵が食い違ったときに索引へ
+/// ごみが残り、それは二度と消えない。
+fn index_keys(block: &Block, undo: &UndoBlock, height: u64) -> Result<IndexKeys, StoreError> {
+    // 入力は OutPoint しか名乗らない。「誰のコインを使ったか」は消費された
+    // 出力を見なければ分からず、その出力は UTXO セットから既に消えている。
+    // 巻き戻し情報が唯一の手掛かりである。
+    let mut spent: HashMap<([u8; 32], u32), &Lock> = HashMap::new();
+    for (outpoint, entry) in undo.spent() {
+        spent.insert(
+            (outpoint.txid.to_bytes(), outpoint.index),
+            &entry.output.lock,
+        );
+    }
+
+    let mut tx_keys = Vec::with_capacity(block.transactions.len());
+    let mut addr_keys = Vec::new();
+
+    for (position, tx) in block.transactions.iter().enumerate() {
+        let txid = tx.txid();
+        tx_keys.push(txindex::key(txindex::tx_prefix(&txid), height, position)?);
+
+        for output in &tx.outputs {
+            addr_keys.push(txindex::key(
+                txindex::lock_prefix(&output.lock),
+                height,
+                position,
+            )?);
+        }
+        for input in &tx.inputs {
+            // コインベースの空参照は何も消費していない。巻き戻し情報にも
+            // 載らないので、ここで自然に外れる。
+            let Some(lock) = spent.get(&(input.prev_out.txid.to_bytes(), input.prev_out.index))
+            else {
+                continue;
+            };
+            addr_keys.push(txindex::key(txindex::lock_prefix(lock), height, position)?);
+        }
+    }
+
+    Ok((tx_keys, addr_keys))
+}
+
+/// ブロックを索引に加える。呼び出し側の書き込みトランザクションの中で行う。
+fn write_index(
+    txn: &redb::WriteTransaction,
+    block: &Block,
+    undo: &UndoBlock,
+    height: u64,
+) -> Result<(), StoreError> {
+    let (tx_keys, addr_keys) = index_keys(block, undo, height)?;
+    let mut tx_table = txn.open_table(TX_INDEX).map_err(db_err)?;
+    for key in &tx_keys {
+        tx_table.insert(key.as_slice(), ()).map_err(db_err)?;
+    }
+    let mut addr_table = txn.open_table(ADDR_INDEX).map_err(db_err)?;
+    for key in &addr_keys {
+        addr_table.insert(key.as_slice(), ()).map_err(db_err)?;
+    }
+    Ok(())
+}
+
+/// ブロックを索引から取り除く。リオーグで用いる。
+fn erase_index(
+    txn: &redb::WriteTransaction,
+    block: &Block,
+    undo: &UndoBlock,
+    height: u64,
+) -> Result<(), StoreError> {
+    let (tx_keys, addr_keys) = index_keys(block, undo, height)?;
+    let mut tx_table = txn.open_table(TX_INDEX).map_err(db_err)?;
+    for key in &tx_keys {
+        tx_table.remove(key.as_slice()).map_err(db_err)?;
+    }
+    let mut addr_table = txn.open_table(ADDR_INDEX).map_err(db_err)?;
+    for key in &addr_keys {
+        addr_table.remove(key.as_slice()).map_err(db_err)?;
+    }
+    Ok(())
+}
+
+/// META から索引の状態を読む。
+fn index_from_in<T: ReadableTable<&'static str, Bytes>>(
+    meta: &T,
+) -> Result<Option<u64>, StoreError> {
+    match meta.get(META_INDEX_FROM).map_err(db_err)? {
+        Some(guard) => {
+            let bytes: [u8; 8] = guard
+                .value()
+                .try_into()
+                .map_err(|_| StoreError::Db("索引の記録が壊れている".to_string()))?;
+            Ok(Some(u64::from_le_bytes(bytes)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// 索引が指し示した取引の位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxLocation {
+    /// 取引の ID。
+    pub txid: Hash,
+    /// 入っているブロックの高さ。
+    pub height: u64,
+    /// ブロック内の並び順。0 はコインベースである。
+    pub position: usize,
+    /// 入っているブロックのハッシュ。
+    pub block: Hash,
+}
+
+/// 索引を組み直した結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IndexStats {
+    /// 索引したブロック数。
+    pub blocks: u64,
+    /// 索引した取引数。
+    pub transactions: u64,
+    /// アドレス索引に入れた件数。
+    pub addr_entries: u64,
+}
+
 /// 永続化された記憶域。
 pub struct Store {
     db: Database,
@@ -143,6 +302,8 @@ impl Store {
         txn.open_table(UTXO).map_err(db_err)?;
         txn.open_table(ACTIVE).map_err(db_err)?;
         txn.open_table(META).map_err(db_err)?;
+        txn.open_table(TX_INDEX).map_err(db_err)?;
+        txn.open_table(ADDR_INDEX).map_err(db_err)?;
         txn.commit().map_err(db_err)?;
         Ok(Store { db })
     }
@@ -316,6 +477,11 @@ impl Store {
             apply_block_to(&mut utxo, &block.transactions, height)?
         };
 
+        let indexed = {
+            let meta = txn.open_table(META).map_err(db_err)?;
+            index_from_in(&meta)?.is_some()
+        };
+
         {
             let key = hash.to_bytes();
             let mut undo_table = txn.open_table(UNDO).map_err(db_err)?;
@@ -328,6 +494,14 @@ impl Store {
 
             let mut meta = txn.open_table(META).map_err(db_err)?;
             meta.insert(META_TIP, key.as_slice()).map_err(db_err)?;
+        }
+
+        // 索引も同じトランザクションの中で更新する。**別に分けてはならない。**
+        // 分けると「UTXO は進んだが索引は古い」状態が存在しうるようになり、
+        // 電源が落ちるたびにその食い違いを直す仕掛けが要る。ここに入れて
+        // おけば、索引は常に UTXO セットと同じ地点を指している。
+        if indexed {
+            write_index(&txn, block, &undo, height)?;
         }
 
         txn.commit().map_err(db_err)?;
@@ -362,6 +536,11 @@ impl Store {
             undo_block_from(&mut utxo, &undo)?;
         }
 
+        let indexed = {
+            let meta = txn.open_table(META).map_err(db_err)?;
+            index_from_in(&meta)?.is_some()
+        };
+
         {
             let mut active = txn.open_table(ACTIVE).map_err(db_err)?;
             active.remove(entry.height()).map_err(db_err)?;
@@ -375,8 +554,317 @@ impl Store {
             }
         }
 
+        // 索引からも同じブロックの分を取り除く。接続と同じ関数で鍵を
+        // 作っているので、入れたものと消すものは必ず一致する。
+        if indexed {
+            let block = {
+                let blocks = txn.open_table(BLOCKS).map_err(db_err)?;
+                let guard = blocks
+                    .get(tip.to_bytes().as_slice())
+                    .map_err(db_err)?
+                    .ok_or(StoreError::MissingBlock(tip))?;
+                Block::decode(guard.value())?
+            };
+            erase_index(&txn, &block, &undo, entry.height())?;
+        }
+
         txn.commit().map_err(db_err)?;
         Ok(tip)
+    }
+
+    // ━━━━━━━━ 索引 ━━━━━━━━
+
+    /// 索引がどの高さから作られているか。持っていなければ `None`。
+    pub fn index_from(&self) -> Result<Option<u64>, StoreError> {
+        let txn = self.db.begin_read().map_err(db_err)?;
+        let meta = txn.open_table(META).map_err(db_err)?;
+        index_from_in(&meta)
+    }
+
+    /// 索引がジェネシスから揃っているか確かめる。
+    ///
+    /// 揃っていなければ理由を誤りとして返す。**照会の入口で必ず通す。**
+    fn require_index(&self) -> Result<(), StoreError> {
+        match self.index_from()? {
+            Some(0) => Ok(()),
+            Some(from) => Err(StoreError::PartialIndex(from)),
+            None => Err(StoreError::NoIndex),
+        }
+    }
+
+    /// 索引を作る、または組み直す。
+    ///
+    /// アクティブチェーンをジェネシスから走査して作り直す。既にあるものは
+    /// 捨てる。入力側のアドレスは巻き戻し情報から引く。
+    ///
+    /// # なぜ 1 つのトランザクションで行うのか
+    ///
+    /// 途中で電源が落ちたときに**半分だけの索引が残るのが最悪である**。
+    /// 索引は「無い」なら照会を断れる。しかし「半分ある」ことを知らなければ、
+    /// 欠けた履歴を完全なものとして返してしまう。利用者はそれを信じる。
+    ///
+    /// 1 つにまとめておけば、索引は必ず「完全にある」か「まったく無い」かの
+    /// どちらかになる。区別のつく状態しか作らない。
+    pub fn build_index(&self) -> Result<IndexStats, StoreError> {
+        let txn = self.db.begin_write().map_err(db_err)?;
+        let mut stats = IndexStats::default();
+
+        // 作り直しなので、残っているものは捨てる。索引を縮めたときに
+        // 古い鍵が居座ると、消えたはずの取引を指し続ける。
+        txn.delete_table(TX_INDEX).map_err(db_err)?;
+        txn.delete_table(ADDR_INDEX).map_err(db_err)?;
+
+        let chain: Vec<(u64, Hash)> = {
+            let active = txn.open_table(ACTIVE).map_err(db_err)?;
+            let mut out = Vec::new();
+            for row in active.iter().map_err(db_err)? {
+                let (height, hash) = row.map_err(db_err)?;
+                let hash = Hash::from_slice(hash.value()).map_err(|_| StoreError::NoTip)?;
+                out.push((height.value(), hash));
+            }
+            out
+        };
+
+        {
+            let mut tx_table = txn.open_table(TX_INDEX).map_err(db_err)?;
+            let mut addr_table = txn.open_table(ADDR_INDEX).map_err(db_err)?;
+
+            for (height, hash) in &chain {
+                let (block, undo) = {
+                    let blocks = txn.open_table(BLOCKS).map_err(db_err)?;
+                    let undo_table = txn.open_table(UNDO).map_err(db_err)?;
+                    let block = blocks
+                        .get(hash.as_bytes().as_slice())
+                        .map_err(db_err)?
+                        .ok_or(StoreError::MissingBlock(*hash))?;
+                    let block = Block::decode(block.value())?;
+                    let undo = undo_table
+                        .get(hash.as_bytes().as_slice())
+                        .map_err(db_err)?
+                        .ok_or(StoreError::MissingUndo(*hash))?;
+                    let undo = UndoBlock::decode(undo.value())?;
+                    (block, undo)
+                };
+
+                let (tx_keys, addr_keys) = index_keys(&block, &undo, *height)?;
+                stats.blocks += 1;
+                stats.transactions += tx_keys.len() as u64;
+                stats.addr_entries += addr_keys.len() as u64;
+
+                for key in &tx_keys {
+                    tx_table.insert(key.as_slice(), ()).map_err(db_err)?;
+                }
+                for key in &addr_keys {
+                    addr_table.insert(key.as_slice(), ()).map_err(db_err)?;
+                }
+            }
+        }
+
+        {
+            let mut meta = txn.open_table(META).map_err(db_err)?;
+            meta.insert(META_INDEX_FROM, 0u64.to_le_bytes().as_slice())
+                .map_err(db_err)?;
+        }
+
+        txn.commit().map_err(db_err)?;
+        Ok(stats)
+    }
+
+    /// 索引を捨てる。
+    pub fn drop_index(&self) -> Result<(), StoreError> {
+        let txn = self.db.begin_write().map_err(db_err)?;
+        txn.delete_table(TX_INDEX).map_err(db_err)?;
+        txn.delete_table(ADDR_INDEX).map_err(db_err)?;
+        txn.open_table(TX_INDEX).map_err(db_err)?;
+        txn.open_table(ADDR_INDEX).map_err(db_err)?;
+        {
+            let mut meta = txn.open_table(META).map_err(db_err)?;
+            meta.remove(META_INDEX_FROM).map_err(db_err)?;
+        }
+        txn.commit().map_err(db_err)
+    }
+
+    /// アクティブチェーンの指定した位置の取引を読む。
+    pub fn transaction_at(
+        &self,
+        height: u64,
+        position: usize,
+    ) -> Result<Option<Transaction>, StoreError> {
+        let Some(hash) = self.hash_at_height(height)? else {
+            return Ok(None);
+        };
+        let Some(block) = self.block(&hash)? else {
+            return Ok(None);
+        };
+        Ok(block.transactions.get(position).cloned())
+    }
+
+    /// txid から取引の位置を引く。
+    ///
+    /// 索引の鍵は txid の頭 8 バイトしか持たない。**したがって候補を
+    /// 完全な txid と突き合わせる。** 一致したものだけを返す。
+    pub fn tx_location(&self, txid: &Hash) -> Result<Option<TxLocation>, StoreError> {
+        self.require_index()?;
+        let candidates =
+            self.candidates(TX_INDEX, txindex::tx_prefix(txid), 0, Self::CANDIDATE_SLACK)?;
+        for (height, position) in candidates {
+            let Some(tx) = self.transaction_at(height, position)? else {
+                continue;
+            };
+            if tx.txid() != *txid {
+                // 接頭辞の衝突。捨てる。
+                continue;
+            }
+            let block = self.hash_at_height(height)?.ok_or(StoreError::NoTip)?;
+            return Ok(Some(TxLocation {
+                txid: *txid,
+                height,
+                position,
+                block,
+            }));
+        }
+        Ok(None)
+    }
+
+    /// 支払い条件に触れた取引を、古い順に引く。
+    ///
+    /// `from` 以降の高さに絞り、`max` 件で打ち切る。こちらも接頭辞の
+    /// 衝突がありうるので、取引を読んで**完全な lock と突き合わせる**。
+    pub fn address_history(
+        &self,
+        lock: &Lock,
+        from: u64,
+        max: usize,
+    ) -> Result<Vec<TxLocation>, StoreError> {
+        self.require_index()?;
+        let candidates = self.candidates(
+            ADDR_INDEX,
+            txindex::lock_prefix(lock),
+            from,
+            max.saturating_add(Self::CANDIDATE_SLACK),
+        )?;
+        let mut out = Vec::new();
+        for (height, position) in candidates {
+            let Some(tx) = self.transaction_at(height, position)? else {
+                continue;
+            };
+            if !self.touches(&tx, height, lock)? {
+                // 接頭辞の衝突。捨てる。
+                continue;
+            }
+            out.push(TxLocation {
+                txid: tx.txid(),
+                height,
+                position,
+                block: self.hash_at_height(height)?.ok_or(StoreError::NoTip)?,
+            });
+            if out.len() >= max {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// 取引の各入力が指している出力を引く。
+    ///
+    /// エクスプローラが「どこから来た金か」を出すために要る。使われた
+    /// 出力は UTXO セットに無いので、その取引が入っているブロックの
+    /// 巻き戻し情報から引く。
+    ///
+    /// 入力と同じ並びで返す。引けなかった入力は `None` になる。コインベース
+    /// の空参照は常に `None` である。
+    pub fn spent_outputs(
+        &self,
+        height: u64,
+        tx: &Transaction,
+    ) -> Result<Vec<Option<TxOutput>>, StoreError> {
+        if tx.is_coinbase() {
+            return Ok(tx.inputs.iter().map(|_| None).collect());
+        }
+        let Some(hash) = self.hash_at_height(height)? else {
+            return Ok(tx.inputs.iter().map(|_| None).collect());
+        };
+        let undo = self.undo(&hash)?;
+        Ok(tx
+            .inputs
+            .iter()
+            .map(|input| {
+                undo.spent()
+                    .iter()
+                    .find(|(outpoint, _)| *outpoint == input.prev_out)
+                    .map(|(_, entry)| entry.output.clone())
+            })
+            .collect())
+    }
+
+    /// その取引が本当にこの支払い条件に触れているか。
+    ///
+    /// 出力はそのまま見れば分かる。入力が指す出力は UTXO セットから消えて
+    /// いるので、**その取引が入っているブロックの巻き戻し情報**から引く。
+    /// 索引が高さを教えてくれているので、引くのは 1 ブロック分で足りる。
+    fn touches(&self, tx: &Transaction, height: u64, lock: &Lock) -> Result<bool, StoreError> {
+        if tx.outputs.iter().any(|o| o.lock == *lock) {
+            return Ok(true);
+        }
+        if tx.is_coinbase() {
+            return Ok(false);
+        }
+        let Some(hash) = self.hash_at_height(height)? else {
+            return Ok(false);
+        };
+        let undo = self.undo(&hash)?;
+        Ok(undo.spent().iter().any(|(outpoint, entry)| {
+            entry.output.lock == *lock && tx.inputs.iter().any(|i| i.prev_out == *outpoint)
+        }))
+    }
+
+    /// ブロックの巻き戻し情報を読む。
+    fn undo(&self, hash: &Hash) -> Result<UndoBlock, StoreError> {
+        let txn = self.db.begin_read().map_err(db_err)?;
+        let table = txn.open_table(UNDO).map_err(db_err)?;
+        let guard = table
+            .get(hash.as_bytes().as_slice())
+            .map_err(db_err)?
+            .ok_or(StoreError::MissingUndo(*hash))?;
+        Ok(UndoBlock::decode(guard.value())?)
+    }
+
+    /// 照合で落ちる分の余裕。
+    ///
+    /// 候補は接頭辞が一致しただけのもので、照合して落ちることがある。
+    /// 欲しい件数ちょうどしか集めないと、落ちた分だけ足りなくなる。
+    /// 接頭辞の衝突は 3.5 億件で期待値 0.003 件なので、この余裕は
+    /// 現実にはまず使われない。
+    const CANDIDATE_SLACK: usize = 64;
+
+    /// 接頭辞が一致する索引の項を、古い順に集める。
+    ///
+    /// 鍵の作りが同じなので表は引数で受け取る。**取り違えると別の索引を
+    /// 読むことになる**ので、呼び出し側は接頭辞と表を必ず揃えること。
+    ///
+    /// `max` で打ち切る。よく使われるアドレスは索引の項が何百万件にもなり
+    /// うるので、**50 件欲しいだけのときに全部を集めてはならない**。
+    fn candidates(
+        &self,
+        which: TableDefinition<'static, Bytes, ()>,
+        prefix: [u8; txindex::PREFIX_LEN],
+        from: u64,
+        max: usize,
+    ) -> Result<Vec<(u64, usize)>, StoreError> {
+        let (lo, hi) = txindex::range(prefix, from);
+        let txn = self.db.begin_read().map_err(db_err)?;
+        let table = txn.open_table(which).map_err(db_err)?;
+        let mut out = Vec::new();
+        for row in table.range(lo.as_slice()..=hi.as_slice()).map_err(db_err)? {
+            let (key, _) = row.map_err(db_err)?;
+            if let Some(pair) = txindex::split(key.value()) {
+                out.push(pair);
+            }
+            if out.len() >= max {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     /// アクティブチェーンのブロックをファイルに書き出す。
@@ -875,5 +1363,210 @@ mod tests {
                 "書き出した内容が元のブロックと一致しない"
             );
         }
+    }
+    // ━━━━━━━━ 索引 ━━━━━━━━
+
+    /// 高さ `h` に、コインベース (受取先 `to`) と、任意の使用取引を置く。
+    fn block_with(height: u64, prev: Hash, to: &Lock, extra: Vec<Transaction>) -> Block {
+        let mut cb = coinbase(height, height);
+        cb.outputs[0].lock = to.clone();
+        let mut txs = vec![cb];
+        txs.extend(extra);
+        let ids: Vec<Hash> = txs.iter().map(|t| t.txid()).collect();
+        Block {
+            header: BlockHeader {
+                version: 0,
+                prev_hash: prev,
+                merkle_root: merkle::merkle_root(&ids).unwrap(),
+                timestamp: 1_800_000_000 + height as i64 * 60,
+                difficulty: 1,
+                height,
+                nonce: height,
+            },
+            transactions: txs,
+        }
+    }
+
+    fn spend(prev_out: OutPoint, to: &Lock) -> Transaction {
+        Transaction {
+            version: CURRENT_TX_VERSION,
+            inputs: vec![TxInput::new(prev_out)],
+            outputs: vec![TxOutput::new(Amount::from_atomic(1).unwrap(), to.clone())],
+            locktime: 0,
+        }
+    }
+
+    fn put_and_connect(store: &Store, block: &Block) {
+        store.put_block(block, &entry_for(block, 1)).unwrap();
+        store.connect_block(block).unwrap();
+    }
+
+    #[test]
+    fn without_an_index_a_lookup_is_refused_rather_than_answered_emptily() {
+        // 索引が無いときに「見つからない」と答えてはならない。呼び出し側は
+        // それを「その取引は存在しない」と受け取る。
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let block = block_at(0, Hash::ZERO, 0);
+        put_and_connect(&store, &block);
+
+        assert_eq!(store.index_from().unwrap(), None);
+        let txid = block.transactions[0].txid();
+        assert!(matches!(store.tx_location(&txid), Err(StoreError::NoIndex)));
+    }
+
+    #[test]
+    fn building_the_index_covers_the_chain_that_is_already_there() {
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let mut prev = Hash::ZERO;
+        let mut blocks = Vec::new();
+        for height in 0..5u64 {
+            let block = block_at(height, prev, height);
+            put_and_connect(&store, &block);
+            prev = block.header.hash();
+            blocks.push(block);
+        }
+
+        let stats = store.build_index().unwrap();
+        assert_eq!(stats.blocks, 5);
+        assert_eq!(stats.transactions, 5);
+        assert_eq!(store.index_from().unwrap(), Some(0));
+
+        for (height, block) in blocks.iter().enumerate() {
+            let txid = block.transactions[0].txid();
+            let found = store.tx_location(&txid).unwrap().unwrap();
+            assert_eq!(found.height, height as u64);
+            assert_eq!(found.position, 0);
+            assert_eq!(found.block, block.header.hash());
+        }
+    }
+
+    #[test]
+    fn a_block_connected_after_the_build_is_indexed_too() {
+        // 索引は接続と同じトランザクションで更新される。組み直さなくても
+        // 追いつく。
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let first = block_at(0, Hash::ZERO, 0);
+        put_and_connect(&store, &first);
+        store.build_index().unwrap();
+
+        let second = block_at(1, first.header.hash(), 1);
+        put_and_connect(&store, &second);
+
+        let txid = second.transactions[0].txid();
+        assert_eq!(store.tx_location(&txid).unwrap().unwrap().height, 1);
+    }
+
+    #[test]
+    fn disconnecting_takes_the_block_back_out_of_the_index() {
+        // 取り消したブロックを索引が指し続けると、リオーグで消えた取引が
+        // 永遠に見つかることになる。
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let first = block_at(0, Hash::ZERO, 0);
+        put_and_connect(&store, &first);
+        let second = block_at(1, first.header.hash(), 1);
+        put_and_connect(&store, &second);
+        store.build_index().unwrap();
+
+        let txid = second.transactions[0].txid();
+        assert!(store.tx_location(&txid).unwrap().is_some());
+
+        store.disconnect_tip().unwrap();
+        assert_eq!(store.tx_location(&txid).unwrap(), None);
+        // 残ったほうは無事である。
+        let first_txid = first.transactions[0].txid();
+        assert!(store.tx_location(&first_txid).unwrap().is_some());
+    }
+
+    #[test]
+    fn address_history_covers_both_receiving_and_spending() {
+        // 使われた出力は UTXO セットから消えている。入力側を巻き戻し情報
+        // から拾えていなければ、ここで高さ 1 が落ちる。
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let payer = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
+        let payee = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
+        let other = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
+
+        let first = block_with(0, Hash::ZERO, &payer, Vec::new());
+        put_and_connect(&store, &first);
+
+        let spent = OutPoint::new(first.transactions[0].txid(), 0);
+        let second = block_with(1, first.header.hash(), &other, vec![spend(spent, &payee)]);
+        put_and_connect(&store, &second);
+
+        store.build_index().unwrap();
+
+        let history = store.address_history(&payer, 0, 100).unwrap();
+        assert_eq!(history.len(), 2, "受け取りと使用の両方が出るべき");
+        assert_eq!((history[0].height, history[0].position), (0, 0));
+        assert_eq!((history[1].height, history[1].position), (1, 1));
+
+        // 受け取っただけの相手は 1 件。
+        let history = store.address_history(&payee, 0, 100).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].txid, second.transactions[1].txid());
+    }
+
+    #[test]
+    fn address_history_can_start_partway_and_stop_early() {
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let mine = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
+        let mut prev = Hash::ZERO;
+        for height in 0..6u64 {
+            let block = block_with(height, prev, &mine, Vec::new());
+            put_and_connect(&store, &block);
+            prev = block.header.hash();
+        }
+        store.build_index().unwrap();
+
+        let all = store.address_history(&mine, 0, 100).unwrap();
+        assert_eq!(all.len(), 6);
+        // 古い順である。
+        let heights: Vec<u64> = all.iter().map(|l| l.height).collect();
+        assert_eq!(heights, vec![0, 1, 2, 3, 4, 5]);
+
+        let from_three = store.address_history(&mine, 3, 100).unwrap();
+        assert_eq!(
+            from_three.iter().map(|l| l.height).collect::<Vec<u64>>(),
+            vec![3, 4, 5]
+        );
+
+        let capped = store.address_history(&mine, 0, 2).unwrap();
+        assert_eq!(capped.len(), 2);
+    }
+
+    #[test]
+    fn dropping_the_index_puts_it_back_to_refusing() {
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let block = block_at(0, Hash::ZERO, 0);
+        put_and_connect(&store, &block);
+        store.build_index().unwrap();
+        assert_eq!(store.index_from().unwrap(), Some(0));
+
+        store.drop_index().unwrap();
+        assert_eq!(store.index_from().unwrap(), None);
+        assert!(matches!(
+            store.tx_location(&block.transactions[0].txid()),
+            Err(StoreError::NoIndex)
+        ));
+    }
+
+    #[test]
+    fn an_unrelated_address_has_no_history() {
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let mine = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
+        let block = block_with(0, Hash::ZERO, &mine, Vec::new());
+        put_and_connect(&store, &block);
+        store.build_index().unwrap();
+
+        let stranger = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
+        assert!(store.address_history(&stranger, 0, 100).unwrap().is_empty());
     }
 }

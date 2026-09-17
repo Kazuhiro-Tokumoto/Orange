@@ -27,7 +27,7 @@ use crate::node::{MinedBlock, Node, NodeError, NodeStatus};
 use oag_chain::chain::{AcceptOutcome, HeaderOutcome};
 use oag_chain::index::BlockIndexEntry;
 use oag_consensus::lock::Lock;
-use oag_consensus::tx::OutPoint;
+use oag_consensus::tx::{OutPoint, TxOutput};
 use oag_consensus::utxo::UtxoEntry;
 use oag_consensus::{Block, BlockHeader, Transaction};
 use oag_miner::pool::{HasherFactory, MiningPool};
@@ -37,6 +37,7 @@ use oag_net::message::MAX_HEADERS;
 use oag_net::sync::{BlockDownload, PeerId, TxRequests};
 use oag_pow::randomx::{RandomXMiner, RandomXVerifier};
 use oag_primitives::{Hash, Network};
+use oag_store::{IndexStats, TxLocation};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -323,6 +324,24 @@ enum Request {
         max: usize,
         reply: oneshot::Sender<Result<Vec<UtxoRecord>, String>>,
     },
+    /// 索引がどの高さから作られているか。
+    IndexFrom(oneshot::Sender<Result<Option<u64>, String>>),
+    /// txid から確定した取引を引く。索引が要る。
+    TxRecord {
+        txid: Hash,
+        reply: oneshot::Sender<Result<Option<TxRecord>, String>>,
+    },
+    /// 支払い条件に触れた取引を古い順に引く。索引が要る。
+    AddressHistory {
+        lock: Lock,
+        from: u64,
+        max: usize,
+        reply: oneshot::Sender<Result<Vec<TxRecord>, String>>,
+    },
+    /// 索引を作る、または組み直す。
+    BuildIndex(oneshot::Sender<Result<IndexStats, String>>),
+    /// 索引を捨てる。
+    DropIndex(oneshot::Sender<Result<(), String>>),
     /// 作業スレッドを終わらせる。
     Shutdown,
 }
@@ -334,6 +353,21 @@ pub struct UtxoRecord {
     pub outpoint: OutPoint,
     /// 出力の中身と、生成された高さ。
     pub entry: UtxoEntry,
+}
+
+/// 索引が見つけた、確定した取引の 1 件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxRecord {
+    /// どこに入っているか。
+    pub location: TxLocation,
+    /// 取引そのもの。
+    pub tx: Transaction,
+    /// 各入力が指している出力。入力と同じ並び。
+    ///
+    /// **これが無いと入力側の金額も相手も表示できない。** 入力は
+    /// `OutPoint` しか持たず、指している出力は UTXO セットから消えて
+    /// いるためである。コインベースでは `None` が並ぶ。
+    pub spent: Vec<Option<TxOutput>>,
 }
 
 /// 非同期側から専用スレッドを使うための取っ手。
@@ -623,6 +657,44 @@ impl NodeHandle {
     /// mempool のトランザクション。
     pub async fn mempool_tx(&self, txid: Hash) -> Result<Option<Transaction>, String> {
         self.ask(|reply| Request::MempoolTx { txid, reply }).await
+    }
+
+    /// 索引がどの高さから作られているか。持っていなければ `None`。
+    pub async fn index_from(&self) -> Result<Option<u64>, String> {
+        self.ask(Request::IndexFrom).await
+    }
+
+    /// 索引を作る、または組み直す。
+    ///
+    /// アクティブチェーン全体を走査するので、鎖が長いと時間がかかる。
+    pub async fn build_index(&self) -> Result<IndexStats, String> {
+        self.ask(Request::BuildIndex).await
+    }
+
+    /// 索引を捨てる。
+    pub async fn drop_index(&self) -> Result<(), String> {
+        self.ask(Request::DropIndex).await
+    }
+
+    /// txid から確定した取引を引く。
+    pub async fn tx_record(&self, txid: Hash) -> Result<Option<TxRecord>, String> {
+        self.ask(|reply| Request::TxRecord { txid, reply }).await
+    }
+
+    /// 支払い条件に触れた取引を古い順に引く。
+    pub async fn address_history(
+        &self,
+        lock: Lock,
+        from: u64,
+        max: usize,
+    ) -> Result<Vec<TxRecord>, String> {
+        self.ask(|reply| Request::AddressHistory {
+            lock,
+            from,
+            max,
+            reply,
+        })
+        .await
     }
 
     /// 支払い条件が一致する UTXO を集める。
@@ -1183,9 +1255,95 @@ impl Service {
                     .map_err(|e| e.to_string());
                 let _ = reply.send(result);
             }
+            Request::IndexFrom(reply) => {
+                let result = self
+                    .node
+                    .chain()
+                    .store()
+                    .index_from()
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            }
+            Request::TxRecord { txid, reply } => {
+                let _ = reply.send(self.tx_record(txid));
+            }
+            Request::AddressHistory {
+                lock,
+                from,
+                max,
+                reply,
+            } => {
+                let _ = reply.send(self.address_history(&lock, from, max));
+            }
+            Request::BuildIndex(reply) => {
+                let result = self
+                    .node
+                    .chain()
+                    .store()
+                    .build_index()
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            }
+            Request::DropIndex(reply) => {
+                let result = self
+                    .node
+                    .chain()
+                    .store()
+                    .drop_index()
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            }
             // ここには来ない。run が先に捕まえる。
             Request::Shutdown => {}
         }
+    }
+
+    /// 索引が見つけた位置から、取引と入力側の出力まで組み立てる。
+    fn record_at(&self, location: TxLocation) -> Result<Option<TxRecord>, String> {
+        let store = self.node.chain().store();
+        let Some(tx) = store
+            .transaction_at(location.height, location.position)
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        let spent = store
+            .spent_outputs(location.height, &tx)
+            .map_err(|e| e.to_string())?;
+        Ok(Some(TxRecord {
+            location,
+            tx,
+            spent,
+        }))
+    }
+
+    fn tx_record(&self, txid: Hash) -> Result<Option<TxRecord>, String> {
+        let found = self
+            .node
+            .chain()
+            .store()
+            .tx_location(&txid)
+            .map_err(|e| e.to_string())?;
+        match found {
+            Some(location) => self.record_at(location),
+            None => Ok(None),
+        }
+    }
+
+    fn address_history(&self, lock: &Lock, from: u64, max: usize) -> Result<Vec<TxRecord>, String> {
+        let found = self
+            .node
+            .chain()
+            .store()
+            .address_history(lock, from, max)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::with_capacity(found.len());
+        for location in found {
+            if let Some(record) = self.record_at(location)? {
+                out.push(record);
+            }
+        }
+        Ok(out)
     }
 
     fn locator(&self) -> Result<Vec<Hash>, String> {
