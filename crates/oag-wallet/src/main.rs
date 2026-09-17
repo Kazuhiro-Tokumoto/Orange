@@ -607,12 +607,19 @@ async fn run() -> Result<(), String> {
             // 一度に手放す。`send` の打ち間違いより高くつくので、自分の
             // アドレスでないときは黙って進めない。
             let mine = store.addresses().map_err(|e| e.to_string())?;
-            let to_myself = mine.iter().any(|a| *a == target);
+            let to_myself = mine.contains(&target);
 
             let client = cli.common.client(network)?;
             let height = block_count(&client).await?;
-            let mut coins = scan(&client, &store).await?;
+            // **打ち切られていても進む。** 上限に当たっている状態こそ
+            // まとめが要る場面であり、そこで断ると抜け出す道具が、
+            // 抜け出すべき状態でだけ使えないことになる。畳むのに手持ちの
+            // 全部は要らない。
+            let (mut coins, truncated) = scan_partial(&client, &store).await?;
             let next_height = height + 1;
+            if truncated {
+                println!("  走査は上限で打ち切られた。手持ちは下の数より多い。");
+            }
 
             // **mempool で使用中の出力を外す。**
             //
@@ -639,6 +646,13 @@ async fn run() -> Result<(), String> {
             if usable < 2 {
                 println!();
                 println!("まとめるものがない。何もしなかった。");
+                if truncated {
+                    // 打ち切られた 50 件がたまたま全部成熟待ちだった場合が
+                    // ある。**並びは決まっているので、すぐ引き直しても同じ
+                    // 顔ぶれが返る。** 待つしかない。
+                    println!("ただし走査は打ち切られている。返ってきた範囲がすべて成熟待ちの");
+                    println!("ときはこうなる。何ブロックか進めてからもう一度試すこと。");
+                }
                 return Ok(());
             }
 
@@ -673,9 +687,18 @@ async fn run() -> Result<(), String> {
             println!("  手数料        {} OAG", draft.fee);
             println!("  大きさ        {} バイト", raw.len());
             println!("  txid          {}", signed.txid());
-            println!("  この後の UTXO {after} 件");
+            if truncated {
+                println!("  この後の UTXO {after} 件以上");
+            } else {
+                println!("  この後の UTXO {after} 件");
+            }
             println!();
-            if left_over > 0 {
+            if truncated {
+                // 走査が打ち切られている以上、「全部畳んだ」とは言えない。
+                // 見えていない手持ちがまだある。
+                println!("走査が打ち切られているので、これで終わりではない。");
+                println!("確定したらもう一度実行すること。上限を下回るまで繰り返す。");
+            } else if left_over > 0 {
                 println!("1 本に入り切らなかった。残り {left_over} 件は、この取引が");
                 println!("確定してからもう一度実行すると畳める。");
             } else {
@@ -957,7 +980,36 @@ fn confirmations(coin: u64, tip: u64) -> u64 {
 /// 支払い条件から UTXO を引く索引が無いため、ノードは UTXO セットを
 /// 丸ごと走査する。応答が打ち切られていたら、残高を過少に見せない
 /// ように断る。
+///
+/// 打ち切られても構わない手続きは [`scan_partial`] を使う。
 async fn scan(client: &Client, store: &Keystore) -> Result<Vec<Coin>, String> {
+    let (coins, truncated) = scan_partial(client, store).await?;
+    if truncated {
+        return Err(
+            "UTXO が多すぎて走査が打ち切られた。このまま続けると残高を実際より\
+             少なく見積もる。`consolidate` でまとめること"
+                .to_string(),
+        );
+    }
+    Ok(coins)
+}
+
+/// 走査する。打ち切られたかどうかも返し、**打ち切られていても中身を返す**。
+///
+/// # なぜ断らないのか
+///
+/// 残高は全部を見ないと出せない。足し損ねた分だけ小さく出るので、
+/// 打ち切られた走査から残高を名乗るのは嘘である。
+///
+/// **まとめは違う。** 畳むのに全部は要らない。手持ちのうち何件かが
+/// 返ってくれば、それを 1 つにできる。むしろ上限に当たっている状態こそ
+/// まとめが要る場面であり、そこで断ると**抜け出す道具が、抜け出すべき
+/// 状態でだけ使えない**ことになる。
+///
+/// 返る顔ぶれは「直近の N 件」ではない。UTXO の鍵は `txid ++ 出力番号`
+/// で、txid はハッシュだから、並びは事実上でたらめである。**手持ちから
+/// 適当に N 件**であり、畳む相手としてはそれで足りる。
+async fn scan_partial(client: &Client, store: &Keystore) -> Result<(Vec<Coin>, bool), String> {
     let addresses: Vec<String> = store
         .addresses()
         .map_err(|e| e.to_string())?
@@ -969,13 +1021,7 @@ async fn scan(client: &Client, store: &Keystore) -> Result<Vec<Coin>, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    if result.get("truncated").and_then(Value::as_bool) == Some(true) {
-        return Err(
-            "UTXO が多すぎて走査が打ち切られた。このまま続けると残高を実際より\
-             少なく見積もる。アドレスを分けて調べること"
-                .to_string(),
-        );
-    }
+    let truncated = result.get("truncated").and_then(Value::as_bool) == Some(true);
 
     let utxos = result
         .get("utxos")
@@ -1019,7 +1065,7 @@ async fn scan(client: &Client, store: &Keystore) -> Result<Vec<Coin>, String> {
                 .ok_or("utxo.coinbase が無い")?,
         });
     }
-    Ok(coins)
+    Ok((coins, truncated))
 }
 
 fn as_str(value: &Value, name: &str) -> Result<String, String> {
