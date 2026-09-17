@@ -8,18 +8,19 @@
 #![warn(clippy::all)]
 
 use clap::{Parser, Subcommand};
-use oag_consensus::codec::Encode;
+use oag_consensus::codec::{Decode, Encode};
 use oag_consensus::lock::Lock;
 use oag_consensus::params;
-use oag_consensus::TxOutput;
+use oag_consensus::{Transaction, TxOutput};
 use oag_primitives::{Address, Amount, Hash, Network};
 use oag_rpc::auth::read_cookie;
 use oag_rpc::client::Client;
 use oag_wallet::bip39::Mnemonic;
-use oag_wallet::build::{build, sign, Coin, Spend};
+use oag_wallet::build::{build, consolidate, sign, Coin, Consolidate, Spend};
 use oag_wallet::keystore::{Keystore, MIN_PASSPHRASE_LEN};
 use oag_wallet::pst::Pst;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use zeroize::{Zeroize, Zeroizing};
@@ -135,6 +136,25 @@ enum Command {
         to: String,
         /// 送る額 (OAG)。
         amount: String,
+        /// 組み立てるだけで送らない。
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 細かい UTXO を 1 つにまとめる。
+    ///
+    /// 掘り続けると 1 ブロックにつき 1 つ UTXO が増える。増えすぎると
+    /// `scanutxos` の上限に当たり、**残高も送金も引けなくなる**。
+    /// その手前で畳んでおくためのもの。
+    ///
+    /// 1 本の取引に入る入力は `MAX_TX_SIZE` が抑えるので、多いときは
+    /// 何度か呼ぶ。あと何周要るかは実行のたびに表示する。
+    Consolidate {
+        /// まとめた先。省略すると既定の受取先。
+        #[arg(long)]
+        to: Option<String>,
+        /// 1 本に入れる入力の上限。省略すると大きさが許す限り。
+        #[arg(long)]
+        max_inputs: Option<usize>,
         /// 組み立てるだけで送らない。
         #[arg(long)]
         dry_run: bool,
@@ -567,6 +587,120 @@ async fn run() -> Result<(), String> {
             Ok(())
         }
 
+        Command::Consolidate {
+            to,
+            max_inputs,
+            dry_run,
+        } => {
+            let pass = passphrase(&cli.common.passphrase_file, "パスフレーズ: ")?;
+            let store =
+                Keystore::open(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
+
+            let target = match &to {
+                Some(text) => Address::decode_on(network, text)
+                    .map_err(|e| format!("まとめ先のアドレスが不正: {e}"))?,
+                None => store.default_address().map_err(|e| e.to_string())?,
+            };
+            // **まとめ先が自分のものか確かめる。**
+            //
+            // まとめは額を指定しない。宛先を間違えると、集めた全部を
+            // 一度に手放す。`send` の打ち間違いより高くつくので、自分の
+            // アドレスでないときは黙って進めない。
+            let mine = store.addresses().map_err(|e| e.to_string())?;
+            let to_myself = mine.iter().any(|a| *a == target);
+
+            let client = cli.common.client(network)?;
+            let height = block_count(&client).await?;
+            let mut coins = scan(&client, &store).await?;
+            let next_height = height + 1;
+
+            // **mempool で使用中の出力を外す。**
+            //
+            // `scanutxos` は UTXO セットを見るので、送信済みで未確定の
+            // 取引が使っている出力もまだ手持ちに見える。外さずに組むと、
+            // 1 つ前のまとめと同じ出力を使う取引ができる。それは置き換え
+            // の申し出として扱われ、「手数料の増分が足りない」と断られる。
+            // **金は減らないが、二度押しの理由が読み取れない。**
+            let pending = pending_spends(&client).await?;
+            let before = coins.len();
+            coins.retain(|c| !pending.contains(&(c.outpoint.txid.to_string(), c.outpoint.index)));
+            let held = coins.len();
+            if before != held {
+                println!("  未確定で使用中 {} 件 (除いた)", before - held);
+            }
+            let usable = coins
+                .iter()
+                .filter(|c| c.is_spendable_at(next_height))
+                .count();
+            println!("  手持ちの UTXO  {held} 件");
+            println!("  今まとめられる {usable} 件 (残りはコインベースの成熟待ち)");
+
+            // **1 件以下なら何もしない。** 二度押しでも手数料は減らない。
+            if usable < 2 {
+                println!();
+                println!("まとめるものがない。何もしなかった。");
+                return Ok(());
+            }
+
+            let order = Consolidate {
+                to: Lock::from_address(&target),
+                next_height,
+                fee_rate: params::MIN_RELAY_FEE_RATE_PER_BYTE,
+                max_inputs,
+            };
+            let draft = consolidate(&coins, &order).map_err(|e| e.to_string())?;
+            let signed = sign(&draft, |lock| store.key_for(lock)).map_err(|e| e.to_string())?;
+            let raw = signed.encode();
+
+            let taken = draft.spent.len();
+            let out = draft.tx.outputs[0].amount;
+            // この 1 本を送ったあと、手持ちは「残り + まとめた 1 つ」になる。
+            let after = held - taken + 1;
+            // 畳み残しは 2 種類ある。**混ぜて報せない。** 片方は確定後に
+            // もう一度実行すれば片付き、もう片方は待つしかない。
+            let left_over = usable - taken;
+            let immature = held - usable;
+
+            println!();
+            println!("  まとめ先      {target}");
+            if !to_myself {
+                println!();
+                println!("**まとめ先はこのウォレットのアドレスではない。**");
+                println!("実行すると {out} OAG を手放すことになる。意図した宛先か確かめること。");
+            }
+            println!("  畳む入力      {taken} 件");
+            println!("  出来高        {out} OAG");
+            println!("  手数料        {} OAG", draft.fee);
+            println!("  大きさ        {} バイト", raw.len());
+            println!("  txid          {}", signed.txid());
+            println!("  この後の UTXO {after} 件");
+            println!();
+            if left_over > 0 {
+                println!("1 本に入り切らなかった。残り {left_over} 件は、この取引が");
+                println!("確定してからもう一度実行すると畳める。");
+            } else {
+                println!("使える分はこれで全部畳んだ。");
+            }
+            if immature > 0 {
+                println!("ほかに {immature} 件がコインベースの成熟待ち。こちらは時間が要る。");
+            }
+
+            if dry_run {
+                println!();
+                println!("--dry-run のため送らない。生の取引:");
+                println!("{}", to_hex(&raw));
+                return Ok(());
+            }
+
+            let txid = client
+                .call("sendrawtransaction", json!([to_hex(&raw)]))
+                .await
+                .map_err(|e| format!("送信を断られた: {e}"))?;
+            println!();
+            println!("送信した: {}", as_str(&txid, "txid")?);
+            Ok(())
+        }
+
         Command::Pst { action } => pst(&cli.common, network, action).await,
 
         Command::Info => {
@@ -582,6 +716,42 @@ async fn run() -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// mempool の取引が使っている出力を集める。
+///
+/// `scanutxos` は UTXO セットしか見ないので、未確定の取引が使っている
+/// 出力も「まだある」と答える。それを手持ちに数えたまま組むと、自分の
+/// 未確定の取引と衝突する取引ができる。
+async fn pending_spends(client: &Client) -> Result<HashSet<(String, u32)>, String> {
+    let list = client
+        .call("getmempool", json!([]))
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(txids) = list.as_array() else {
+        return Ok(HashSet::new());
+    };
+
+    let mut spent = HashSet::new();
+    for id in txids {
+        let Some(text) = id.as_str() else { continue };
+        // 1 件ずつ引く。引いている間に確定して mempool から消えることが
+        // あるので、引けなかったものは飛ばす。
+        let Ok(raw) = client.call("getrawtransaction", json!([text])).await else {
+            continue;
+        };
+        // **JSON ではなく生のバイト列で受け取って自分で解く。** 表示用の
+        // JSON の形に依存すると、そちらを直したときに黙って壊れる。
+        let Some(hex) = raw.as_str() else { continue };
+        let Ok(bytes) = from_hex(hex) else { continue };
+        let Ok(tx) = Transaction::decode(&bytes) else {
+            continue;
+        };
+        for input in &tx.inputs {
+            spent.insert((input.prev_out.txid.to_string(), input.prev_out.index));
+        }
+    }
+    Ok(spent)
 }
 
 /// PST を読む。16 進のテキストとして持ち運ぶ。

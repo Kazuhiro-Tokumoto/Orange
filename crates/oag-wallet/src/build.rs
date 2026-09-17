@@ -96,6 +96,20 @@ pub enum BuildError {
     /// sighash を計算できない。
     #[error("sighash を計算できない: {0}")]
     Sighash(String),
+    /// まとめる相手がいない。
+    #[error("まとめられる UTXO が {usable} 件しかない。2 件以上が要る")]
+    NothingToConsolidate {
+        /// 使える UTXO の数。
+        usable: usize,
+    },
+    /// まとめた結果が手数料に負ける。
+    #[error("集めた {total} では手数料 {fee} を賄えない")]
+    FeeExceedsTotal {
+        /// 集めた額。
+        total: Amount,
+        /// 要る手数料。
+        fee: Amount,
+    },
     /// 出来上がりが大きすぎる。
     #[error("トランザクションが大きすぎる ({actual} バイト、上限 {max})")]
     TooLarge {
@@ -121,6 +135,25 @@ pub struct Spend {
     pub next_height: u64,
     /// 料率 (atomic / バイト)。
     pub fee_rate: Amount,
+}
+
+/// まとめ (consolidation) の注文。
+///
+/// # 支払いと何が違うのか
+///
+/// 支払いは「いくら送るか」が先に決まっていて、それを賄う UTXO を選ぶ。
+/// まとめは逆で、**UTXO を先に決めて、残りぜんぶが出来高になる**。額を
+/// 指定しないので、おつりも無い。出力は 1 つだけである。
+#[derive(Debug, Clone)]
+pub struct Consolidate {
+    /// まとめた先。自分のアドレスを渡す。
+    pub to: Lock,
+    /// このトランザクションが入りうる最初のブロックの高さ。
+    pub next_height: u64,
+    /// 料率 (atomic / バイト)。
+    pub fee_rate: Amount,
+    /// 1 本に入れる入力の上限。`None` なら大きさが許す限り詰める。
+    pub max_inputs: Option<usize>,
 }
 
 /// 組み上がった支払い。
@@ -254,6 +287,126 @@ pub fn build(coins: &[Coin], spend: &Spend) -> Result<Draft, BuildError> {
     })
 }
 
+/// 手持ちを 1 つの出力にまとめる。まとめ切れなければ、入る分だけ。
+///
+/// # なぜ支払いと別の関数なのか
+///
+/// [`build`] は「いくら送るか」から逆算して UTXO を選ぶ。まとめには
+/// 送る額が無い。**集めた全部から手数料を引いたものが出来高**であり、
+/// おつりも作らない。同じ関数に両方を通すと、額 0 の支払いという
+/// 存在しない概念を作ることになる。
+///
+/// # どこで打ち切るか
+///
+/// [`params::MAX_TX_SIZE`] (100,000 バイト) はコンセンサス側の上限で
+/// あり、緩められない。入力 1 個がおよそ 102 バイトなので、1 本に入る
+/// のは 980 個前後である。**それを超える分は 1 回では畳めない。**
+/// 残った分はもう一度呼べばよい。何周要るかは呼び出し側が数える。
+///
+/// 小さいものから取る。どれを残しても金額は変わらないが、小さい出力ほど
+/// 「自分の大きさに比べて手数料が高い」ので、先に畳むほど得である。
+pub fn consolidate(coins: &[Coin], order: &Consolidate) -> Result<Draft, BuildError> {
+    if !order.to.is_known_version() {
+        return Err(BuildError::UnknownLockVersion {
+            version: order.to.version(),
+        });
+    }
+
+    let mut usable: Vec<&Coin> = coins
+        .iter()
+        .filter(|c| c.is_spendable_at(order.next_height))
+        .collect();
+    // 小さい順。同額なら古い順にして、結果を再現できるようにする。
+    usable.sort_by_key(|c| (c.output.amount, c.height, c.outpoint.txid, c.outpoint.index));
+
+    // **1 件しか無いなら、まとめる意味がない。** ここで断らないと、
+    // 手数料を払って同じ形に組み直すだけの取引を作ってしまう。
+    // 二度押しの事故はこの 1 行で消える。
+    if usable.len() < 2 {
+        return Err(BuildError::NothingToConsolidate {
+            usable: usable.len(),
+        });
+    }
+
+    let ceiling = order.max_inputs.unwrap_or(usable.len()).min(usable.len());
+    if ceiling < 2 {
+        return Err(BuildError::NothingToConsolidate { usable: ceiling });
+    }
+
+    // 入る本数を探す。1 本ずつ組み直して測るのは無駄なので、上限から
+    // 二分する。大きさは入力の本数について単調に増える。
+    let fits = |take: usize| -> bool {
+        let selected: Vec<&Coin> = usable[..take].to_vec();
+        consolidated_tx(&selected, order).encode().len() <= params::MAX_TX_SIZE
+    };
+    let take = if fits(ceiling) {
+        ceiling
+    } else {
+        let (mut lo, mut hi) = (2usize, ceiling);
+        if !fits(lo) {
+            // 2 件でも入らない。上限そのものが小さすぎる。
+            return Err(BuildError::TooLarge {
+                actual: consolidated_tx(&usable[..2], order).encode().len(),
+                max: params::MAX_TX_SIZE,
+            });
+        }
+        while lo + 1 < hi {
+            let mid = lo + (hi - lo) / 2;
+            if fits(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    };
+
+    let selected: Vec<&Coin> = usable[..take].to_vec();
+    let total =
+        Amount::sum(selected.iter().map(|c| c.output.amount)).ok_or(BuildError::Overflow)?;
+
+    let mut tx = consolidated_tx(&selected, order);
+    let size = tx.encode().len();
+    let fee = order
+        .fee_rate
+        .checked_mul(u64::try_from(size).map_err(|_| BuildError::Overflow)?)
+        .ok_or(BuildError::Overflow)?;
+
+    let out = total
+        .checked_sub(fee)
+        .ok_or(BuildError::FeeExceedsTotal { total, fee })?;
+    if out < params::DUST_THRESHOLD {
+        return Err(BuildError::BelowDust {
+            amount: out,
+            threshold: params::DUST_THRESHOLD,
+        });
+    }
+    tx.outputs[0].amount = out;
+
+    // 出力の額が縮んで符号化長が短くなることがある。**その分は手数料に
+    // 回る。** 測り直して出力を膨らませると、大きさと額が互いを決め合う
+    // 堂々巡りに入る ([`build_with`] と同じ理由)。差は数バイト分である。
+    finish(tx, &selected, fee, Amount::ZERO)
+}
+
+/// まとめの下書き。出力の額は仮に最大値を置いて測る。
+fn consolidated_tx(selected: &[&Coin], order: &Consolidate) -> Transaction {
+    let inputs: Vec<TxInput> = selected
+        .iter()
+        .map(|coin| {
+            let mut input = TxInput::new(coin.outpoint);
+            input.signature = SIGNATURE_PLACEHOLDER.to_vec();
+            input
+        })
+        .collect();
+    Transaction {
+        version: CURRENT_TX_VERSION,
+        inputs,
+        outputs: vec![TxOutput::new(MAX_ENCODED_AMOUNT, order.to.clone())],
+        locktime: 0,
+    }
+}
+
 fn finish(
     tx: Transaction,
     selected: &[&Coin],
@@ -333,6 +486,171 @@ mod tests {
             next_height: 1_000,
             fee_rate: params::MIN_RELAY_FEE_RATE_PER_BYTE,
         }
+    }
+
+    fn coinbase_coin(amount_oag: &str, key: &SecretKey, n: u32, height: u64) -> Coin {
+        let mut c = coin(amount_oag, key, n);
+        c.height = height;
+        c.is_coinbase = true;
+        c
+    }
+
+    fn consolidate_of(to: Lock, max_inputs: Option<usize>) -> Consolidate {
+        Consolidate {
+            to,
+            next_height: 1_000,
+            fee_rate: params::MIN_RELAY_FEE_RATE_PER_BYTE,
+            max_inputs,
+        }
+    }
+
+    // ━━━━━━━━ まとめ ━━━━━━━━
+
+    #[test]
+    fn consolidating_balances_exactly_and_leaves_one_output() {
+        let mine = key();
+        let coins: Vec<Coin> = (0..5).map(|n| coin("10", &mine, n)).collect();
+
+        let draft = consolidate(&coins, &consolidate_of(lock_of(&mine), None)).unwrap();
+
+        // 出力は 1 つ。おつりは無い。
+        assert_eq!(draft.tx.outputs.len(), 1);
+        assert_eq!(draft.change, Amount::ZERO);
+        assert_eq!(draft.tx.inputs.len(), 5);
+
+        // 入力の合計 = 出力 + 手数料。**崩れたら金額が湧いているか消えている。**
+        let inputs = Amount::sum(draft.spent.iter().map(|o| o.amount)).unwrap();
+        let out = draft.tx.outputs[0].amount;
+        assert_eq!(inputs, out.checked_add(draft.fee).unwrap());
+    }
+
+    #[test]
+    fn a_single_utxo_is_refused_rather_than_repackaged() {
+        // **二度押しの事故はここで止める。** 1 件しか無いのに組むと、
+        // 手数料を払って同じ形に組み直すだけになる。
+        let mine = key();
+        let coins = vec![coin("10", &mine, 0)];
+        assert!(matches!(
+            consolidate(&coins, &consolidate_of(lock_of(&mine), None)),
+            Err(BuildError::NothingToConsolidate { usable: 1 })
+        ));
+
+        // 1 件も無いときも同じ。
+        assert!(matches!(
+            consolidate(&[], &consolidate_of(lock_of(&mine), None)),
+            Err(BuildError::NothingToConsolidate { usable: 0 })
+        ));
+    }
+
+    #[test]
+    fn immature_coinbase_outputs_are_left_alone() {
+        let mine = key();
+        // next_height = 1_000、成熟には 120 要る。
+        let mut coins = vec![
+            coinbase_coin("10", &mine, 0, 100), // 成熟済み
+            coinbase_coin("10", &mine, 1, 200), // 成熟済み
+        ];
+        coins.push(coinbase_coin("10", &mine, 2, 990)); // まだ
+
+        let draft = consolidate(&coins, &consolidate_of(lock_of(&mine), None)).unwrap();
+        assert_eq!(draft.tx.inputs.len(), 2, "成熟していない出力を畳んでいる");
+
+        // 成熟済みが 1 件だけなら、まとめない。
+        let young = vec![
+            coinbase_coin("10", &mine, 0, 100),
+            coinbase_coin("10", &mine, 1, 990),
+        ];
+        assert!(matches!(
+            consolidate(&young, &consolidate_of(lock_of(&mine), None)),
+            Err(BuildError::NothingToConsolidate { usable: 1 })
+        ));
+    }
+
+    #[test]
+    fn the_smallest_outputs_are_taken_first() {
+        // どれを残しても金額は変わらないが、小さい出力ほど自分の大きさに
+        // 比べて手数料が高い。先に畳むほど得である。
+        let mine = key();
+        let coins = vec![
+            coin("50", &mine, 0),
+            coin("1", &mine, 1),
+            coin("10", &mine, 2),
+        ];
+        let draft = consolidate(&coins, &consolidate_of(lock_of(&mine), Some(2))).unwrap();
+
+        let taken: Vec<String> = draft.spent.iter().map(|o| o.amount.to_string()).collect();
+        assert_eq!(taken, vec!["1".to_string(), "10".to_string()]);
+    }
+
+    #[test]
+    fn what_does_not_fit_is_left_for_the_next_round() {
+        // MAX_TX_SIZE はコンセンサス側の上限であり、緩められない。
+        // **入り切らない分は 1 回では畳めない。**
+        //
+        // 出力番号は varint なので、番号が大きいほど入力 1 個が長くなる。
+        // 「もう 1 件足せばはみ出す」を確かめるには 1 個あたりの長さが
+        // 揃っている必要があるので、番号は 0 で固定し txid で散らす。
+        let mine = key();
+        let coins: Vec<Coin> = (0..2_000u32)
+            .map(|n| Coin {
+                outpoint: OutPoint {
+                    txid: oag_primitives::hash::txid(&n.to_le_bytes()),
+                    index: 0,
+                },
+                output: TxOutput::new("10".parse::<Amount>().unwrap(), lock_of(&mine)),
+                height: 1,
+                is_coinbase: false,
+            })
+            .collect();
+
+        let order = consolidate_of(lock_of(&mine), None);
+        let draft = consolidate(&coins, &order).unwrap();
+        let size = draft.tx.encode().len();
+        let taken = draft.tx.inputs.len();
+
+        assert!(
+            size <= params::MAX_TX_SIZE,
+            "上限を超えている ({size} バイト)"
+        );
+        assert!(taken < coins.len(), "2,000 件が 1 本に入ってしまっている");
+        // 入力 1 個がおよそ 102 バイトなので 900〜1,000 件のはず。
+        assert!(
+            (900..=1_000).contains(&taken),
+            "畳んだのが {taken} 件で、見込みから外れている"
+        );
+
+        // **もう 1 件足せばはみ出す。** 探索が最大まで詰めている証拠である。
+        // 足す相手は、この関数が選ぶのと同じ並びから取る。
+        let mut sorted: Vec<&Coin> = coins.iter().collect();
+        sorted.sort_by_key(|c| (c.output.amount, c.height, c.outpoint.txid, c.outpoint.index));
+        let bigger = consolidated_tx(&sorted[..taken + 1], &order);
+        assert!(
+            bigger.encode().len() > params::MAX_TX_SIZE,
+            "まだ詰められる"
+        );
+    }
+
+    #[test]
+    fn a_cap_on_inputs_is_honoured() {
+        let mine = key();
+        let coins: Vec<Coin> = (0..100).map(|n| coin("10", &mine, n)).collect();
+        let draft = consolidate(&coins, &consolidate_of(lock_of(&mine), Some(7))).unwrap();
+        assert_eq!(draft.tx.inputs.len(), 7);
+    }
+
+    #[test]
+    fn consolidating_into_an_unknown_lock_version_is_refused() {
+        // 未知の版数は誰でも使える扱いになる (SPEC §10.4)。**畳んだ先が
+        // それだと、集めた全部をまとめて失う。** 支払い 1 件より重い。
+        let mine = key();
+        let coins: Vec<Coin> = (0..3).map(|n| coin("10", &mine, n)).collect();
+        let future = Lock::from_address(
+            &oag_primitives::Address::new(Network::Regtest, 9, vec![0u8; 32]).unwrap(),
+        );
+        assert_eq!(
+            consolidate(&coins, &consolidate_of(future, None)),
+            Err(BuildError::UnknownLockVersion { version: 9 })
+        );
     }
 
     #[test]
