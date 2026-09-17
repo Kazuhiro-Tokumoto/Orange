@@ -766,15 +766,17 @@ impl AddressBook {
     ///
     /// **まだ覚えていない住所なら、ここで覚える。** 実際に繋がった住所は
     /// 到達できることの最も強い証拠であり、`--connect` で名指しされた
-    /// 相手やシードから得た相手はこの経路で住所帳に入る。
+    /// 相手やシードから得た相手はこの経路で住所帳に入る。`new` に枠が
+    /// 取れなくても諦めず、[`AddressBook::adopt`] で直接 `tried` へ迎える。
     ///
     /// `tried` の行き先が塞がっている場合、**先客が見込みを失っていな
     /// ければ昇格しない**。新参が繋がったという理由だけで実績のある住所を
     /// 追い出せるようにすると、攻撃者は繋がるノードを並べるだけで
     /// `tried` を入れ替えられる。
     pub fn mark_success(&mut self, addr: &SocketAddr, now: i64) {
-        if !self.entries.contains_key(addr) {
-            self.add(*addr, now, now);
+        if !self.entries.contains_key(addr) && !self.add(*addr, now, now) && !self.adopt(*addr, now)
+        {
+            return;
         }
         let Some(info) = self.entries.get_mut(addr) else {
             return;
@@ -819,6 +821,52 @@ impl AddressBook {
             info.in_tried = true;
         }
         self.tried_table.set(bucket, slot, *addr);
+    }
+
+    /// `new` に枠が取れなかった住所を、直接 `tried` に迎える。迎えたら真。
+    ///
+    /// # なぜ `new` の枠を要求しないのか
+    ///
+    /// `new` は**まだ試していない住所**を溜める場所である。実際に繋がった
+    /// 相手がそこの枠を取り合う理由はない。それでも要求していたため、
+    /// [`AddressBook::add`] が枠を取れないと成功の記録ごと落ちていた。
+    ///
+    /// **落ちると、聞かせた住所で `new` を埋めるだけで、正直な相手が
+    /// `tried` に入るのを塞げる。** 2 つの表を分けてあるのは、繋がった
+    /// 実績のある相手を、聞いただけの住所と別勘定にしておくためである。
+    /// 片方を埋めてもう片方への道を塞げるなら、分けた意味がない。
+    ///
+    /// ただし `tried` の先客は守る。行き先が塞がっていて先客が見込みを
+    /// 失っていなければ迎えない。ここを緩めると、繋がるノードを並べる
+    /// だけで `tried` を入れ替えられる。
+    ///
+    /// 迎えると決まってから登録する。先に登録してから断ると、どちらの
+    /// 表にも居ない項目が `entries` に残る。
+    fn adopt(&mut self, addr: SocketAddr, now: i64) -> bool {
+        if !is_storable(self.network, &addr) || self.own.contains(&addr) {
+            return false;
+        }
+        let bucket = self.tried_bucket(&addr);
+        let slot = self.slot(true, bucket, &addr);
+        if let Some(occupant) = self.tried_table.get(bucket, slot) {
+            let terrible = self
+                .entries
+                .get(&occupant)
+                .is_some_and(|info| info.entry.is_terrible(now));
+            if !terrible {
+                return false;
+            }
+        }
+        self.entries.insert(
+            addr,
+            Info {
+                entry: Entry::new(now),
+                source_group: group_of(&addr),
+                in_tried: false,
+                new_slots: Vec::new(),
+            },
+        );
+        true
     }
 
     /// `tried` から降ろす。行き先の `new` が塞がっていれば忘れる。
@@ -1209,6 +1257,64 @@ mod tests {
             b.add_from(a, Some(addr(3 * i, 7, 0, 1)), NOW, NOW);
         }
         assert!(b.entries[&a].new_slots.len() <= NEW_BUCKETS_PER_ADDRESS);
+    }
+
+    #[test]
+    fn a_peer_that_answered_reaches_tried_even_with_its_new_slot_taken() {
+        // **聞かせた住所で new を埋めて、正直な相手が tried に入るのを
+        // 塞げてはならない。** 2 つの表を分けてあるのは、繋がった実績の
+        // ある相手を聞いただけの住所と別勘定にするためである。
+        let mut b = book();
+        let honest = addr(104, 16, 1, 1);
+
+        // honest の new の行き先を、見込みのある別の住所で塞ぐ。
+        let bucket = b.new_bucket(&honest, &group_of(&honest));
+        let slot = b.slot(false, bucket, &honest);
+        let blocker = addr(93, 184, 216, 7);
+        assert!(b.add(blocker, NOW, NOW));
+        b.new_table.set(bucket, slot, blocker);
+
+        // 前提: この状態では new に入れない。
+        assert!(!b.add(honest, NOW, NOW), "枠が空いている。試験の前提が違う");
+        assert!(b.get(&honest).is_none());
+
+        // それでも、実際に繋がったのなら tried に載る。
+        b.mark_success(&honest, NOW);
+        assert_eq!(b.tried_len(), 1, "繋がったのに tried に入っていない");
+        assert!(
+            b.get(&honest).is_some_and(|e| e.is_proven()),
+            "成功が記録されていない"
+        );
+        // 塞いでいた住所は追い出していない。
+        assert!(b.get(&blocker).is_some());
+    }
+
+    #[test]
+    fn a_live_occupant_of_tried_is_not_pushed_out_by_an_unknown_peer() {
+        // new を迂回できるようにしても、tried の先客は守る。ここを緩めると
+        // 繋がるノードを並べるだけで tried を入れ替えられる。
+        let mut b = book();
+        let honest = addr(104, 16, 1, 1);
+
+        // honest が入るはずの tried の枠を、元気な住所で埋める。
+        let bucket = b.tried_bucket(&honest);
+        let slot = b.slot(true, bucket, &honest);
+        let occupant = addr(93, 184, 216, 9);
+        assert!(b.add(occupant, NOW, NOW));
+        b.mark_success(&occupant, NOW);
+        b.tried_table.set(bucket, slot, occupant);
+
+        // honest の new も塞ぐ。どちらにも行き場がない。
+        let nb = b.new_bucket(&honest, &group_of(&honest));
+        let ns = b.slot(false, nb, &honest);
+        b.new_table.set(nb, ns, occupant);
+        assert!(!b.add(honest, NOW, NOW), "枠が空いている。試験の前提が違う");
+
+        b.mark_success(&honest, NOW);
+
+        // 迎えなかった。**そしてどちらの表にも居ない項目を残していない。**
+        assert!(b.get(&honest).is_none(), "行き場の無い項目が残っている");
+        assert!(b.get(&occupant).is_some_and(|e| e.is_proven()));
     }
 
     #[test]
