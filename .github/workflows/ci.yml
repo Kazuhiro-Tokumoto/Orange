@@ -50,35 +50,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: ツールチェーンを用意する
-        run: rustup show && rustup target add wasm32-unknown-unknown
-
-      - name: キャッシュ
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-wasm-${{ hashFiles('**/Cargo.lock') }}
-
-      # 埋め込んである wasm は、原稿から作り直したものと一致していなければ
-      # ならない。**古いまま置き去りにされると、直したはずの不具合が
-      # ブラウザ側に残る。**
-      - name: 組み直して、置いてあるものと比べる
-        env:
-          RUSTFLAGS: '--cfg getrandom_backend="custom"'
+      # **バイト列を突き合わせても意味がない。** 登録簿の置き場が wasm に
+      # 埋め込まれるので、同じ原稿でも機械が違えば違うバイト列になる。
+      # 見るのは原稿の側である。指紋が動いているのに wasm が古いままなら、
+      # 直したはずのものがブラウザに届いていない。
+      - name: 原稿の指紋が、置いてある wasm のものと合うか
         run: |
-          cargo build -p oag-wallet-wasm --target wasm32-unknown-unknown --release
-          built=target/wasm32-unknown-unknown/release/oag_wallet_wasm.wasm
-          kept=crates/oag-node/assets/wallet.wasm
-          if ! cmp -s "$built" "$kept"; then
+          kept=crates/oag-node/assets/wallet.wasm.sources
+          if ! diff -u "$kept" <(sh tools/wallet-wasm-fingerprint.sh); then
             echo "::error::crates/oag-node/assets/wallet.wasm が古い。"
-            echo "crates/oag-node/assets/README.md の手順で作り直すこと。"
-            ls -l "$built" "$kept"
+            echo "tools/wallet-wasm.sh を走らせて、出来たものを一緒にコミットすること。"
             exit 1
           fi
-          echo "一致した ($(stat -c%s "$kept") バイト)"
+          echo "合っている"
+
+      # 指紋が合っていても、中身が壊れていれば意味がない。
+      # ブラウザが通るのと同じ道筋を通して確かめる。
+      - name: 置いてある wasm を実際に動かす
+        run: node tools/wallet-wasm-smoke.mjs
 
       # 取り込み (import) が 1 つでもあると、ブラウザ側に糊が要るように
       # なる。**糊を書かずに済んでいることを、ここで確かめ続ける。**
