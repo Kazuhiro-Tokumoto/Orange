@@ -106,12 +106,18 @@ async function working(button, label, task) {
 
 // ━━━━━━━━ 記録 ━━━━━━━━
 
+// 置き場を使えない browser がある (私的な窓、保存を止めてある設定)。
+// **置けなくても資金は消えない。** 控えの語さえあれば戻せる。だが
+// 「次に開けない」ことは伝わっていなければならない。
+const STORAGE_FAILED =
+  "この機械に記録を置けませんでした。閉じると開き直せません。" +
+  "控えの語を必ず書き留めてください。";
+
 function keepRecord(record) {
   try {
     localStorage.setItem(RECORD_KEY, record);
     return true;
   } catch (e) {
-    // 置けなくても資金は消えない。**控えの語さえあれば戻せる。**
     return false;
   }
 }
@@ -173,8 +179,8 @@ async function doCreate() {
         words: Number($("new-words").value),
       });
       $("new-pass").value = $("new-pass2").value = "";
-      keepRecord(made.record);
-      showBackup(made.phrase, made.addresses);
+      const kept = keepRecord(made.record);
+      showBackup(made.phrase, made.addresses, made.record, kept);
     } catch (e) {
       say("gate-msg", e.message, true);
     }
@@ -189,7 +195,8 @@ async function doRestore() {
       const back = call({ cmd: "restore", network: chain.network, pass, phrase });
       $("res-phrase").value = "";
       $("res-pass").value = "";
-      keepRecord(back.record);
+      const kept = keepRecord(back.record);
+      if (!kept) say("gate-msg", STORAGE_FAILED, true);
       const found = await discover();
       await enterWallet(found);
     } catch (e) {
@@ -231,7 +238,12 @@ async function discover() {
   return grown.addresses;
 }
 
-function showBackup(phrase, addresses) {
+// `kept` が偽なら、記録をこの機械に置けていない。**次に開くものが無い。**
+//
+// `record` は書き出しに使う。**置き場から読み直さない。** 置けなかった
+// ときに読み直すと空が落ちてきて、一番要る場面で控えが取れない。
+function showBackup(phrase, addresses, record, kept) {
+  show("no-storage", kept === false);
   const words = phrase.split(" ");
   const box = $("phrase-words");
   box.textContent = "";
@@ -244,7 +256,6 @@ function showBackup(phrase, addresses) {
   });
 
   $("do-download").onclick = () => {
-    const record = storedRecord() || "";
     const blob = new Blob([record], { type: "application/json" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
@@ -445,7 +456,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("do-copy").onclick = () => navigator.clipboard.writeText($("recv-addr").textContent);
   $("do-phrase").onclick = () => {
     const seen = call({ cmd: "phrase" });
-    showBackup(seen.phrase, state.addresses);
+    showBackup(seen.phrase, state.addresses, storedRecord() || "", true);
   };
   $("do-forget").onclick = () => {
     if (!confirm("この機械から記録を消します。控えの語が無いと戻せません。")) return;
