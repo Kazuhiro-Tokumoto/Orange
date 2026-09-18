@@ -25,6 +25,7 @@ pub mod peer;
 pub mod rpc;
 pub mod seeds;
 pub mod service;
+pub mod wallet;
 
 use oag_net::magic::magic_for;
 use oag_net::transport::{Connection, Listener};

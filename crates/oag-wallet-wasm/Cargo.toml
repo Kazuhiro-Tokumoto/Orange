@@ -1,0 +1,30 @@
+[package]
+name = "oag-wallet-wasm"
+description = "Orange (OAG) のウォレットを、ブラウザで動かすための殻"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+oag-consensus.workspace = true
+oag-primitives.workspace = true
+oag-wallet = { workspace = true, default-features = false }
+hex.workspace = true
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# chacha20poly1305 が crypto-common 経由で getrandom を必ず引く。
+# wasm32 では使う裏側を明示しないと通らないので、ここで指定する。
+[dev-dependencies]
+oag-consensus.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_03 = { package = "getrandom", version = "0.3" }
+getrandom_04 = { package = "getrandom", version = "0.4" }

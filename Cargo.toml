@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/oag-primitives", "crates/oag-consensus", "crates/oag-pow", "crates/oag-chain", "crates/oag-store", "crates/oag-mempool", "crates/oag-net", "crates/oag-miner", "crates/oag-rpc", "crates/oag-node", "crates/oag-wallet"]
+members = ["crates/oag-primitives", "crates/oag-consensus", "crates/oag-pow", "crates/oag-chain", "crates/oag-store", "crates/oag-mempool", "crates/oag-net", "crates/oag-miner", "crates/oag-rpc", "crates/oag-node", "crates/oag-wallet", "crates/oag-wallet-wasm"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,6 +21,8 @@ oag-net = { path = "crates/oag-net", version = "0.1.0" }
 oag-store = { path = "crates/oag-store", version = "0.1.0" }
 oag-rpc = { path = "crates/oag-rpc", version = "0.1.0" }
 oag-node = { path = "crates/oag-node", version = "0.1.0" }
+oag-wallet = { path = "crates/oag-wallet", version = "0.1.0", default-features = false }
+oag-wallet-wasm = { path = "crates/oag-wallet-wasm", version = "0.1.0" }
 bech32 = "0.12"
 clap = { version = "4", features = ["derive"] }
 blake3 = "1"
@@ -29,6 +31,10 @@ secp256k1 = "0.33"
 redb = "4"
 argon2 = "0.5"
 chacha20poly1305 = "0.11"
+# TLS は ring を使う。既定の aws-lc-rs は cmake と C コンパイラを要求し、
+# RandomX を既定で外してあるのと同じ理由で、組み立ての敷居を上げたくない。
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
 rpassword = "7"
 sha2 = "0.10"
 hmac = "0.12"

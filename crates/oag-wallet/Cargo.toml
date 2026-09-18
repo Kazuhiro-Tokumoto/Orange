@@ -15,16 +15,24 @@ path = "src/lib.rs"
 [[bin]]
 name = "oag-wallet"
 path = "src/main.rs"
+required-features = ["cli"]
+
+# `cli` を外すと、端末とノードに関わる依存が全部落ちる。
+# **ブラウザ (wasm) が読み込むのはその状態のライブラリである。**
+# clap も tokio も wasm32 では動かないが、鍵と署名の側は何も要らない。
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:rpassword", "dep:tokio", "dep:oag-rpc"]
 
 [dependencies]
 argon2.workspace = true
 blake3.workspace = true
 chacha20poly1305.workspace = true
-clap.workspace = true
+clap = { workspace = true, optional = true }
 oag-consensus.workspace = true
 oag-primitives.workspace = true
-oag-rpc.workspace = true
-rpassword.workspace = true
+oag-rpc = { workspace = true, optional = true }
+rpassword = { workspace = true, optional = true }
 sha2.workspace = true
 hmac.workspace = true
 pbkdf2.workspace = true
@@ -33,7 +41,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio = { workspace = true, optional = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 [dev-dependencies]
 oag-node.workspace = true

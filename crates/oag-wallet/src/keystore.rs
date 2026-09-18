@@ -65,17 +65,23 @@ use zeroize::Zeroize;
 pub const FORMAT_VERSION: u32 = 3;
 
 /// ソルトの長さ。
-const SALT_LEN: usize = 16;
+pub const SALT_LEN: usize = 16;
 /// ChaCha20-Poly1305 の nonce の長さ。
-const NONCE_LEN: usize = 12;
+pub const NONCE_LEN: usize = 12;
 
-/// Argon2id の使用メモリ (KiB)。64 MiB。
+/// Argon2id の使用メモリ (KiB)。128 MiB。
 ///
 /// **総当たりの費用はここで決まる。** 大きいほど専用機で並列に試しにくい。
-/// 手元の機械で 1 回あたり 0.1 秒程度に収まる範囲で選んである。
-const ARGON_M_COST: u32 = 65_536;
+///
+/// 反復ではなくメモリを先に上げてある。所要時間が同じなら、`t_cost` を
+/// 倍にするより `m_cost` を倍にする方が、攻撃側が並べられる本数を直接
+/// 半分にする。Argon2 の推奨もその順である。
+///
+/// **上限を決めているのはブラウザである。** 同じ記録を携帯で開けなければ
+/// 意味がないので、携帯の wasm が確保できる範囲に収めてある。
+const ARGON_M_COST: u32 = 131_072;
 /// Argon2id の反復回数。
-const ARGON_T_COST: u32 = 3;
+const ARGON_T_COST: u32 = 4;
 /// Argon2id の並列度。
 const ARGON_P_COST: u32 = 1;
 
@@ -97,24 +103,24 @@ pub enum KeystoreError {
         source: std::io::Error,
     },
     /// 中身が読めない。
-    #[error("{path} を読めない: {message}")]
+    #[error("{origin} を読めない: {message}")]
     Malformed {
-        /// 対象のファイル。
-        path: PathBuf,
+        /// どこから読んだか。
+        origin: Origin,
         /// 理由。
         message: String,
     },
     /// 知らない形式の版数。
     #[error(
-        "{path} は版数 {found} である。この実装が読めるのは {FORMAT_VERSION} のみ。\n\
+        "{origin} は版数 {found} である。この実装が読めるのは {FORMAT_VERSION} のみ。\n\
          版数 1 (鍵を平文で並べたもの) と版数 2 (独自導出の種) は読めない。\n\
          BIP39 / BIP32 へ移す際に移行経路は用意しないと決めている。\n\
          古いウォレットの資金は、そちらの実装で送り出してから作り直すこと。"
     )]
     UnknownVersion {
-        /// 対象のファイル。
-        path: PathBuf,
-        /// ファイルに書かれていた版数。
+        /// どこから読んだか。
+        origin: Origin,
+        /// 書かれていた版数。
         found: u32,
     },
     /// ネットワークが食い違う。
@@ -156,6 +162,27 @@ pub enum KeystoreError {
     Kdf(String),
 }
 
+/// 記録の出どころ。**ファイルとは限らない。**
+///
+/// ブラウザのウォレットは同じ形式を localStorage に置く。誤りの文言が
+/// 「ファイルを読めない」と言い切ってしまうと、そちらでは嘘になる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// ファイルから読んだ。
+    File(PathBuf),
+    /// 文字列として渡された。
+    Text,
+}
+
+impl std::fmt::Display for Origin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Origin::File(path) => write!(f, "{}", path.display()),
+            Origin::Text => f.write_str("ウォレットの記録"),
+        }
+    }
+}
+
 /// 版数だけを読むための形。
 #[derive(Deserialize)]
 struct Versioned {
@@ -192,7 +219,10 @@ struct CipherParams {
 ///
 /// 種を復号した状態で保持する。落ちるときに消える。
 pub struct Keystore {
-    path: PathBuf,
+    /// 書き戻す先。ブラウザのように**ファイルを持たない置き場**もあるので、
+    /// 無い場合がある。無ければ [`Keystore::to_json`] で取り出して、
+    /// 呼んだ側が自分で置く。
+    path: Option<PathBuf>,
     network: Network,
     /// 控えの語。**表示し直すためだけに持つ。**
     mnemonic: Mnemonic,
@@ -256,10 +286,27 @@ impl Keystore {
         if path.exists() {
             return Err(KeystoreError::AlreadyExists(path.to_path_buf()));
         }
+        let mut store = Keystore::in_memory(network, passphrase, mnemonic, mnemonic_passphrase)?;
+        store.path = Some(path.to_path_buf());
+        store.save()?;
+        Ok(store)
+    }
+
+    /// 控えの語から、置き場を決めずにウォレットを組み立てる。
+    ///
+    /// **ファイルに触らない。** 書き出すときは [`Keystore::to_json`] を
+    /// 使い、置き場は呼んだ側が決める。ブラウザはこれを使って localStorage
+    /// に置く。
+    pub fn in_memory(
+        network: Network,
+        passphrase: &[u8],
+        mnemonic: &Mnemonic,
+        mnemonic_passphrase: &str,
+    ) -> Result<Keystore, KeystoreError> {
         check_passphrase(passphrase)?;
 
         let store = Keystore {
-            path: path.to_path_buf(),
+            path: None,
             network,
             seed: Seed::from_mnemonic(mnemonic, mnemonic_passphrase),
             mnemonic: mnemonic.clone(),
@@ -267,14 +314,13 @@ impl Keystore {
             passphrase: Passphrase(passphrase.to_vec()),
         };
         // 経路が確定しないネットワークでは、鍵を 1 本も導けない。
-        // **ファイルを作る前に断る。** 作ってしまうと、開くたびに失敗する
+        // **記録を作る前に断る。** 作ってしまうと、開くたびに失敗する
         // ウォレットが残る。
         store.seed.derive(network, 0)?;
-        store.save()?;
         Ok(store)
     }
 
-    /// 既存のウォレットを開く。
+    /// 既存のウォレットをファイルから開く。
     pub fn open(
         path: &Path,
         network: Network,
@@ -285,35 +331,54 @@ impl Keystore {
             path: path.to_path_buf(),
             source,
         })?;
+        let opened = Keystore::parse(&text, network, passphrase, Origin::File(path.to_path_buf()));
+        text.zeroize();
+        let mut store = opened?;
+        store.path = Some(path.to_path_buf());
+        Ok(store)
+    }
+
+    /// 記録の文字列からウォレットを開く。
+    ///
+    /// **ファイルに触らない。** 形式は [`Keystore::open`] が読むものと同じ
+    /// なので、ブラウザで作った記録を CLI で開けるし、その逆もできる。
+    ///
+    /// 呼んだ側は、渡した文字列を用が済み次第 [`Zeroize`] で消すこと。
+    pub fn from_json(
+        text: &str,
+        network: Network,
+        passphrase: &[u8],
+    ) -> Result<Keystore, KeystoreError> {
+        Keystore::parse(text, network, passphrase, Origin::Text)
+    }
+
+    /// 記録を読んで中身を取り出す。出どころは文言のためだけに使う。
+    fn parse(
+        text: &str,
+        network: Network,
+        passphrase: &[u8],
+        origin: Origin,
+    ) -> Result<Keystore, KeystoreError> {
+        let malformed = |what: String| KeystoreError::Malformed {
+            origin: origin.clone(),
+            message: what,
+        };
         // **版数を先に読む。** 中身の形は版数ごとに違うため、丸ごと読んで
-        // から確かめると、古いファイルに対して「kdf が無い」といった
+        // から確かめると、古い記録に対して「kdf が無い」といった
         // 的外れな説明を返すことになる。
-        let probe: Versioned =
-            serde_json::from_str(&text).map_err(|e| KeystoreError::Malformed {
-                path: path.to_path_buf(),
-                message: e.to_string(),
-            })?;
+        let probe: Versioned = serde_json::from_str(text).map_err(|e| malformed(e.to_string()))?;
         if probe.version != FORMAT_VERSION {
-            text.zeroize();
             return Err(KeystoreError::UnknownVersion {
-                path: path.to_path_buf(),
+                origin,
                 found: probe.version,
             });
         }
 
-        let stored: Stored = serde_json::from_str(&text).map_err(|e| KeystoreError::Malformed {
-            path: path.to_path_buf(),
-            message: e.to_string(),
-        })?;
-        text.zeroize();
-        let stored_network: Network =
-            stored
-                .network
-                .parse()
-                .map_err(|_| KeystoreError::Malformed {
-                    path: path.to_path_buf(),
-                    message: format!("知らないネットワーク: {}", stored.network),
-                })?;
+        let stored: Stored = serde_json::from_str(text).map_err(|e| malformed(e.to_string()))?;
+        let stored_network: Network = stored
+            .network
+            .parse()
+            .map_err(|_| malformed(format!("知らないネットワーク: {}", stored.network)))?;
         // ネットワークを取り違えると、別のチェーンのアドレスへ送りかねない。
         if stored_network != network {
             return Err(KeystoreError::WrongNetwork {
@@ -322,26 +387,24 @@ impl Keystore {
             });
         }
 
-        let malformed = |what: &str| KeystoreError::Malformed {
-            path: path.to_path_buf(),
-            message: what.to_string(),
-        };
         if stored.kdf.algorithm != "argon2id" {
-            return Err(malformed("知らない鍵導出方式"));
+            return Err(malformed("知らない鍵導出方式".to_string()));
         }
         if stored.cipher.algorithm != "chacha20poly1305" {
-            return Err(malformed("知らない暗号方式"));
+            return Err(malformed("知らない暗号方式".to_string()));
         }
-        let salt = from_hex(&stored.kdf.salt).ok_or_else(|| malformed("ソルトが読めない"))?;
-        let nonce = from_hex(&stored.cipher.nonce).ok_or_else(|| malformed("nonce が読めない"))?;
+        let salt =
+            from_hex(&stored.kdf.salt).ok_or_else(|| malformed("ソルトが読めない".to_string()))?;
+        let nonce = from_hex(&stored.cipher.nonce)
+            .ok_or_else(|| malformed("nonce が読めない".to_string()))?;
         if nonce.len() != NONCE_LEN {
-            return Err(malformed("nonce の長さが違う"));
+            return Err(malformed("nonce の長さが違う".to_string()));
         }
-        let ciphertext =
-            from_hex(&stored.ciphertext).ok_or_else(|| malformed("暗号文が読めない"))?;
+        let ciphertext = from_hex(&stored.ciphertext)
+            .ok_or_else(|| malformed("暗号文が読めない".to_string()))?;
 
         // **保存されたパラメータで導出する。** 現在の既定値で導出すると、
-        // 古いファイルを開けなくなる。
+        // 古い記録を開けなくなる。
         let mut key = derive_key(
             passphrase,
             &salt,
@@ -359,7 +422,7 @@ impl Keystore {
         let (mnemonic, seed) = unpacked?;
 
         Ok(Keystore {
-            path: path.to_path_buf(),
+            path: None,
             network,
             mnemonic,
             seed,
@@ -377,6 +440,36 @@ impl Keystore {
         self.accounts += 1;
         self.save()?;
         Ok(Address::from_pubkey(self.network, &key.public_key()))
+    }
+
+    /// 番号を指定してアドレスを導く。**導出済みの数は動かさない。**
+    ///
+    /// 控えの語だけから復元したとき、何個まで使われていたかはどこにも
+    /// 書かれていない。探すには、まだ自分のものと決めていない番号の
+    /// アドレスを先に作って、鎖に出ていないか問い合わせる必要がある。
+    /// そのための口である。
+    pub fn addresses_at(&self, from: u32, count: u32) -> Result<Vec<Address>, KeystoreError> {
+        let mut out = Vec::with_capacity(count as usize);
+        for index in from..from.saturating_add(count) {
+            let key = self.seed.derive(self.network, index)?;
+            out.push(Address::from_pubkey(self.network, &key.public_key()));
+        }
+        Ok(out)
+    }
+
+    /// 導出済みの数を、探索で分かった数まで増やす。
+    ///
+    /// **減らさない。** 減らすと、既に配ったアドレスを自分のものとして
+    /// 見なくなり、そこに届いた資金が見えなくなる。
+    pub fn grow_to(&mut self, accounts: u32) -> Result<(), KeystoreError> {
+        if accounts <= self.accounts {
+            return Ok(());
+        }
+        // 届かない番号を受け入れてから気付くと、開くたびに失敗する記録が
+        // 残る。**増やす前に導けることを確かめる。**
+        self.seed.derive(self.network, accounts - 1)?;
+        self.accounts = accounts;
+        self.save()
     }
 
     /// ネットワーク。
@@ -436,26 +529,29 @@ impl Keystore {
         &self.mnemonic
     }
 
-    /// 暗号化して書き出す。
+    /// 暗号化して、記録の文字列にする。
     ///
-    /// ソルトと nonce は**保存のたびに作り直す**。同じ鍵と nonce で
+    /// `salt` と `nonce` は**呼ぶたびに作り直すこと**。同じ鍵と nonce で
     /// 2 度暗号化すると、ChaCha20 の鍵流が再利用され、平文の差分が漏れる。
-    fn save(&self) -> Result<(), KeystoreError> {
-        let mut salt = [0u8; SALT_LEN];
-        let mut nonce = [0u8; NONCE_LEN];
-        fill_random(&mut salt);
-        fill_random(&mut nonce);
-
+    ///
+    /// 乱数を引数で受け取るのは、**ブラウザの wasm が乱数源を持たない**
+    /// ためである。あちらでは `crypto.getRandomValues` が出した値が
+    /// ここへ渡ってくる。
+    pub fn to_json(
+        &self,
+        salt: &[u8; SALT_LEN],
+        nonce: &[u8; NONCE_LEN],
+    ) -> Result<String, KeystoreError> {
         let mut key = derive_key(
             &self.passphrase.0,
-            &salt,
+            salt,
             ARGON_M_COST,
             ARGON_T_COST,
             ARGON_P_COST,
         )?;
         let aad = associated_data(&self.network.to_string(), self.accounts);
         let mut payload = pack(&self.mnemonic, &self.seed);
-        let ciphertext = encrypt(&key, &nonce, &payload, &aad);
+        let ciphertext = encrypt(&key, nonce, &payload, &aad);
         payload.zeroize();
         key.zeroize();
         let ciphertext = ciphertext?;
@@ -465,21 +561,35 @@ impl Keystore {
             network: self.network.to_string(),
             kdf: KdfParams {
                 algorithm: "argon2id".to_string(),
-                salt: to_hex(&salt),
+                salt: to_hex(salt),
                 m_cost: ARGON_M_COST,
                 t_cost: ARGON_T_COST,
                 p_cost: ARGON_P_COST,
             },
             cipher: CipherParams {
                 algorithm: "chacha20poly1305".to_string(),
-                nonce: to_hex(&nonce),
+                nonce: to_hex(nonce),
             },
             ciphertext: to_hex(&ciphertext),
             accounts: self.accounts,
         };
-        let text = serde_json::to_string_pretty(&stored).expect("必ず JSON になる");
+        Ok(serde_json::to_string_pretty(&stored).expect("必ず JSON になる"))
+    }
 
-        write_atomically(&self.path, &text)
+    /// 暗号化してファイルへ書き出す。
+    ///
+    /// 置き場を持たないウォレット ([`Keystore::in_memory`] で作ったもの)
+    /// では**何もしない**。書き出しは [`Keystore::to_json`] で行う。
+    fn save(&self) -> Result<(), KeystoreError> {
+        let Some(path) = self.path.as_deref() else {
+            return Ok(());
+        };
+        let mut salt = [0u8; SALT_LEN];
+        let mut nonce = [0u8; NONCE_LEN];
+        fill_random(&mut salt);
+        fill_random(&mut nonce);
+        let text = self.to_json(&salt, &nonce)?;
+        write_atomically(path, &text)
     }
 }
 
@@ -500,8 +610,10 @@ fn pack(mnemonic: &Mnemonic, seed: &Seed) -> Vec<u8> {
 
 /// [`pack`] の逆。
 fn unpack(plaintext: &[u8]) -> Result<(Mnemonic, Seed), KeystoreError> {
+    // 復号まで済んだ中身の話なので、出どころがファイルでも文字列でも
+    // 文言は変わらない。
     let bad = |what: &str| KeystoreError::Malformed {
-        path: PathBuf::new(),
+        origin: Origin::Text,
         message: what.to_string(),
     };
     let (&len, rest) = plaintext.split_first().ok_or_else(|| bad("暗号文が空"))?;

@@ -21,6 +21,9 @@ struct Cli {
     command: Command,
 }
 
+// `Run` は旗の入れ物であり、他の枝より大きい。**起動時に 1 個しか
+// 作らない**ので、箱に入れて間接参照を増やす意味が無い。
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// ノードを動かす。
@@ -114,6 +117,31 @@ enum Command {
         #[arg(long, value_name = "住所", num_args = 0..=1,
               default_missing_value = "127.0.0.1:8080")]
         explorer: Option<SocketAddr>,
+        /// ブラウザのウォレットを待ち受ける住所。既定は `127.0.0.1:25565`。
+        ///
+        /// **署名はブラウザの中で終わる。** 種も秘密鍵もノードへは渡らず、
+        /// この口が受け取るのは署名済みのトランザクションだけである。
+        /// 索引が要るので、渡すと `--index` も指定したものとして扱う。
+        ///
+        /// エクスプローラとは**別の口にしてある**。ブラウザの保存領域は
+        /// ポートごとに仕切られるため、片方に穴があってももう片方の
+        /// 記録は読めない。
+        ///
+        /// ループバック以外を指定するには、`--tls-cert` と `--tls-key` で
+        /// 証明書を渡すこと。**平文で配った画面は差し替えられる。**
+        /// 差し替えられた画面は鍵をそのまま抜き取れる。
+        #[arg(long, value_name = "住所", num_args = 0..=1,
+              default_missing_value = "127.0.0.1:25565")]
+        wallet: Option<SocketAddr>,
+        /// ウォレットの口に使う証明書 (PEM)。`--tls-key` と対で渡す。
+        ///
+        /// 証明書は公開してよいものであり、秘密なのは鍵の方である。
+        /// **中身は起動時に一度だけ読む。** 更新したら再起動すること。
+        #[arg(long, value_name = "経路", requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+        /// ウォレットの口に使う秘密鍵 (PEM)。`--tls-cert` と対で渡す。
+        #[arg(long, value_name = "経路", requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
         /// 採掘も接続も終わったら、この秒数で終了する。
         ///
         /// 試験のためのもの。省略すると終了しない。
@@ -188,6 +216,9 @@ fn run() -> Result<(), String> {
             index,
             drop_index,
             explorer,
+            wallet,
+            tls_cert,
+            tls_key,
             exit_after,
         } => {
             let network = common.network()?;
@@ -239,7 +270,7 @@ fn run() -> Result<(), String> {
 
                 // エクスプローラは索引に頼る。無いまま開いても取引と
                 // アドレスが引けないので、暗黙に作る。
-                if index || explorer.is_some() {
+                if index || explorer.is_some() || wallet.is_some() {
                     match handle.index_from().await? {
                         Some(0) => println!("索引は既にある"),
                         _ => {
@@ -263,6 +294,30 @@ fn run() -> Result<(), String> {
                 if let Some(addr) = explorer {
                     let bound = oag_node::explorer::start_explorer(handle.clone(), addr).await?;
                     println!("エクスプローラを http://{bound}/ で開いた");
+                }
+
+                if let Some(addr) = wallet {
+                    let tls = match (&tls_cert, &tls_key) {
+                        (Some(cert), Some(key)) => Some(oag_node::wallet::load_tls(cert, key)?),
+                        // clap の `requires` が片方だけを弾く。
+                        _ => None,
+                    };
+                    // **平文のまま外へ出させない。** 通信路は署名が守るが、
+                    // 画面を配る線は何も守らない。差し替えられた画面は
+                    // 本物と見分けが付かないまま鍵を抜き取れる。
+                    if tls.is_none() && !addr.ip().is_loopback() {
+                        return Err(format!(
+                            "{addr} は手元の機械の外から届く。ウォレットの画面を\n\
+                             平文で配ると、途中で差し替えられても利用者には分からない。\n\
+                             差し替えられた画面は種をそのまま持ち出せる。\n\
+                             外に出すなら --tls-cert と --tls-key を渡すこと。\n\
+                             手元で試すだけなら --wallet 127.0.0.1:{} で足りる。",
+                            addr.port()
+                        ));
+                    }
+                    let scheme = if tls.is_some() { "https" } else { "http" };
+                    let bound = oag_node::wallet::start_wallet(handle.clone(), addr, tls).await?;
+                    println!("ウォレットを {scheme}://{bound}/ で開いた");
                 }
 
                 if !external_addr.is_empty() {

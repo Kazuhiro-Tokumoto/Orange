@@ -874,7 +874,7 @@ fn page(title: &str, body: &str) -> String {
     )
 }
 
-const CSS: &str = "\
+pub(crate) const CSS: &str = "\
 :root{--bg:#fff;--fg:#1a1a1a;--dim:#666;--line:#e3e3e3;--accent:#e8720c;--card:#faf9f7;}\
 @media (prefers-color-scheme:dark){:root{--bg:#16150f;--fg:#ececec;--dim:#9a9a9a;--line:#333;--accent:#ff9f45;--card:#1f1e18;}}\
 *{box-sizing:border-box}\

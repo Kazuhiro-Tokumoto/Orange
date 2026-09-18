@@ -44,6 +44,47 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+  wasm:
+    name: ブラウザのウォレット (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ツールチェーンを用意する
+        run: rustup show && rustup target add wasm32-unknown-unknown
+
+      - name: キャッシュ
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-wasm-${{ hashFiles('**/Cargo.lock') }}
+
+      # 埋め込んである wasm は、原稿から作り直したものと一致していなければ
+      # ならない。**古いまま置き去りにされると、直したはずの不具合が
+      # ブラウザ側に残る。**
+      - name: 組み直して、置いてあるものと比べる
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="custom"'
+        run: |
+          cargo build -p oag-wallet-wasm --target wasm32-unknown-unknown --release
+          built=target/wasm32-unknown-unknown/release/oag_wallet_wasm.wasm
+          kept=crates/oag-node/assets/wallet.wasm
+          if ! cmp -s "$built" "$kept"; then
+            echo "::error::crates/oag-node/assets/wallet.wasm が古い。"
+            echo "crates/oag-node/assets/README.md の手順で作り直すこと。"
+            ls -l "$built" "$kept"
+            exit 1
+          fi
+          echo "一致した ($(stat -c%s "$kept") バイト)"
+
+      # 取り込み (import) が 1 つでもあると、ブラウザ側に糊が要るように
+      # なる。**糊を書かずに済んでいることを、ここで確かめ続ける。**
+      - name: 取り込みが無いことを確かめる
+        run: python3 tools/wasm-imports.py crates/oag-node/assets/wallet.wasm
+
   msrv:
     name: MSRV (Cargo.toml の rust-version)
     runs-on: ubuntu-latest
