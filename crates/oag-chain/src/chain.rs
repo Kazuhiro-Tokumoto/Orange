@@ -264,6 +264,37 @@ impl<S: ChainStore> Chain<S> {
         self.store.hash_at_height(height).map_err(Self::store_err)
     }
 
+    /// `from` から親をたどって、高さ `height` の祖先のハッシュを返す。
+    ///
+    /// # なぜ [`hash_at_height`](Self::hash_at_height) では足りないのか
+    ///
+    /// あちらが見ているのは**アクティブチェーン**の高さの索引である。
+    /// headers-first の同期では、ヘッダだけが遥か先まで届いていて本体が
+    /// 1 つも繋がっていない時期がある。そのときアクティブチェーンの高さは
+    /// 0 のままなので、あちらは知っているはずのブロックにも `None` を返す。
+    ///
+    /// こちらはインデックス (ヘッダの木) を辿るので、本体が無くても引ける。
+    /// 枝を指定するため、分岐していても取り違えない。
+    pub fn ancestor_hash_at(&self, from: &Hash, height: u64) -> Result<Option<Hash>, ChainError> {
+        let Some(mut entry) = self.index.get(from) else {
+            return Ok(None);
+        };
+        if entry.height() < height {
+            return Ok(None);
+        }
+        // アクティブチェーン上なら、高さの索引で 1 回で引ける。
+        if self.is_active(from)? {
+            return self.hash_at_height(height);
+        }
+        while entry.height() > height {
+            let Some(parent) = self.index.get(&entry.prev_hash()) else {
+                return Ok(None);
+            };
+            entry = parent;
+        }
+        Ok(Some(entry.hash))
+    }
+
     /// そのハッシュがアクティブチェーン上にあるか。
     fn is_active(&self, hash: &Hash) -> Result<bool, ChainError> {
         let Some(entry) = self.index.get(hash) else {

@@ -51,6 +51,15 @@ pub enum NodeError {
     /// 掘ったブロックが受理されなかった。
     #[error("自分で掘ったブロックが受理されなかった: {0:?}")]
     SelfMinedRejected(AcceptOutcome),
+    /// RandomX のシードになるブロックを知らない。
+    ///
+    /// **ここで代わりのハッシュを使ってはならない。** 鍵が違えば RandomX は
+    /// 違うハッシュを返し、正しいブロックの PoW が落ちる。
+    #[error("高さ {seed_height} のブロックを知らないため、RandomX のシードを決められない")]
+    UnknownSeedBlock {
+        /// シードになるはずの高さ。
+        seed_height: u64,
+    },
     /// タイムスタンプを決められない。
     #[error("チェーンの先端が未来すぎる (Median Time Past {mtp}、現在 {now})")]
     ClockTooFarBehind {
@@ -175,9 +184,18 @@ impl Node {
 
     /// この高さのシードエポックに合う検証器を用意する。
     ///
+    /// `branch` は検証しようとしているブロックの**親**のハッシュである。
+    /// シードはその枝の祖先から引く。`seed_height(h) < h` なので、シードは
+    /// 必ず親か親の祖先にあたる。
+    ///
     /// エポックが変わっていなければ何もしない。初期化には 256 MB の確保が
     /// 伴うため、毎ブロック作り直すわけにはいかない。
-    fn ensure_verifier(&mut self, height: u64) -> Result<(), NodeError> {
+    ///
+    /// **エポックが同じなら枝は見直さない。** 見直すには毎回祖先を辿る
+    /// ことになり、初期同期の全体で効いてくる。シードのブロックは
+    /// [`SEED_LAG`](oag_consensus::params::SEED_LAG) だけ後ろにあるので、
+    /// それより浅いリオーグでシードは動かない (`docs/SPEC.md` §11.3)。
+    fn ensure_verifier(&mut self, height: u64, branch: &Hash) -> Result<(), NodeError> {
         let wanted = seed_height(height);
         if self
             .verifier
@@ -186,7 +204,7 @@ impl Node {
         {
             return Ok(());
         }
-        let seed = self.seed_for(wanted)?;
+        let seed = self.seed_for(wanted, branch)?;
         let verifier = RandomXVerifier::new(&seed, wanted)?;
         if !verifier.uses_jit() {
             // JIT を使えない環境である。検証は動くが 10 倍ほど遅い。
@@ -196,6 +214,10 @@ impl Node {
                 verifier.flags()
             );
         }
+        crate::log_verify!(
+            "RandomX のシードを高さ {wanted} のブロック {} に切り替えた",
+            crate::log::short(&seed)
+        );
         self.verifier = Some((wanted, verifier));
         Ok(())
     }
@@ -207,9 +229,10 @@ impl Node {
     fn with_verifier<T>(
         &mut self,
         height: u64,
+        branch: &Hash,
         f: impl FnOnce(&mut Self, &RandomXVerifier) -> Result<T, NodeError>,
     ) -> Result<T, NodeError> {
-        self.ensure_verifier(height)?;
+        self.ensure_verifier(height, branch)?;
         let (epoch, verifier) = self.verifier.take().expect("直前に用意した");
         let result = f(self, &verifier);
         self.verifier = Some((epoch, verifier));
@@ -219,7 +242,8 @@ impl Node {
     /// 他所から来たブロックを受け取る。
     pub fn accept_block(&mut self, block: Block, now: i64) -> Result<AcceptOutcome, NodeError> {
         let height = block.header.height;
-        let outcome = self.with_verifier(height, |node, verifier| {
+        let branch = block.header.prev_hash;
+        let outcome = self.with_verifier(height, &branch, |node, verifier| {
             Ok(node.chain.accept_block(block.clone(), verifier, now)?)
         })?;
         self.sync_mempool(&outcome, &block)?;
@@ -276,7 +300,8 @@ impl Node {
         now: i64,
     ) -> Result<HeaderOutcome, NodeError> {
         let height = header.height;
-        self.with_verifier(height, |node, verifier| {
+        let branch = header.prev_hash;
+        self.with_verifier(height, &branch, |node, verifier| {
             Ok(node.chain.accept_header(header, verifier, now)?)
         })
     }
@@ -342,17 +367,38 @@ impl Node {
     /// 採掘器はこれで建てる。**エポックが変われば建て直しである。**
     /// 呼び出し側は返ってきた高さを覚えておき、変わったかどうかを見る。
     pub fn mining_seed(&self) -> Result<(u64, Hash), NodeError> {
-        let height = self.chain.tip()?.height() + 1;
-        let wanted = seed_height(height);
-        Ok((wanted, self.seed_for(wanted)?))
+        let tip = self.chain.tip()?;
+        let wanted = seed_height(tip.height() + 1);
+        Ok((wanted, self.seed_for(wanted, &tip.hash)?))
     }
 
-    /// そのシード高さのブロックハッシュ。
-    fn seed_for(&self, seed_height: u64) -> Result<Hash, NodeError> {
-        Ok(self
-            .chain
-            .hash_at_height(seed_height)?
-            .unwrap_or(self.chain.tip()?.hash))
+    /// `branch` の枝で、そのシード高さにあたるブロックハッシュ。
+    ///
+    /// **アクティブチェーンの高さの索引では引けない。** headers-first の
+    /// 同期では、ヘッダが高さ数千まで届いていても本体が 1 つも繋がって
+    /// いない時期がある。その間アクティブチェーンの高さは 0 のままなので、
+    /// 索引は知っているはずのシードにも `None` を返す。
+    ///
+    /// 以前はそこで先端のハッシュを代わりに使っていた。鍵が違えば RandomX は
+    /// 違うハッシュを返すので、**正しいヘッダの PoW が全部落ちる**。最初の
+    /// エポック境界 (高さ 2112) で同期が止まり、二度と先へ進めなくなる。
+    fn seed_for(&self, seed_height: u64, branch: &Hash) -> Result<Hash, NodeError> {
+        // 最初のエポックのシードはジェネシスのハッシュであり、枝によらない。
+        // 高さ 2112 未満はすべてここを通る。
+        if seed_height == 0 {
+            return self
+                .chain
+                .hash_at_height(0)?
+                .ok_or(NodeError::UnknownSeedBlock { seed_height });
+        }
+        // 親を知らなければシードも決められないが、**断る理由はシードでは
+        // なく親である**。そのまま名乗る。
+        if !self.chain.contains(branch) {
+            return Err(ChainError::UnknownParent(*branch).into());
+        }
+        self.chain
+            .ancestor_hash_at(branch, seed_height)?
+            .ok_or(NodeError::UnknownSeedBlock { seed_height })
     }
 
     /// ブロックをファイルに書き出す。
