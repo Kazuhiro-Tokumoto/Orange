@@ -1,0 +1,105 @@
+//! ノードの記録。
+//!
+//! # なぜ印を付けるのか
+//!
+//! **「運んでいる」と「確かめた」は別の話である。** 混ぜて出すと、
+//! 止まったときにどちらで止まったのかが読めない。相手が寄越さないのか、
+//! こちらが捌けていないのかは、対処が正反対になる。
+//!
+//! 行の先頭に何の話かを置く。目で追えるし、`grep '\[同期\]'` で片方だけ
+//! 取り出せる。
+//!
+//! ```text
+//! [ピア] 203.0.113.9:9444 と繋がった (/oag-node:0.1.0/、高さ 2126)
+//! [同期] ヘッダ +2000 (2000 件中)  高さ 2000 まで判明
+//! [同期] 本体 1204/2126 (57%)  12.4 blk/s  残り 922
+//! [同期] 追いついた  高さ 2126
+//! [検証] 高さ 2127 を接続  取引 1  203 B  mempool 0 件
+//! [取引] 受信 3f2a1b9c  手数料 0.0001 OAG  186 B  mempool 1 件
+//! ```
+//!
+//! # 出し先
+//!
+//! 進んでいることの記録は標準出力、警告は標準エラーに出す。`2>` で
+//! 分ければ、困ったことだけを別に残せる。
+
+use oag_primitives::Hash;
+
+/// ハッシュの頭 8 桁。
+///
+/// 64 桁を毎行並べると、肝心の数字が画面の外へ出る。取り違えの心配が
+/// ある場面 (掘れたブロックなど) では全部出す。
+pub fn short(hash: &Hash) -> String {
+    let full = hash.to_string();
+    full.chars().take(8).collect()
+}
+
+/// 大きさの表記。
+pub fn bytes(n: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    match n {
+        n if n < 1024 => format!("{n} B"),
+        n if (n as f64) < MIB => format!("{:.1} KiB", n as f64 / KIB),
+        n => format!("{:.1} MiB", n as f64 / MIB),
+    }
+}
+
+/// 同期 — 相手から運んでくる話。
+///
+/// ヘッダと本体がどこまで来たか。**中身が正しいかはここでは言わない。**
+#[macro_export]
+macro_rules! log_sync {
+    ($($arg:tt)*) => { println!("[同期] {}", format_args!($($arg)*)) };
+}
+
+/// 検証 — 運んできたものを自分で確かめた話。
+///
+/// 接続できた、リオーグした。**自分が納得したことだけをここに出す。**
+#[macro_export]
+macro_rules! log_verify {
+    ($($arg:tt)*) => { println!("[検証] {}", format_args!($($arg)*)) };
+}
+
+/// 取引 — mempool の出入り。
+#[macro_export]
+macro_rules! log_tx {
+    ($($arg:tt)*) => { println!("[取引] {}", format_args!($($arg)*)) };
+}
+
+/// ピア — 接続の出入り。
+#[macro_export]
+macro_rules! log_peer {
+    ($($arg:tt)*) => { println!("[ピア] {}", format_args!($($arg)*)) };
+}
+
+/// 採掘。
+#[macro_export]
+macro_rules! log_mine {
+    ($($arg:tt)*) => { println!("[採掘] {}", format_args!($($arg)*)) };
+}
+
+/// 警告。標準エラーへ出す。
+#[macro_export]
+macro_rules! log_warn {
+    ($($arg:tt)*) => { eprintln!("[警告] {}", format_args!($($arg)*)) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_short_hash_is_eight_digits() {
+        assert_eq!(short(&Hash::ZERO).len(), 8);
+        assert_eq!(short(&Hash::ZERO), "00000000");
+    }
+
+    #[test]
+    fn sizes_change_unit_at_the_boundary() {
+        assert_eq!(bytes(0), "0 B");
+        assert_eq!(bytes(1023), "1023 B");
+        assert_eq!(bytes(1024), "1.0 KiB");
+        assert_eq!(bytes(1024 * 1024), "1.0 MiB");
+    }
+}

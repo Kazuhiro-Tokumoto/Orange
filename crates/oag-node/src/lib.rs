@@ -2,6 +2,7 @@
 //!
 //! - [`addrbook`] — ピアの住所帳
 //! - [`connect`] — 外向きの接続を保つ
+//! - [`log`] — 記録の印付け
 //! - [`genesis`] — ネットワークごとのジェネシスブロック
 //! - [`node`] — チェーン・mempool・採掘を束ねた本体
 //! - [`service`] — 本体を専用スレッドに載せ、非同期側から使えるようにする
@@ -20,6 +21,7 @@ pub mod addrbook;
 pub mod connect;
 pub mod explorer;
 pub mod genesis;
+pub mod log;
 pub mod node;
 pub mod peer;
 pub mod rpc;
@@ -45,12 +47,12 @@ pub async fn accept_loop(handle: NodeHandle, listener: Listener) {
                 let handle = handle.clone();
                 tokio::spawn(async move {
                     if let Err(e) = peer::run(handle, conn).await {
-                        eprintln!("ピアとのやり取りを打ち切った: {e}");
+                        crate::log_warn!("ピアとのやり取りを打ち切った: {e}");
                     }
                 });
             }
             Err(e) => {
-                eprintln!("接続を受け入れられない: {e}");
+                crate::log_warn!("接続を受け入れられない: {e}");
                 return;
             }
         }
@@ -63,10 +65,10 @@ pub async fn dial(handle: NodeHandle, addr: SocketAddr) {
     match Connection::connect(magic_for(network), addr).await {
         Ok(conn) => {
             if let Err(e) = peer::run(handle, conn).await {
-                eprintln!("{addr} とのやり取りを打ち切った: {e}");
+                crate::log_warn!("{addr} とのやり取りを打ち切った: {e}");
             }
         }
-        Err(e) => eprintln!("{addr} に繋げない: {e}"),
+        Err(e) => crate::log_warn!("{addr} に繋げない: {e}"),
     }
 }
 

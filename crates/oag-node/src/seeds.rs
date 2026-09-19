@@ -72,9 +72,9 @@ pub async fn resolve(network: Network) -> Vec<SocketAddr> {
                         count += 1;
                     }
                 }
-                println!("シード {host} から {count} 件");
+                crate::log_peer!("シード {host} から {count} 件");
             }
-            Err(e) => eprintln!("シード {host} を引けない: {e}"),
+            Err(e) => crate::log_warn!("シード {host} を引けない: {e}"),
         }
     }
     found

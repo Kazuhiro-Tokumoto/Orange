@@ -105,7 +105,7 @@ pub async fn start_wallet(
             let (stream, _) = match listener.accept().await {
                 Ok(pair) => pair,
                 Err(e) => {
-                    eprintln!("ウォレットの接続を受け入れられない: {e}");
+                    crate::log_warn!("ウォレットの接続を受け入れられない: {e}");
                     return;
                 }
             };

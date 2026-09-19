@@ -500,7 +500,7 @@ impl AddressBook {
                 book.dirty = false;
             }
             Ok(stored) => {
-                eprintln!(
+                crate::log_warn!(
                     "{} は版数 {} / {} のもので、いまの {network} と合わない。空から始める。",
                     path.display(),
                     stored.version,
@@ -508,7 +508,7 @@ impl AddressBook {
                 );
             }
             Err(e) => {
-                eprintln!("{} を読めない ({e})。空から始める。", path.display());
+                crate::log_warn!("{} を読めない ({e})。空から始める。", path.display());
             }
         }
         book

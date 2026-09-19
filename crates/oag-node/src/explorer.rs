@@ -62,7 +62,7 @@ pub async fn start_explorer(handle: NodeHandle, addr: SocketAddr) -> Result<Sock
             let (stream, _) = match listener.accept().await {
                 Ok(pair) => pair,
                 Err(e) => {
-                    eprintln!("エクスプローラの接続を受け入れられない: {e}");
+                    crate::log_warn!("エクスプローラの接続を受け入れられない: {e}");
                     return;
                 }
             };

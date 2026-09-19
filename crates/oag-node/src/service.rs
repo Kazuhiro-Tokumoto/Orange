@@ -755,7 +755,18 @@ struct Service {
     stale_template: bool,
     /// いまの土台を組んだ時刻。
     template_built: Option<Instant>,
+    /// 同期の進み具合を最後に報せた時刻と、そのときの高さ。
+    ///
+    /// 初期同期で 1 ブロックずつ出すと数千行になる。追いつくまでは
+    /// [`PROGRESS_EVERY`] ごとにまとめ、追いついたら 1 ブロックずつ出す。
+    progress: Option<(Instant, u64)>,
 }
+
+/// 追いついたとみなす差。これ以内なら 1 ブロックずつ記録に出す。
+const SYNC_BEHIND: u64 = 16;
+
+/// 追いつくまでの間、進み具合を報せる間隔。
+const PROGRESS_EVERY: Duration = Duration::from_secs(2);
 
 /// 起動した専用スレッド。
 ///
@@ -806,6 +817,7 @@ impl NodeService {
                     mode: MiningMode::light(),
                     stale_template: true,
                     template_built: None,
+                    progress: None,
                 }
                 .run(rx);
             })
@@ -920,7 +932,7 @@ impl Service {
                     self.template_built = Some(Instant::now());
                 }
                 Err(e) => {
-                    eprintln!("採掘の土台を組めない: {e}。採掘を止める。");
+                    crate::log_warn!("採掘の土台を組めない: {e}。採掘を止める。");
                     self.stop_mining();
                     return;
                 }
@@ -935,7 +947,7 @@ impl Service {
         match self.node.accept_mined(block, now()) {
             Ok(MinedBlock { hash, height }) => {
                 self.mined += 1;
-                println!("掘れた: 高さ {height}  {hash}{}", self.rate_suffix());
+                crate::log_mine!("掘れた  高さ {height}  {hash}{}", self.rate_suffix());
                 self.announce_tip(None);
                 self.stale_template = true;
                 if self.mine_until.is_some_and(|limit| self.mined >= limit) {
@@ -945,7 +957,7 @@ impl Service {
             Err(e) => {
                 // 掘り当てたが先端になれなかった。**土台が古い。**
                 // 組み直して続ける。止める理由ではない。
-                eprintln!("掘ったブロックが先端にならなかった: {e}");
+                crate::log_warn!("掘ったブロックが先端にならなかった: {e}");
                 self.stale_template = true;
             }
         }
@@ -962,7 +974,7 @@ impl Service {
         let (epoch, seed) = match self.node.mining_seed() {
             Ok(found) => found,
             Err(e) => {
-                eprintln!("採掘のシードを引けない: {e}");
+                crate::log_warn!("採掘のシードを引けない: {e}");
                 return false;
             }
         };
@@ -976,7 +988,7 @@ impl Service {
         let threads = self.mode.resolved_threads();
         let fast = self.mode.fast;
         if fast {
-            println!(
+            crate::log_mine!(
                 "fast モードのデータセットを {threads} 個構築する \
                  (合計 {:.1} GB、1 分前後かかる)",
                 DATASET_GIB * threads.get() as f64
@@ -1013,9 +1025,9 @@ impl Service {
                 } else {
                     format!("fast {} 本・light {light} 本", threads.get() - light)
                 };
-                println!("{threads} スレッドで採掘する ({kind})");
+                crate::log_mine!("{threads} スレッドで採掘する ({kind})");
                 if fast && light > 0 {
-                    eprintln!(
+                    crate::log_warn!(
                         "2 GB を確保できなかった分は light モード (256 MB) で掘る。\n\
                          本数を減らすか、積んでいる memory を確かめること。"
                     );
@@ -1031,7 +1043,7 @@ impl Service {
                 true
             }
             Err(e) => {
-                eprintln!("採掘を始められない: {e}");
+                crate::log_warn!("採掘を始められない: {e}");
                 false
             }
         }
@@ -1220,7 +1232,7 @@ impl Service {
             Request::SaveAddresses => {
                 if self.node.addresses().is_dirty() {
                     if let Err(e) = self.node.addresses_mut().save() {
-                        eprintln!("住所帳を書き出せない: {e}");
+                        crate::log_warn!("住所帳を書き出せない: {e}");
                     }
                 }
             }
@@ -1393,6 +1405,14 @@ impl Service {
                 Err(e) => return Err(e.to_string()),
             }
         }
+        if new > 0 {
+            let top = headers.last().map(|h| h.height).unwrap_or(0);
+            crate::log_sync!(
+                "ヘッダ +{new} ({} 件中)  高さ {top} まで判明",
+                headers.len()
+            );
+        }
+
         Ok(HeadersAccepted {
             new,
             total: headers.len(),
@@ -1405,6 +1425,9 @@ impl Service {
         from: Option<PeerId>,
     ) -> Result<BlockAccepted, String> {
         let hash = block.header.hash();
+        let height = block.header.height;
+        let size = block.size();
+        let transactions = block.transactions.len();
         let before = self.node.chain().tip().map_err(|e| e.to_string())?.hash;
         let outcome = self.node.accept_block(block, now()).map_err(|e| {
             // 頼んだものが駄目だったのだから、依頼中の印は外す。
@@ -1417,8 +1440,73 @@ impl Service {
         let moved_tip = before != after;
         if moved_tip {
             self.announce_tip(from);
+            self.report_tip(height, transactions, size, &outcome);
         }
         Ok(BlockAccepted { outcome, moved_tip })
+    }
+
+    /// 先端が動いたことを記録に出す。
+    ///
+    /// **運んでいる途中と、追いついた後とを別の行にする。** 初期同期では
+    /// 1 ブロックずつ出しても読めないので [`PROGRESS_EVERY`] ごとにまとめ、
+    /// そこで言うのは「どこまで来たか」だけである。追いついてからは
+    /// 1 ブロックずつ、自分が確かめた中身を出す。
+    fn report_tip(
+        &mut self,
+        height: u64,
+        transactions: usize,
+        size: usize,
+        outcome: &AcceptOutcome,
+    ) {
+        if let AcceptOutcome::Reorganized(reorg) = outcome {
+            // まとめている途中でも必ず出す。枝が入れ替わったことは、
+            // 進み具合とは比べものにならないほど重要である。
+            crate::log_verify!(
+                "リオーグ  -{} +{}  高さ {height}",
+                reorg.disconnected.len(),
+                reorg.connected.len()
+            );
+            self.progress = None;
+            return;
+        }
+
+        let best = self
+            .node
+            .chain()
+            .best_header()
+            .map(|e| e.height())
+            .unwrap_or(height);
+
+        if best.saturating_sub(height) <= SYNC_BEHIND {
+            if self.progress.take().is_some() {
+                crate::log_sync!("追いついた  高さ {height}");
+            }
+            crate::log_verify!(
+                "高さ {height} を接続  取引 {transactions}  {}  mempool {} 件",
+                crate::log::bytes(size),
+                self.node.mempool().len()
+            );
+            return;
+        }
+
+        let now = Instant::now();
+        let Some((since, from_height)) = self.progress else {
+            // 数え始め。次の 1 回で速さが出せる。
+            self.progress = Some((now, height));
+            return;
+        };
+        let elapsed = now.duration_since(since);
+        if elapsed < PROGRESS_EVERY {
+            return;
+        }
+        let done = height.saturating_sub(from_height);
+        let rate = done as f64 / elapsed.as_secs_f64();
+        let pct = height as f64 * 100.0 / best.max(1) as f64;
+        crate::log_sync!(
+            "本体 {height}/{best} ({pct:.0}%)  {rate:.1} blk/s  残り {}",
+            best - height
+        );
+        self.progress = Some((now, height));
     }
 
     /// トランザクションを mempool に入れる。
@@ -1449,6 +1537,23 @@ impl Service {
             .mempool_mut()
             .accept(tx, &view, next_height, mtp)
             .map_err(|e| e.to_string())?;
+
+        // **受け取ったことを出す。** 届いていないのか、届いたが断られた
+        // のかは、外から見分けがつかない。断った側 (呼び出し元) は理由を
+        // 出すので、ここでは通った分だけを出せばよい。
+        let source = if from.is_some() { "受信" } else { "自前" };
+        let len = self.node.mempool().len();
+        match self.node.mempool().get(&accepted).map(|e| (e.fee, e.size)) {
+            Some((fee, size)) => crate::log_tx!(
+                "{source} {}  手数料 {fee} OAG  {}  mempool {len} 件",
+                crate::log::short(&accepted),
+                crate::log::bytes(size)
+            ),
+            None => crate::log_tx!(
+                "{source} {}  mempool {len} 件",
+                crate::log::short(&accepted)
+            ),
+        }
 
         // **通ったものだけを流す。** くれた相手には流し返さない。
         let _ = self.events.send(NodeEvent::NewTx {

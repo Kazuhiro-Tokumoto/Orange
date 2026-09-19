@@ -115,15 +115,16 @@ pub async fn run_as(
         .handshake(version)
         .await
         .map_err(|e| format!("{addr} とのハンドシェイクに失敗した: {e}"))?;
-    println!(
-        "ピア {addr} と繋がった ({}、高さ {})",
-        theirs.user_agent, theirs.start_height
+    crate::log_peer!(
+        "{addr} と繋がった ({}、高さ {})",
+        theirs.user_agent,
+        theirs.start_height
     );
 
     let source = conn.peer_addr().ok();
     let result = session(&handle, peer, conn, theirs.start_height, direction, source).await;
     handle.peer_gone(peer).await?;
-    println!("ピア {addr} との接続が切れた");
+    crate::log_peer!("{addr} との接続が切れた");
     result
 }
 
@@ -159,7 +160,7 @@ async fn session(
                 }
                 Err(TransportError::Closed) => break,
                 Err(e) => {
-                    eprintln!("受信に失敗した: {e}");
+                    crate::log_warn!("受信に失敗した: {e}");
                     break;
                 }
             }
@@ -177,6 +178,8 @@ async fn session(
         asked_headers_at: 0,
         addr_requests: 0,
         rejected_txs: 0,
+        last_body_at: now(),
+        stall_reported: false,
     };
 
     // 相手が先を行っていれば、まずヘッダを求める。
@@ -276,7 +279,17 @@ struct Session {
     addr_requests: u32,
     /// 受け付けなかったトランザクションの数。記録だけで、切る材料にはしない。
     rejected_txs: u64,
+    /// この相手から最後にブロックの本体を受け取った時刻。
+    last_body_at: i64,
+    /// 止まっていることを既に報せたか。**1 回だけ出す。**
+    stall_reported: bool,
 }
+
+/// この秒数だけ本体が来なければ、止まっていると見て記録に出す。
+///
+/// 相手が寄越さないのか、こちらが捌けていないのかで対処が正反対になる。
+/// **黙って待っているだけの時間を作らない。**
+const STALL_SECS: i64 = 30;
 
 /// `getheaders` を送り直すまでの間隔。
 ///
@@ -339,8 +352,32 @@ impl Session {
         handle: &NodeHandle,
         out: &mpsc::Sender<Message>,
     ) -> Result<(), String> {
+        self.report_stall(handle).await?;
         self.maybe_request_headers(handle, out).await?;
         self.request_bodies(handle, out).await
+    }
+
+    /// 遅れているのに本体が来ないことを、1 度だけ報せる。
+    ///
+    /// 進み具合の行は**ブロックが繋がったときにしか出ない**。止まると
+    /// 記録も止まり、外からは「同期し終わった」のと区別がつかなくなる。
+    async fn report_stall(&mut self, handle: &NodeHandle) -> Result<(), String> {
+        let ours = handle.best_header_height().await?;
+        if self.peer_height <= ours {
+            // 遅れていない。待っているのは当たり前である。
+            self.stall_reported = false;
+            return Ok(());
+        }
+        let waited = now() - self.last_body_at;
+        if waited < STALL_SECS || self.stall_reported {
+            return Ok(());
+        }
+        self.stall_reported = true;
+        crate::log_sync!(
+            "本体が {waited} 秒届かない (相手 {}、こちら {ours})",
+            self.peer_height
+        );
+        Ok(())
     }
 
     async fn on_message(
@@ -422,11 +459,9 @@ impl Session {
         }
         let full = headers.len() >= MAX_HEADERS;
 
+        // 何件取り込めたかはサービス側が出す。ここで出すと、同じ話が
+        // ピアの数だけ別の口から流れる。
         let accepted = handle.accept_headers(headers).await?;
-        println!(
-            "ヘッダを {} 件受け取った (うち新規 {})",
-            accepted.total, accepted.new
-        );
 
         // 満杯で返ってきたなら、まだ続きがある。すぐ求める。
         if full && accepted.new > 0 {
@@ -498,16 +533,17 @@ impl Session {
         block: oag_consensus::Block,
     ) -> Result<(), String> {
         let height = block.header.height;
+        self.last_body_at = now();
+        self.stall_reported = false;
         // くれた相手を添える。通ったとき、この相手には報せ返さない。
-        match handle.accept_block_from(block, Some(self.peer)).await {
-            Ok(accepted) => {
-                if accepted.moved_tip {
-                    println!("高さ {height} まで繋がった");
-                }
-            }
+        //
+        // 接続できたことを出すのはサービス側である。ここは「運んできた」
+        // までで、中身を確かめたかどうかは別の話として扱う。
+        handle
+            .accept_block_from(block, Some(self.peer))
+            .await
             // 不正なブロックを送ってきた相手は切る。
-            Err(e) => return Err(format!("高さ {height} のブロックを受け付けられない: {e}")),
-        }
+            .map_err(|e| format!("高さ {height} のブロックを受け付けられない: {e}"))?;
         self.request_bodies(handle, out).await
     }
 
@@ -526,8 +562,10 @@ impl Session {
             // 要るものだけを選んでもらう。すでに持っているもの、すでに
             // 誰かに頼んであるものは外れる。ここで頼んだという記録が
             // 残り、それが `tx` を受け取る条件になる。
+            let announced = txids.len();
             let wanted = handle.want_txs(self.peer, txids).await?;
             if !wanted.is_empty() {
+                crate::log_tx!("告知 {announced} 件  うち {} 件を要求", wanted.len());
                 let items = wanted.into_iter().map(InvItem::tx).collect();
                 send(out, Message::GetData(items)).await?;
             }
@@ -563,7 +601,10 @@ impl Session {
             // 記録だけ残す。切る理由にはしない。
             self.rejected_txs = self.rejected_txs.saturating_add(1);
             if self.rejected_txs % 100 == 1 {
-                eprintln!("トランザクションを受け付けなかった: {e}");
+                crate::log_warn!(
+                    "トランザクションを受け付けなかった ({} 件目): {e}",
+                    self.rejected_txs
+                );
             }
         }
         Ok(())

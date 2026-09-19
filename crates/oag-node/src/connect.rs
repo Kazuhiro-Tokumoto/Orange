@@ -118,13 +118,13 @@ pub async fn maintain(handle: NodeHandle, outbound: Outbound, fixed: Vec<SocketA
                     }
                 }
                 if let Err(e) = top_up(&handle, &outbound).await {
-                    eprintln!("繋ぎ先を選べない: {e}");
+                    crate::log_warn!("繋ぎ先を選べない: {e}");
                     return;
                 }
             }
             _ = save.tick() => {
                 if let Err(e) = handle.save_addresses().await {
-                    eprintln!("住所帳を書き出せない: {e}");
+                    crate::log_warn!("住所帳を書き出せない: {e}");
                     return;
                 }
             }
@@ -184,15 +184,15 @@ fn spawn_dial(handle: NodeHandle, outbound: Outbound, addr: SocketAddr) {
             Ok(Ok(conn)) => {
                 let _ = handle.address_outcome(addr, DialOutcome::Connected).await;
                 if let Err(e) = peer::run_as(handle.clone(), conn, Direction::Outbound).await {
-                    eprintln!("{addr} とのやり取りを打ち切った: {e}");
+                    crate::log_warn!("{addr} とのやり取りを打ち切った: {e}");
                 }
             }
             Ok(Err(e)) => {
-                eprintln!("{addr} に繋げない: {e}");
+                crate::log_warn!("{addr} に繋げない: {e}");
                 let _ = handle.address_outcome(addr, DialOutcome::Failed).await;
             }
             Err(_) => {
-                eprintln!("{addr} に繋がらない ({CONNECT_TIMEOUT:?} で諦めた)");
+                crate::log_warn!("{addr} に繋がらない ({CONNECT_TIMEOUT:?} で諦めた)");
                 let _ = handle.address_outcome(addr, DialOutcome::Failed).await;
             }
         }
