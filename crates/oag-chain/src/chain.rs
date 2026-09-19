@@ -503,12 +503,15 @@ impl<S: ChainStore> Chain<S> {
                 Ok(reorg) => return Ok(AcceptOutcome::Reorganized(reorg)),
                 Err(ConnectFailure {
                     hash,
-                    error: ChainError::Validation(_),
-                }) => {
+                    error: ChainError::Validation(ref e),
+                }) if !e.is_storage_failure() => {
                     // 実際に失敗したブロックとその子孫に印を付け、次の候補を試す。
                     self.mark_invalid(&hash)?;
                     continue;
                 }
+                // 記憶装置が読めなかっただけのときは、印を付けずに投げ返す。
+                // 印は永続化され子孫へ広がるため、一時的な障害で付けると
+                // 正しいチェーンへ二度と戻れなくなる。
                 Err(ConnectFailure { error, .. }) => return Err(error),
             }
         }

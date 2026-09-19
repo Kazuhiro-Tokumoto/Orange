@@ -238,6 +238,22 @@ pub enum ValidationError {
     },
 }
 
+impl ValidationError {
+    /// 記憶装置の失敗であり、**ブロックが不正であることを意味しない**。
+    ///
+    /// [`UtxoView::get`] が `Result` を返すのは、ディスクの不調を
+    /// 「その UTXO は存在しない」と取り違えないためである。その区別は
+    /// [`UtxoError::Backend`] として validate を抜けるまで保たれる。
+    ///
+    /// 呼び出し側は、この誤りでブロックに無効の印を付けてはならない。
+    /// 印は子孫へ広がり、永続化され、再起動しても消えない。一度の
+    /// 読み取り失敗で付けてしまうと、**そのノードは正しいチェーンへ
+    /// 二度と戻れなくなる**。
+    pub fn is_storage_failure(&self) -> bool {
+        matches!(self, ValidationError::Utxo(UtxoError::Backend(_)))
+    }
+}
+
 /// 直近のタイムスタンプ列から Median Time Past を求める。
 ///
 /// 新しい順・古い順のどちらで渡してもよい。末尾から
@@ -1135,6 +1151,22 @@ mod tests {
             validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1),
             Err(ValidationError::Sighash(SighashError::UnknownType(0x7f)))
         ));
+    }
+
+    // ━━━━━━━━ 記憶装置の失敗 ━━━━━━━━
+
+    #[test]
+    fn only_a_backend_error_counts_as_a_storage_failure() {
+        // 読めなかった。ブロックについては何も分かっていない。
+        assert!(ValidationError::Utxo(UtxoError::Backend("EIO".into())).is_storage_failure());
+
+        // 読めた結果として不正だった。ブロックの側の問題である。
+        assert!(
+            !ValidationError::Utxo(UtxoError::MissingUtxo(OutPoint::null())).is_storage_failure()
+        );
+        assert!(!ValidationError::MissingUtxo.is_storage_failure());
+        assert!(!ValidationError::BadMerkleRoot.is_storage_failure());
+        assert!(!ValidationError::AmountOverflow.is_storage_failure());
     }
 
     // ━━━━━━━━ 未知の版数 ━━━━━━━━
