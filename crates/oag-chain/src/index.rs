@@ -252,6 +252,50 @@ impl BlockIndex {
             .filter_map(move |key| self.entries.get(&key.hash))
     }
 
+    /// 先端の作業量を下回る候補を捨てる。捨てた件数を返す。
+    ///
+    /// # なぜ捨ててよいか
+    ///
+    /// [`candidates_above`](Self::candidates_above) に渡される作業量は、
+    /// 常に**アクティブチェーンの先端のもの**である。そして先端の作業量は
+    /// 決して減らない — 切り替える相手は厳密に上回る枝だけだからである
+    /// (`docs/SPEC.md` §10.6)。したがって、いま先端を下回るものが
+    /// **この先もう一度候補になることはない。**
+    ///
+    /// [`best_header`](Self::best_header) も同じである。アクティブチェーンの
+    /// 先端は常に有効なヘッダとして入っているので、最大値が先端の作業量を
+    /// 下回ることはない。下回るものを持っていても、返り値は変わらない。
+    ///
+    /// # なぜ必要か
+    ///
+    /// 捨てないと、この 2 つの集合はブロック 1 個につき 48 バイトの鍵を
+    /// 2 つ、**永久に積み続ける**。60 秒間隔では年 52 万ブロック積まれる
+    /// ので、常駐量が高さに比例して伸びる ([`docs/SPEC.md` §19])。
+    ///
+    /// 捨てたあとに残るのは、先端と、先端を上回る競合する枝だけである。
+    /// 分岐が無ければ **1 件**になる。
+    pub fn prune_below(&mut self, work: u128) -> usize {
+        // 同じ作業量の中では、ハッシュが大きいものほど「小さい」鍵になる
+        // (`WorkKey` の `Ord` はハッシュだけ逆順である)。したがって
+        // ハッシュを全ビット 1 にした鍵が、その作業量の**最小**である。
+        // ここで切れば、作業量がちょうど `work` のものは残る。
+        let floor = WorkKey {
+            work,
+            hash: Hash::from_bytes([0xff; 32]),
+        };
+        let before = self.with_body.len() + self.valid_headers.len();
+        self.with_body = self.with_body.split_off(&floor);
+        self.valid_headers = self.valid_headers.split_off(&floor);
+        before - (self.with_body.len() + self.valid_headers.len())
+    }
+
+    /// 先端の候補として覚えている件数。
+    ///
+    /// 常駐量が高さに比例していないことを確かめるために公開している。
+    pub fn tip_candidates(&self) -> usize {
+        self.with_body.len() + self.valid_headers.len()
+    }
+
     /// 最も作業量の多い、無効でないヘッダ。
     pub fn best_header(&self) -> Option<&BlockIndexEntry> {
         self.valid_headers

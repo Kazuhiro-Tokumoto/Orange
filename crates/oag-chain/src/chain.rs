@@ -213,12 +213,23 @@ impl<S: ChainStore> Chain<S> {
                 }
             }
         }
+        // 読み込んだ全件のうち、先端を下回るものは二度と候補にならない。
+        // ここで落としておかないと、起動しただけで高さに比例した常駐量を
+        // 抱えることになる。
+        chain.prune_tip_candidates()?;
         Ok(chain)
     }
 
     /// 背後の記憶域。
     pub fn store(&self) -> &S {
         &self.store
+    }
+
+    /// チェーンを畳んで記憶域を取り出す。
+    ///
+    /// 同じ記憶域で開き直すときに用いる。
+    pub fn into_store(self) -> S {
+        self.store
     }
 
     /// アクティブチェーンの先端。
@@ -247,6 +258,15 @@ impl<S: ChainStore> Chain<S> {
     /// インデックスに登録されているブロック数。
     pub fn indexed_blocks(&self) -> usize {
         self.index.len()
+    }
+
+    /// 先端の候補として覚えている件数。
+    ///
+    /// **高さに比例しないこと**を外から確かめるために公開している。
+    /// 分岐が無ければ 1 件で、鎖が伸びても増えない
+    /// ([`BlockIndex::prune_below`](crate::index::BlockIndex::prune_below))。
+    pub fn tip_candidates(&self) -> usize {
+        self.index.tip_candidates()
     }
 
     /// このハッシュのブロックを知っているか。
@@ -494,6 +514,17 @@ impl<S: ChainStore> Chain<S> {
         }
     }
 
+    /// 先端を下回る候補を落とす。
+    ///
+    /// **先端の作業量は決して減らない**ので、ここより下は二度と候補に
+    /// ならない ([`BlockIndex::prune_below`](crate::index::BlockIndex::prune_below))。
+    /// 残すのは先端と、先端を上回る競合する枝だけである。
+    fn prune_tip_candidates(&mut self) -> Result<(), ChainError> {
+        let tip_work = self.tip()?.cumulative_work;
+        self.index.prune_below(tip_work);
+        Ok(())
+    }
+
     /// 最良のチェーンへ切り替える。
     fn activate_best_chain(
         &mut self,
@@ -529,9 +560,16 @@ impl<S: ChainStore> Chain<S> {
 
             match self.switch_to(target, pow, now) {
                 Ok(reorg) if reorg.disconnected.is_empty() && reorg.connected.len() == 1 => {
+                    // 先端が進んだので、今の先端を下回るものを落とす。
+                    // **切り替えた直後に落とす**ことで、抱えるのは常に
+                    // 「先端と、先端を上回る枝」だけになる。
+                    self.prune_tip_candidates()?;
                     return Ok(AcceptOutcome::ExtendedTip);
                 }
-                Ok(reorg) => return Ok(AcceptOutcome::Reorganized(reorg)),
+                Ok(reorg) => {
+                    self.prune_tip_candidates()?;
+                    return Ok(AcceptOutcome::Reorganized(reorg));
+                }
                 Err(ConnectFailure {
                     hash,
                     error: ChainError::Validation(ref e),
