@@ -833,7 +833,12 @@ impl<S: ChainStore> Chain<S> {
             }
             // 子は親から引く。全件を走査すると、印を広げるだけで
             // インデックス全体を何度も舐めることになる。
-            frontier.extend_from_slice(self.index.children_of(&current));
+            //
+            // **引き先は記憶域である。** メモリに持つと高さに比例して
+            // 伸びるためで、ここを引くのは無効の印を付けるときだけである
+            // (`docs/SPEC.md` §19)。
+            let children = self.store.children_of(&current).map_err(Self::store_err)?;
+            frontier.extend_from_slice(&children);
         }
         for entry in &changed {
             self.store.put_index_entry(entry).map_err(Self::store_err)?;

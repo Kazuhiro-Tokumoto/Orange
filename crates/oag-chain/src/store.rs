@@ -50,6 +50,18 @@ pub trait ChainStore {
     /// インデックスの全件。起動時にチェーンを組み立てるために用いる。
     fn all_index_entries(&self) -> Result<Vec<BlockIndexEntry>, Self::Error>;
 
+    /// `hash` を親とするブロック。
+    ///
+    /// 無効の印を子孫へ広げるために引く ([`Chain::mark_invalid`])。
+    /// インデックスの `prev_hash` を逆から引いただけの派生物である。
+    ///
+    /// **記憶域が持つのは、メモリに置くと高さに比例して伸びるため**
+    /// である (`docs/SPEC.md` §19)。引くのは無効の印を付けるときだけで、
+    /// 滅多に起きない。
+    ///
+    /// [`Chain::mark_invalid`]: crate::chain::Chain
+    fn children_of(&self, hash: &Hash) -> Result<Vec<Hash>, Self::Error>;
+
     /// ブロック本体とインデックスを記録する。接続はしない。
     fn put_block(&self, block: &Block, entry: &BlockIndexEntry) -> Result<(), Self::Error>;
 
@@ -86,9 +98,26 @@ pub struct MemoryStore {
 struct MemoryInner {
     blocks: HashMap<Hash, Block>,
     index: HashMap<Hash, BlockIndexEntry>,
+    /// 親 → 子。永続化実装の `block_children` 表に対応する。
+    children: HashMap<Hash, Vec<Hash>>,
     undo: HashMap<Hash, UndoBlock>,
     active: Vec<Hash>,
     utxo: UtxoSet,
+}
+
+impl MemoryInner {
+    /// 親から子への線を張る。**同じ子を二重に入れない。**
+    ///
+    /// ジェネシスは親を持たないので張らない。
+    fn link_child(&mut self, entry: &BlockIndexEntry) {
+        if entry.height() == 0 {
+            return;
+        }
+        let siblings = self.children.entry(entry.prev_hash()).or_default();
+        if !siblings.contains(&entry.hash) {
+            siblings.push(entry.hash);
+        }
+    }
 }
 
 /// メモリ記憶域の誤り。
@@ -158,15 +187,25 @@ impl ChainStore for MemoryStore {
         let mut inner = self.inner.borrow_mut();
         inner.blocks.insert(entry.hash, block.clone());
         inner.index.insert(entry.hash, entry.clone());
+        inner.link_child(entry);
         Ok(())
     }
 
     fn put_index_entry(&self, entry: &BlockIndexEntry) -> Result<(), Self::Error> {
-        self.inner
-            .borrow_mut()
-            .index
-            .insert(entry.hash, entry.clone());
+        let mut inner = self.inner.borrow_mut();
+        inner.index.insert(entry.hash, entry.clone());
+        inner.link_child(entry);
         Ok(())
+    }
+
+    fn children_of(&self, hash: &Hash) -> Result<Vec<Hash>, Self::Error> {
+        Ok(self
+            .inner
+            .borrow()
+            .children
+            .get(hash)
+            .cloned()
+            .unwrap_or_default())
     }
 
     fn connect_block(&self, block: &Block) -> Result<UndoBlock, Self::Error> {

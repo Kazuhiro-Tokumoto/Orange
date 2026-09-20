@@ -113,20 +113,22 @@ impl PartialOrd for WorkKey {
 ///
 /// # なぜ派生した索引を持つのか
 ///
-/// ブロックを 1 個受け取るたびに知りたいことは 3 つある。
+/// ブロックを 1 個受け取るたびに知りたいことは 2 つある。
 ///
 /// 1. 先端の候補 — 本体を持ち、現先端より作業量の多いもの
 /// 2. 最良ヘッダ — 本体の有無を問わず、最も作業量の多いもの
-/// 3. あるブロックの子 — 無効の印を子孫へ広げるため
 ///
-/// どれも全件を走査すれば求まる。**しかしブロック 1 個あたり O(n) は、
+/// どちらも全件を走査すれば求まる。**しかしブロック 1 個あたり O(n) は、
 /// 初期同期の全体では O(n²) になる。** 10 万ブロックで 10^10 回の比較
 /// であり、公開できる速さではない。
 ///
-/// そこで、登録・状態変更のたびに索引を張り替えて持つ。1 と 2 は作業量
-/// 順の集合の末尾を見るだけ (O(log n))、3 は親から子への写像を引くだけ
-/// になる。Bitcoin の `setBlockIndexCandidates` と `pindexBestHeader` に
-/// 相当する。
+/// そこで、登録・状態変更のたびに索引を張り替えて持つ。どちらも作業量順の
+/// 集合の末尾を見るだけ (O(log n)) になる。Bitcoin の
+/// `setBlockIndexCandidates` と `pindexBestHeader` に相当する。
+///
+/// **親から子への写像はここに持たない。** 無効の印を子孫へ広げるときに
+/// しか要らず、持つと高さに比例して伸びるため、記憶域が持つ
+/// ([`ChainStore::children_of`](crate::store::ChainStore::children_of))。
 ///
 /// **索引の整合はこの型の中だけで保たれる。** 登録も状態変更もここを
 /// 通す。外から `entries` を書き換える口は開けていない。
@@ -137,8 +139,6 @@ pub struct BlockIndex {
     with_body: std::collections::BTreeSet<WorkKey>,
     /// 無効と判定されていないもの。本体の有無は問わない。
     valid_headers: std::collections::BTreeSet<WorkKey>,
-    /// 親 → 子。ジェネシスは親を持たないので登録しない。
-    children: std::collections::HashMap<Hash, Vec<Hash>>,
 }
 
 impl BlockIndex {
@@ -177,25 +177,17 @@ impl BlockIndex {
             work: entry.cumulative_work,
             hash,
         };
-        let height = entry.height();
-        let prev = entry.prev_hash();
         let has_body = entry.has_body();
         let valid_header = entry.is_valid_header();
 
-        match self.entries.insert(hash, entry) {
-            Some(old) => {
-                // 作業量が変わっていれば古い鍵が残る。両方外してから入れ直す。
-                let stale = WorkKey {
-                    work: old.cumulative_work,
-                    hash,
-                };
-                self.with_body.remove(&stale);
-                self.valid_headers.remove(&stale);
-            }
-            None if height != 0 => {
-                self.children.entry(prev).or_default().push(hash);
-            }
-            None => {}
+        if let Some(old) = self.entries.insert(hash, entry) {
+            // 作業量が変わっていれば古い鍵が残る。両方外してから入れ直す。
+            let stale = WorkKey {
+                work: old.cumulative_work,
+                hash,
+            };
+            self.with_body.remove(&stale);
+            self.valid_headers.remove(&stale);
         }
 
         if has_body {
@@ -233,11 +225,6 @@ impl BlockIndex {
             self.valid_headers.remove(&key);
         }
         self.entries.get(hash)
-    }
-
-    /// `hash` を親とするブロック。
-    pub fn children_of(&self, hash: &Hash) -> &[Hash] {
-        self.children.get(hash).map_or(&[], Vec::as_slice)
     }
 
     /// 本体を持ち、作業量が `work` を超えるものを**多い順に**返す。
@@ -603,9 +590,6 @@ mod tests {
         entry.status = BlockStatus::HeaderValid;
         index.insert(entry.clone());
         assert_eq!(index.candidates_above(parent.cumulative_work).count(), 1);
-
-        // 親子関係が二重に登録されていないこと。
-        assert_eq!(index.children_of(&parent.hash), &[entry.hash]);
     }
 
     #[test]
@@ -626,31 +610,6 @@ mod tests {
             chain[chain.len() - 2].hash,
             "最良ヘッダが 1 つ前に戻っていない"
         );
-    }
-
-    #[test]
-    fn children_are_found_without_scanning() {
-        let (mut index, chain) = a_chain(3);
-        let parent = &chain[1];
-        let fork = entry_at(
-            parent.hash,
-            2,
-            333,
-            parent.cumulative_work + 1,
-            BlockStatus::HeaderValid,
-        );
-        index.insert(fork.clone());
-
-        let mut children = index.children_of(&parent.hash).to_vec();
-        children.sort_unstable();
-        let mut expected = vec![chain[2].hash, fork.hash];
-        expected.sort_unstable();
-        assert_eq!(children, expected);
-
-        // ジェネシスは親を持たない。0 のハッシュに子を登録しない。
-        assert!(index.children_of(&Hash::ZERO).is_empty());
-        // 先端には子がいない。
-        assert!(index.children_of(&chain[3].hash).is_empty());
     }
 
     #[test]

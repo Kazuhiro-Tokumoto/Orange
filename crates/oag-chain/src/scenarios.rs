@@ -111,6 +111,51 @@ fn has_coinbase_output<S: ChainStore>(chain: &Chain<S>, block_hash: &Hash) -> bo
 
 // ━━━━━━━━ シナリオ ━━━━━━━━
 
+/// 親から子への線を、記憶域が持っていること。
+///
+/// これはインデックスではなく**記憶域**が持つ。無効の印を子孫へ広げる
+/// ときにしか引かず、メモリに持つと高さに比例して伸びるためである
+/// (`docs/SPEC.md` §19)。
+pub fn children_come_from_the_store<S: ChainStore>(store: S) {
+    let mut chain = open(store);
+    let genesis_hash = genesis().header.hash();
+    let main = extend(&mut chain, genesis_hash, 3, 1);
+
+    // 高さ 1 の上に、もう 1 本生やす。
+    let fork = build_on(&chain, main[0], 777);
+    let fork_hash = fork.header.hash();
+    chain.accept_block(fork, &AcceptAnyPow, NOW).expect("有効");
+
+    let mut children = chain.store().children_of(&main[0]).expect("引ける");
+    children.sort_unstable();
+    let mut expected = vec![main[1], fork_hash];
+    expected.sort_unstable();
+    assert_eq!(children, expected, "子が 2 つとも引けていない");
+
+    // ジェネシスは親を持たないので、0 のハッシュに子を登録しない。
+    assert!(chain
+        .store()
+        .children_of(&Hash::ZERO)
+        .expect("引ける")
+        .is_empty());
+    // 先端には子がいない。
+    assert!(chain
+        .store()
+        .children_of(&main[2])
+        .expect("引ける")
+        .is_empty());
+
+    // 同じブロックの状態が何度書き直されても、子は二重にならない。
+    let entry = chain.entry(&main[1]).expect("知っている").clone();
+    chain.store().put_index_entry(&entry).expect("書ける");
+    chain.store().put_index_entry(&entry).expect("書ける");
+    assert_eq!(
+        chain.store().children_of(&main[0]).expect("引ける").len(),
+        2,
+        "子が二重に登録されている"
+    );
+}
+
 /// ジェネシスから始まること。
 pub fn starts_at_genesis<S: ChainStore>(store: S) {
     let chain = open(store);

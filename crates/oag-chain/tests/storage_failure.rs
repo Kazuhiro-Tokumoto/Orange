@@ -88,6 +88,10 @@ impl ChainStore for FlakyStore {
         self.inner.all_index_entries()
     }
 
+    fn children_of(&self, hash: &Hash) -> Result<Vec<Hash>, Self::Error> {
+        self.inner.children_of(hash)
+    }
+
     fn put_block(&self, block: &Block, entry: &BlockIndexEntry) -> Result<(), Self::Error> {
         self.inner.put_block(block, entry)
     }

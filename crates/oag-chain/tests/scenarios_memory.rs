@@ -30,6 +30,7 @@ scenario!(shorter_branch_stays_a_side_chain);
 scenario!(a_heavier_branch_triggers_a_reorg);
 scenario!(an_invalid_block_in_a_heavier_branch_is_contained);
 scenario!(children_of_an_invalid_block_are_rejected);
+scenario!(children_come_from_the_store);
 scenario!(the_difficulty_is_fixed_until_the_window_is_full);
 scenario!(median_time_past_follows_the_chain);
 scenario!(a_reorg_matches_a_direct_build, two);

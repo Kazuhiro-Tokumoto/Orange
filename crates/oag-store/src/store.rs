@@ -10,6 +10,7 @@ use oag_consensus::utxo::{
     apply_block_to, undo_block_from, UndoBlock, UtxoEntry, UtxoError, UtxoView, UtxoWrite,
 };
 use oag_consensus::{Block, BlockHeader, Transaction};
+use oag_primitives::hash::HASH_LEN;
 use oag_primitives::Hash;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::collections::HashMap;
@@ -23,6 +24,12 @@ type Bytes = &'static [u8];
 const BLOCKS: TableDefinition<'static, Bytes, Bytes> = TableDefinition::new("blocks");
 /// ブロックインデックス。ハッシュ → インデックスの 1 件。
 const INDEX: TableDefinition<'static, Bytes, Bytes> = TableDefinition::new("block_index");
+/// 親 → 子。親のハッシュ → 子のハッシュを並べたもの (32 バイト区切り)。
+///
+/// インデックスの `prev_hash` を逆から引いただけの派生物である。
+/// **メモリではなくここに置くのは、高さに比例して伸びるためである**
+/// (SPEC §19)。引くのは無効の印を子孫へ広げるときだけで、滅多に起きない。
+const CHILDREN: TableDefinition<'static, Bytes, Bytes> = TableDefinition::new("block_children");
 /// 巻き戻し情報。ハッシュ → 巻き戻し情報。
 const UNDO: TableDefinition<'static, Bytes, Bytes> = TableDefinition::new("undo");
 /// UTXO セット。出力参照 → UTXO の内容。
@@ -51,6 +58,33 @@ const META_TIP: &str = "tip";
 /// 作られた索引」であり、照会は答えを返してはならない。足りない範囲を
 /// 黙って省いた履歴は、無い履歴より悪い。利用者はそれを信じてしまう。
 const META_INDEX_FROM: &str = "index_from";
+
+/// 親から子への線を 1 本張る。**同じ子を二重に入れない。**
+///
+/// ジェネシスは親を持たないので張らない。同じブロックのインデックスは
+/// 状態が変わるたびに書き直されるため、二重に入らないことが要る。
+fn link_child(
+    children: &mut redb::Table<'_, Bytes, Bytes>,
+    entry: &BlockIndexEntry,
+) -> Result<(), StoreError> {
+    if entry.height() == 0 {
+        return Ok(());
+    }
+    let parent = entry.prev_hash().to_bytes();
+    let child = entry.hash.to_bytes();
+    let mut list = match children.get(parent.as_slice()).map_err(db_err)? {
+        Some(guard) => guard.value().to_vec(),
+        None => Vec::new(),
+    };
+    if list.as_chunks::<HASH_LEN>().0.contains(&child) {
+        return Ok(());
+    }
+    list.extend_from_slice(&child);
+    children
+        .insert(parent.as_slice(), list.as_slice())
+        .map_err(db_err)?;
+    Ok(())
+}
 
 /// 記憶域の操作で起きうる誤り。
 #[derive(Debug, thiserror::Error)]
@@ -326,6 +360,7 @@ impl Store {
         let txn = db.begin_write().map_err(db_err)?;
         txn.open_table(BLOCKS).map_err(db_err)?;
         txn.open_table(INDEX).map_err(db_err)?;
+        txn.open_table(CHILDREN).map_err(db_err)?;
         txn.open_table(UNDO).map_err(db_err)?;
         txn.open_table(UTXO).map_err(db_err)?;
         txn.open_table(ACTIVE).map_err(db_err)?;
@@ -333,7 +368,52 @@ impl Store {
         txn.open_table(TX_INDEX).map_err(db_err)?;
         txn.open_table(ADDR_INDEX).map_err(db_err)?;
         txn.commit().map_err(db_err)?;
-        Ok(Store { db })
+        let store = Store { db };
+        store.rebuild_children_if_missing()?;
+        Ok(store)
+    }
+
+    /// 親子の表が無ければ、インデックスから組み直す。
+    ///
+    /// この表より前に作られた記憶域を開いたときに 1 度だけ走る。
+    /// **組み直さないと、無効の印が子孫へ広がらなくなる。**
+    fn rebuild_children_if_missing(&self) -> Result<(), StoreError> {
+        {
+            let txn = self.db.begin_read().map_err(db_err)?;
+            let children = txn.open_table(CHILDREN).map_err(db_err)?;
+            let index = txn.open_table(INDEX).map_err(db_err)?;
+            // ジェネシスしか無いときは、張る線がそもそも無い。
+            if !children.is_empty().map_err(db_err)? || index.len().map_err(db_err)? <= 1 {
+                return Ok(());
+            }
+        }
+        let entries = self.all_index_entries()?;
+        let txn = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut children = txn.open_table(CHILDREN).map_err(db_err)?;
+            for entry in &entries {
+                link_child(&mut children, entry)?;
+            }
+        }
+        txn.commit().map_err(db_err)
+    }
+
+    /// `hash` を親とするブロック。
+    pub fn children_of(&self, hash: &Hash) -> Result<Vec<Hash>, StoreError> {
+        let txn = self.db.begin_read().map_err(db_err)?;
+        let table = txn.open_table(CHILDREN).map_err(db_err)?;
+        let Some(guard) = table.get(hash.as_bytes().as_slice()).map_err(db_err)? else {
+            return Ok(Vec::new());
+        };
+        // 端数は切り捨てられる。**書くのは 32 バイト単位だけ**なので、
+        // 端数が出ている時点で記憶域が壊れている。
+        Ok(guard
+            .value()
+            .as_chunks::<HASH_LEN>()
+            .0
+            .iter()
+            .map(|c| Hash::from_bytes(*c))
+            .collect())
     }
 
     /// 読み取り用の UTXO ビューを得る。
@@ -526,6 +606,8 @@ impl Store {
             index
                 .insert(key.as_slice(), entry.encode().as_slice())
                 .map_err(db_err)?;
+            let mut children = txn.open_table(CHILDREN).map_err(db_err)?;
+            link_child(&mut children, entry)?;
         }
         txn.commit().map_err(db_err)
     }
@@ -538,6 +620,8 @@ impl Store {
             index
                 .insert(entry.hash.to_bytes().as_slice(), entry.encode().as_slice())
                 .map_err(db_err)?;
+            let mut children = txn.open_table(CHILDREN).map_err(db_err)?;
+            link_child(&mut children, entry)?;
         }
         txn.commit().map_err(db_err)
     }
@@ -1016,6 +1100,10 @@ impl oag_chain::store::ChainStore for Store {
         Store::all_index_entries(self)
     }
 
+    fn children_of(&self, hash: &Hash) -> Result<Vec<Hash>, StoreError> {
+        Store::children_of(self, hash)
+    }
+
     fn put_block(&self, block: &Block, entry: &BlockIndexEntry) -> Result<(), StoreError> {
         Store::put_block(self, block, entry)
     }
@@ -1139,6 +1227,98 @@ mod tests {
             blocks.push(block);
         }
         blocks
+    }
+
+    // ━━━━━━━━ 親から子 ━━━━━━━━
+
+    #[test]
+    fn children_are_recorded_as_blocks_arrive() {
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let blocks = build(&store, 4);
+
+        for i in 0..3 {
+            assert_eq!(
+                store.children_of(&blocks[i].header.hash()).unwrap(),
+                vec![blocks[i + 1].header.hash()],
+                "高さ {i} の子が引けない"
+            );
+        }
+        // 先端に子はいない。
+        assert!(store
+            .children_of(&blocks[3].header.hash())
+            .unwrap()
+            .is_empty());
+        // ジェネシスは親を持たないので、0 のハッシュに子は付かない。
+        assert!(store.children_of(&Hash::ZERO).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_fork_gives_the_parent_two_children() {
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let blocks = build(&store, 3);
+
+        let fork = block_at(2, blocks[1].header.hash(), 999);
+        store.put_block(&fork, &entry_for(&fork, 3)).unwrap();
+
+        let mut children = store.children_of(&blocks[1].header.hash()).unwrap();
+        children.sort_unstable();
+        let mut expected = vec![blocks[2].header.hash(), fork.header.hash()];
+        expected.sort_unstable();
+        assert_eq!(children, expected);
+    }
+
+    #[test]
+    fn rewriting_the_status_does_not_duplicate_the_child() {
+        let tmp = TempDb::new();
+        let store = tmp.open();
+        let blocks = build(&store, 2);
+
+        let mut entry = entry_for(&blocks[1], 2);
+        for status in [BlockStatus::FullyValid, BlockStatus::Invalid] {
+            entry.status = status;
+            store.put_index_entry(&entry).unwrap();
+        }
+
+        assert_eq!(
+            store.children_of(&blocks[0].header.hash()).unwrap().len(),
+            1,
+            "状態を書き直すたびに子が増えている"
+        );
+    }
+
+    #[test]
+    fn an_old_database_gets_its_children_rebuilt_on_open() {
+        let tmp = TempDb::new();
+        let blocks = {
+            let store = tmp.open();
+            let blocks = build(&store, 5);
+
+            // この表が入る前の記憶域を真似る。**中身を消すだけ**にして、
+            // インデックスはそのまま残す。
+            let txn = store.db.begin_write().unwrap();
+            {
+                let mut children = txn.open_table(CHILDREN).unwrap();
+                children.retain(|_, _| false).unwrap();
+            }
+            txn.commit().unwrap();
+            assert!(store
+                .children_of(&blocks[0].header.hash())
+                .unwrap()
+                .is_empty());
+            blocks
+        };
+
+        // 開き直すと組み直される。
+        let store = tmp.open();
+        for i in 0..4 {
+            assert_eq!(
+                store.children_of(&blocks[i].header.hash()).unwrap(),
+                vec![blocks[i + 1].header.hash()],
+                "高さ {i} の子が組み直されていない"
+            );
+        }
     }
 
     #[test]
