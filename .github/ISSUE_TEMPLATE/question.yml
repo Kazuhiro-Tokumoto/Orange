@@ -1,0 +1,22 @@
+name: 分からない
+description: 仕様の意図が読めない、なぜこうなっているのか分からない。
+labels: ["質問"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **読めなかったのは、たいてい書いた側の問題です。**
+        遠慮なくどうぞ。
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 何が分かりませんか
+    validations:
+      required: true
+
+  - type: input
+    id: where
+    attributes:
+      label: どこを読んでいましたか
+      placeholder: "docs/SPEC.md §10.6 / crates/oag-chain/src/chain.rs:505 など"

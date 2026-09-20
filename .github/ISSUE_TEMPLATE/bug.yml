@@ -1,0 +1,43 @@
+name: おかしい
+description: 落ちる、止まる、数字が合わない、表示が変。
+labels: ["不具合"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        資金を盗める・鎖を壊せる類のものは、ここではなく
+        `manh@manh2309.org` へお願いします ([SECURITY.md](https://github.com/Kazuhiro-Tokumoto/Orange/blob/HEAD/SECURITY.md))。
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 何が起きましたか
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: どうなるはずだと思いましたか
+      description: 仕様書のどこを読んでそう思ったか、まで書けると早いです。
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現のしかた
+      description: 分からなければ空で構いません。
+      placeholder: |
+        1. ...
+        2. ...
+
+  - type: textarea
+    id: log
+    attributes:
+      label: ログ
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: どの版か
+      placeholder: "コミットハッシュ、または oag-node --version の出力"
