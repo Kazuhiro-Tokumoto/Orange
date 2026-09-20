@@ -27,7 +27,7 @@
 //! たどる操作を高速にするための写しである。**先端や高さを二重に持つことは
 //! しない**。二重に持つと、誤りの経路で食い違いうる。
 
-use crate::index::{BlockIndex, BlockIndexEntry, BlockStatus};
+use crate::index::{BlockIndex, BlockIndexEntry, BlockStatus, EntryCache};
 use crate::store::ChainStore;
 use oag_consensus::params;
 use oag_consensus::validate::{
@@ -37,6 +37,7 @@ use oag_consensus::validate::{
 use oag_consensus::{Block, BlockHeader};
 use oag_pow::lwma::{self, LwmaError};
 use oag_primitives::Hash;
+use std::cell::RefCell;
 
 /// 難易度調整を行うか。
 ///
@@ -147,11 +148,27 @@ struct ConnectFailure {
     error: ChainError,
 }
 
+/// 手元に控えるインデックスの件数。
+///
+/// 新しいブロックを検証するときに触るのは、難易度の窓 (90)、
+/// Median Time Past (11)、シードを引くときの祖先 (最大 2112)、
+/// `getheaders` に答えるときの祖先 (最大 2000) である。いずれも**先端の
+/// 近く**なので、この程度あれば記憶域を引き直すことは滅多にない。
+///
+/// 1 件およそ 230 バイトなので、**1 MB 前後で頭打ちになる。**
+/// 高さには比例しない (`docs/SPEC.md` §19)。
+pub const CACHED_ENTRIES: usize = 4096;
+
 /// チェーンの状態。
 pub struct Chain<S: ChainStore> {
     store: S,
-    /// ブロックインデックスの写し。祖先をたどる操作を高速にするために持つ。
+    /// 先端の候補。**ブロックの実体は持たない** (`docs/SPEC.md` §19)。
     index: BlockIndex,
+    /// 最近引いたインデックスの控え。**正本は記憶域である。**
+    ///
+    /// 引くのは `&self` の経路 (祖先をたどる、難易度を数える) なので、
+    /// 控えるには内側の可変性が要る。
+    entries: RefCell<EntryCache>,
     genesis_difficulty: u64,
     retarget: Retarget,
 }
@@ -171,17 +188,27 @@ impl<S: ChainStore> Chain<S> {
         genesis_difficulty: u64,
         retarget: Retarget,
     ) -> Result<Chain<S>, ChainError> {
+        Chain::open_with_cache(store, genesis, genesis_difficulty, retarget, CACHED_ENTRIES)
+    }
+
+    /// 控えの上限を決めて開く。
+    ///
+    /// **正しさは上限によらない。** 引けなかったものは記憶域に聞き直すので、
+    /// 上限を 1 にしても答えは変わらず、遅くなるだけである。記憶の少ない
+    /// 機械と、追い出しを実際に起こす試験のために開けてある。
+    pub fn open_with_cache(
+        store: S,
+        genesis: Block,
+        genesis_difficulty: u64,
+        retarget: Retarget,
+        cache_limit: usize,
+    ) -> Result<Chain<S>, ChainError> {
         check_genesis(&genesis, genesis_difficulty)?;
         let genesis_hash = genesis.header.hash();
 
-        let mut chain = Chain {
-            store,
-            index: BlockIndex::new(),
-            genesis_difficulty,
-            retarget,
-        };
+        let mut index = BlockIndex::new();
 
-        match chain.store.tip().map_err(Self::store_err)? {
+        match store.tip().map_err(Self::store_err)? {
             None => {
                 let entry = BlockIndexEntry {
                     hash: genesis_hash,
@@ -189,22 +216,29 @@ impl<S: ChainStore> Chain<S> {
                     cumulative_work: u128::from(genesis.header.difficulty),
                     status: BlockStatus::FullyValid,
                 };
-                chain
-                    .store
-                    .put_block(&genesis, &entry)
-                    .map_err(Self::store_err)?;
-                chain
-                    .store
-                    .connect_block(&genesis)
-                    .map_err(Self::store_err)?;
-                chain.index.insert(entry);
+                store.put_block(&genesis, &entry).map_err(Self::store_err)?;
+                store.connect_block(&genesis).map_err(Self::store_err)?;
+                index.record(&entry);
             }
-            Some(_) => {
-                for entry in chain.store.all_index_entries().map_err(Self::store_err)? {
-                    chain.index.insert(entry);
-                }
-                let stored_genesis = chain
-                    .store
+            Some(tip_hash) => {
+                // **先端を先に読む。** 候補になりうるのは先端を下回らない
+                // ものだけなので、読みながら落とせる。全件をいったん
+                // 載せてから落とすと、起動の瞬間だけ高さに比例した常駐量を
+                // 抱えることになる (`docs/SPEC.md` §19)。
+                let floor = store
+                    .index_entry(&tip_hash)
+                    .map_err(Self::store_err)?
+                    .ok_or(ChainError::BadGenesis("先端がインデックスに無い"))?
+                    .cumulative_work;
+                store
+                    .for_each_index_entry(&mut |entry| {
+                        if entry.cumulative_work >= floor {
+                            index.record(&entry);
+                        }
+                    })
+                    .map_err(Self::store_err)?;
+
+                let stored_genesis = store
                     .hash_at_height(0)
                     .map_err(Self::store_err)?
                     .ok_or(ChainError::GenesisMismatch)?;
@@ -213,11 +247,14 @@ impl<S: ChainStore> Chain<S> {
                 }
             }
         }
-        // 読み込んだ全件のうち、先端を下回るものは二度と候補にならない。
-        // ここで落としておかないと、起動しただけで高さに比例した常駐量を
-        // 抱えることになる。
-        chain.prune_tip_candidates()?;
-        Ok(chain)
+
+        Ok(Chain {
+            store,
+            index,
+            entries: RefCell::new(EntryCache::new(cache_limit)),
+            genesis_difficulty,
+            retarget,
+        })
     }
 
     /// 背後の記憶域。
@@ -239,10 +276,7 @@ impl<S: ChainStore> Chain<S> {
             .tip()
             .map_err(Self::store_err)?
             .ok_or(ChainError::BadGenesis("先端が無い"))?;
-        self.index
-            .get(&hash)
-            .cloned()
-            .ok_or(ChainError::MissingBlockBody(hash))
+        self.entry(&hash)?.ok_or(ChainError::MissingBlockBody(hash))
     }
 
     /// 先端の高さ。
@@ -256,8 +290,10 @@ impl<S: ChainStore> Chain<S> {
     }
 
     /// インデックスに登録されているブロック数。
-    pub fn indexed_blocks(&self) -> usize {
-        self.index.len()
+    ///
+    /// **記憶域に聞く。** ここは常駐していない (`docs/SPEC.md` §19)。
+    pub fn indexed_blocks(&self) -> Result<u64, ChainError> {
+        self.store.index_len().map_err(Self::store_err)
     }
 
     /// 先端の候補として覚えている件数。
@@ -270,13 +306,58 @@ impl<S: ChainStore> Chain<S> {
     }
 
     /// このハッシュのブロックを知っているか。
-    pub fn contains(&self, hash: &Hash) -> bool {
-        self.index.contains(hash)
+    pub fn contains(&self, hash: &Hash) -> Result<bool, ChainError> {
+        Ok(self.entry(hash)?.is_some())
     }
 
     /// インデックスの 1 件を引く。
-    pub fn entry(&self, hash: &Hash) -> Option<&BlockIndexEntry> {
-        self.index.get(hash)
+    ///
+    /// まず手元の控えを見て、無ければ記憶域に聞く。聞けたものは控える。
+    ///
+    /// **`None` は「知らない」であって「読めなかった」ではない。**
+    /// 読めなかったときは誤りを返す。この 2 つを混同すると、正しい
+    /// ブロックを知らないものとして扱い、静かにチェーンから外れる。
+    pub fn entry(&self, hash: &Hash) -> Result<Option<BlockIndexEntry>, ChainError> {
+        if let Some(entry) = self.entries.borrow().get(hash) {
+            return Ok(Some(entry.clone()));
+        }
+        let Some(entry) = self.store.index_entry(hash).map_err(Self::store_err)? else {
+            return Ok(None);
+        };
+        self.entries.borrow_mut().put(entry.clone());
+        Ok(Some(entry))
+    }
+
+    /// 控えている件数。**上限で頭打ちになることを確かめるために公開する。**
+    pub fn cached_entries(&self) -> usize {
+        self.entries.borrow().len()
+    }
+
+    /// インデックスの 1 件を、記憶域・候補・控えのすべてに反映する。
+    ///
+    /// **記憶域が先である。** 控えだけが新しい状態になると、落ちたときに
+    /// 食い違う。
+    fn put_entry(&mut self, entry: &BlockIndexEntry) -> Result<(), ChainError> {
+        self.store.put_index_entry(entry).map_err(Self::store_err)?;
+        self.index.record(entry);
+        self.entries.borrow_mut().put(entry.clone());
+        Ok(())
+    }
+
+    /// 状態だけを書き換える。書き換えた結果を返す。
+    ///
+    /// 知らないハッシュなら何もせず `None` を返す。
+    fn set_status(
+        &mut self,
+        hash: &Hash,
+        status: BlockStatus,
+    ) -> Result<Option<BlockIndexEntry>, ChainError> {
+        let Some(mut entry) = self.entry(hash)? else {
+            return Ok(None);
+        };
+        entry.status = status;
+        self.put_entry(&entry)?;
+        Ok(Some(entry))
     }
 
     /// アクティブチェーンの指定した高さのブロックハッシュ。
@@ -296,7 +377,7 @@ impl<S: ChainStore> Chain<S> {
     /// こちらはインデックス (ヘッダの木) を辿るので、本体が無くても引ける。
     /// 枝を指定するため、分岐していても取り違えない。
     pub fn ancestor_hash_at(&self, from: &Hash, height: u64) -> Result<Option<Hash>, ChainError> {
-        let Some(mut entry) = self.index.get(from) else {
+        let Some(mut entry) = self.entry(from)? else {
             return Ok(None);
         };
         if entry.height() < height {
@@ -307,7 +388,7 @@ impl<S: ChainStore> Chain<S> {
             return self.hash_at_height(height);
         }
         while entry.height() > height {
-            let Some(parent) = self.index.get(&entry.prev_hash()) else {
+            let Some(parent) = self.entry(&entry.prev_hash())? else {
                 return Ok(None);
             };
             entry = parent;
@@ -317,45 +398,49 @@ impl<S: ChainStore> Chain<S> {
 
     /// そのハッシュがアクティブチェーン上にあるか。
     fn is_active(&self, hash: &Hash) -> Result<bool, ChainError> {
-        let Some(entry) = self.index.get(hash) else {
+        let Some(entry) = self.entry(hash)? else {
             return Ok(false);
         };
         Ok(self.hash_at_height(entry.height())? == Some(*hash))
     }
 
     /// `from` から親をたどって最大 `count` 件のヘッダを新しい順に集める。
-    fn ancestors(&self, from: &Hash, count: usize) -> Vec<&BlockIndexEntry> {
+    fn ancestors(&self, from: &Hash, count: usize) -> Result<Vec<BlockIndexEntry>, ChainError> {
         let mut out = Vec::with_capacity(count);
         let mut cursor = *from;
         while out.len() < count {
-            let Some(entry) = self.index.get(&cursor) else {
+            let Some(entry) = self.entry(&cursor)? else {
                 break;
             };
+            let height = entry.height();
+            cursor = entry.prev_hash();
             out.push(entry);
-            if entry.height() == 0 {
+            if height == 0 {
                 break;
             }
-            cursor = entry.prev_hash();
         }
-        out
+        Ok(out)
     }
 
     /// `parent` を親とするブロックの Median Time Past。
-    pub fn median_time_past_for_child_of(&self, parent: &Hash) -> i64 {
-        let mut timestamps: Vec<i64> = self
-            .ancestors(parent, params::MEDIAN_TIME_SPAN)
-            .iter()
-            .map(|e| e.header.timestamp)
-            .collect();
+    ///
+    /// **記憶域が読めないときに値を返してはならない。** ここが返すのは
+    /// 「この時刻より後でなければならない」という下限であり、既定値として
+    /// `i64::MIN` を返すと**時刻の規則が無条件に通る**。読めないことと
+    /// 「祖先がまだ 1 つも無い」ことは別の事実である。前者は誤りとして
+    /// 返し、後者だけが `i64::MIN` (下限なし) になる。
+    pub fn median_time_past_for_child_of(&self, parent: &Hash) -> Result<i64, ChainError> {
+        let ancestors = self.ancestors(parent, params::MEDIAN_TIME_SPAN)?;
+        let mut timestamps: Vec<i64> = ancestors.iter().map(|e| e.header.timestamp).collect();
         timestamps.reverse();
-        median_time_past(&timestamps).unwrap_or(i64::MIN)
+        // 祖先が 1 つも無いのはジェネシスの子だけである。下限を置かない。
+        Ok(median_time_past(&timestamps).unwrap_or(i64::MIN))
     }
 
     /// `parent` を親とするブロックが取るべき難易度。
     pub fn expected_difficulty_for_child_of(&self, parent: &Hash) -> Result<u64, ChainError> {
         let parent_entry = self
-            .index
-            .get(parent)
+            .entry(parent)?
             .ok_or(ChainError::UnknownParent(*parent))?;
         let height = parent_entry.height() + 1;
 
@@ -369,7 +454,7 @@ impl<S: ChainStore> Chain<S> {
             return Ok(self.genesis_difficulty);
         }
 
-        let mut chain = self.ancestors(parent, lwma::WINDOW + 1);
+        let mut chain = self.ancestors(parent, lwma::WINDOW + 1)?;
         chain.reverse();
         debug_assert_eq!(chain.len(), lwma::WINDOW + 1);
 
@@ -396,7 +481,7 @@ impl<S: ChainStore> Chain<S> {
             });
         }
 
-        let entry = match self.index.get(&hash) {
+        let entry = match self.entry(&hash)? {
             // 本体をすでに持っている。
             Some(known) if known.has_body() => return Ok(AcceptOutcome::Duplicate),
             Some(known) if known.status == BlockStatus::Invalid => {
@@ -408,7 +493,7 @@ impl<S: ChainStore> Chain<S> {
             // 受け取った時点で検証済みである。やり直す必要はない。
             Some(known) => BlockIndexEntry {
                 status: BlockStatus::HeaderValid,
-                ..known.clone()
+                ..known
             },
             None => self.validated_entry(&block.header, pow, now)?,
         };
@@ -416,7 +501,8 @@ impl<S: ChainStore> Chain<S> {
         self.store
             .put_block(&block, &entry)
             .map_err(Self::store_err)?;
-        self.index.insert(entry);
+        self.index.record(&entry);
+        self.entries.borrow_mut().put(entry);
 
         self.activate_best_chain(pow, now)
     }
@@ -435,7 +521,7 @@ impl<S: ChainStore> Chain<S> {
         now: i64,
     ) -> Result<HeaderOutcome, ChainError> {
         let hash = header.hash();
-        if let Some(known) = self.index.get(&hash) {
+        if let Some(known) = self.entry(&hash)? {
             return if known.status == BlockStatus::Invalid {
                 Err(ChainError::InvalidAncestor(hash))
             } else {
@@ -445,10 +531,7 @@ impl<S: ChainStore> Chain<S> {
 
         let mut entry = self.validated_entry(header, pow, now)?;
         entry.status = BlockStatus::HeaderOnly;
-        self.store
-            .put_index_entry(&entry)
-            .map_err(Self::store_err)?;
-        self.index.insert(entry);
+        self.put_entry(&entry)?;
         Ok(HeaderOutcome::New)
     }
 
@@ -464,8 +547,7 @@ impl<S: ChainStore> Chain<S> {
     ) -> Result<BlockIndexEntry, ChainError> {
         let parent_hash = header.prev_hash;
         let parent = self
-            .index
-            .get(&parent_hash)
+            .entry(&parent_hash)?
             .ok_or(ChainError::UnknownParent(parent_hash))?;
         if parent.status == BlockStatus::Invalid {
             return Err(ChainError::InvalidAncestor(parent_hash));
@@ -476,7 +558,7 @@ impl<S: ChainStore> Chain<S> {
         let ctx = HeaderContext {
             expected_height,
             expected_prev_hash: parent_hash,
-            median_time_past: self.median_time_past_for_child_of(&parent_hash),
+            median_time_past: self.median_time_past_for_child_of(&parent_hash)?,
             expected_difficulty: self.expected_difficulty_for_child_of(&parent_hash)?,
             now,
         };
@@ -501,7 +583,7 @@ impl<S: ChainStore> Chain<S> {
             if self.is_active(&cursor)? {
                 return Ok(true);
             }
-            let Some(entry) = self.index.get(&cursor) else {
+            let Some(entry) = self.entry(&cursor)? else {
                 return Ok(false);
             };
             if !entry.has_body() {
@@ -540,11 +622,7 @@ impl<S: ChainStore> Chain<S> {
             // **走るのは現先端を上回る候補だけである。** 先端を 1 個
             // 伸ばしただけなら 1 件で止まる。全件を走査すると、ブロック
             // 1 個あたり O(n)、初期同期の全体では O(n²) になる。
-            let candidates: Vec<Hash> = self
-                .index
-                .candidates_above(tip_work)
-                .map(|e| e.hash)
-                .collect();
+            let candidates: Vec<Hash> = self.index.candidates_above(tip_work).collect();
 
             let mut best = None;
             for hash in candidates {
@@ -605,8 +683,10 @@ impl<S: ChainStore> Chain<S> {
                 Err(e) => return Err(fail(target, e)),
             }
             to_connect.push(cursor);
-            let Some(entry) = self.index.get(&cursor) else {
-                return Err(fail(cursor, ChainError::UnknownParent(cursor)));
+            let entry = match self.entry(&cursor) {
+                Ok(Some(entry)) => entry,
+                Ok(None) => return Err(fail(cursor, ChainError::UnknownParent(cursor))),
+                Err(e) => return Err(fail(cursor, e)),
             };
             if entry.height() == 0 {
                 break;
@@ -615,7 +695,11 @@ impl<S: ChainStore> Chain<S> {
         }
         to_connect.reverse();
 
-        let fork_height = self.index[&cursor].height();
+        let fork_height = match self.entry(&cursor) {
+            Ok(Some(entry)) => entry.height(),
+            Ok(None) => return Err(fail(cursor, ChainError::UnknownParent(cursor))),
+            Err(e) => return Err(fail(cursor, e)),
+        };
 
         let mut disconnected = Vec::new();
         loop {
@@ -689,9 +773,13 @@ impl<S: ChainStore> Chain<S> {
         let parent_hash = block.header.prev_hash;
 
         let header_ctx = HeaderContext {
-            expected_height: self.index[&parent_hash].height() + 1,
+            expected_height: self
+                .entry(&parent_hash)?
+                .ok_or(ChainError::UnknownParent(parent_hash))?
+                .height()
+                + 1,
             expected_prev_hash: parent_hash,
-            median_time_past: self.median_time_past_for_child_of(&parent_hash),
+            median_time_past: self.median_time_past_for_child_of(&parent_hash)?,
             expected_difficulty: self.expected_difficulty_for_child_of(&parent_hash)?,
             now,
         };
@@ -707,12 +795,7 @@ impl<S: ChainStore> Chain<S> {
 
         self.store.connect_block(&block).map_err(Self::store_err)?;
 
-        if let Some(entry) = self.index.set_status(&hash, BlockStatus::FullyValid) {
-            let snapshot = entry.clone();
-            self.store
-                .put_index_entry(&snapshot)
-                .map_err(Self::store_err)?;
-        }
+        self.set_status(&hash, BlockStatus::FullyValid)?;
         Ok(())
     }
 
@@ -722,10 +805,12 @@ impl<S: ChainStore> Chain<S> {
     /// アクティブチェーンの先端 ([`Chain::tip`]) とは別物である。
     /// headers-first では、ヘッダの先端が本体の先端よりずっと先を行く。
     pub fn best_header(&self) -> Result<BlockIndexEntry, ChainError> {
-        self.index
+        let hash = self
+            .index
             .best_header()
-            .cloned()
-            .ok_or(ChainError::BadGenesis("インデックスが空である"))
+            .ok_or(ChainError::BadGenesis("インデックスが空である"))?;
+        self.entry(&hash)?
+            .ok_or(ChainError::BadGenesis("最良ヘッダがインデックスに無い"))
     }
 
     /// 最良ヘッダチェーン上の、指定した高さのブロックハッシュを集める。
@@ -744,10 +829,10 @@ impl<S: ChainStore> Chain<S> {
                 continue;
             }
             while cursor.height() > wanted {
-                let Some(parent) = self.index.get(&cursor.prev_hash()) else {
+                let Some(parent) = self.entry(&cursor.prev_hash())? else {
                     return Ok(out);
                 };
-                cursor = parent.clone();
+                cursor = parent;
             }
             out.push(cursor.hash);
         }
@@ -766,7 +851,7 @@ impl<S: ChainStore> Chain<S> {
         // 最良ヘッダの先端から遡り、本体を持つ祖先に着いたら止める。
         let mut cursor = self.best_header()?.hash;
         let mut missing = Vec::new();
-        while let Some(entry) = self.index.get(&cursor) {
+        while let Some(entry) = self.entry(&cursor)? {
             if entry.has_body() {
                 break;
             }
@@ -805,7 +890,7 @@ impl<S: ChainStore> Chain<S> {
             let Some(hash) = self.hash_at_height(height)? else {
                 break;
             };
-            let Some(entry) = self.index.get(&hash) else {
+            let Some(entry) = self.entry(&hash)? else {
                 break;
             };
             headers.push(entry.header);
@@ -820,17 +905,14 @@ impl<S: ChainStore> Chain<S> {
     /// ブロックとその子孫すべてに無効の印を付ける。
     fn mark_invalid(&mut self, hash: &Hash) -> Result<(), ChainError> {
         let mut frontier = vec![*hash];
-        let mut changed = Vec::new();
         while let Some(current) = frontier.pop() {
-            match self.index.get(&current) {
+            match self.entry(&current)? {
                 // すでに印が付いている。子孫にも付いているので、たどらない。
                 Some(entry) if entry.status == BlockStatus::Invalid => continue,
                 Some(_) => {}
                 None => continue,
             }
-            if let Some(entry) = self.index.set_status(&current, BlockStatus::Invalid) {
-                changed.push(entry.clone());
-            }
+            self.set_status(&current, BlockStatus::Invalid)?;
             // 子は親から引く。全件を走査すると、印を広げるだけで
             // インデックス全体を何度も舐めることになる。
             //
@@ -839,9 +921,6 @@ impl<S: ChainStore> Chain<S> {
             // (`docs/SPEC.md` §19)。
             let children = self.store.children_of(&current).map_err(Self::store_err)?;
             frontier.extend_from_slice(&children);
-        }
-        for entry in &changed {
-            self.store.put_index_entry(entry).map_err(Self::store_err)?;
         }
         Ok(())
     }
@@ -882,7 +961,7 @@ fn locator_fork_height<S: ChainStore>(
     locator: &[Hash],
 ) -> Result<u64, ChainError> {
     for hash in locator {
-        let Some(entry) = chain.entry(hash) else {
+        let Some(entry) = chain.entry(hash)? else {
             continue;
         };
         let height = entry.height();

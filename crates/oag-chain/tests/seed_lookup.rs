@@ -46,7 +46,7 @@ fn the_active_index_cannot_answer_while_only_headers_are_known() {
 
     // ヘッダは 100 個入っているが、先端は動いていない。
     assert_eq!(chain.tip().unwrap().height(), 0);
-    assert_eq!(chain.indexed_blocks(), 101);
+    assert_eq!(chain.indexed_blocks().unwrap(), 101);
 
     // アクティブチェーンの索引には、ジェネシスしか入っていない。
     assert_eq!(chain.hash_at_height(64).unwrap(), None);

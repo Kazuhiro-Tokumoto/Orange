@@ -467,6 +467,27 @@ impl Store {
         Ok(out)
     }
 
+    /// インデックスに入っている件数。
+    pub fn index_len(&self) -> Result<u64, StoreError> {
+        let txn = self.db.begin_read().map_err(db_err)?;
+        let table = txn.open_table(INDEX).map_err(db_err)?;
+        table.len().map_err(db_err)
+    }
+
+    /// インデックスを 1 件ずつ渡す。**全件を同時にメモリへ載せない。**
+    pub fn for_each_index_entry(
+        &self,
+        f: &mut dyn FnMut(BlockIndexEntry),
+    ) -> Result<(), StoreError> {
+        let txn = self.db.begin_read().map_err(db_err)?;
+        let table = txn.open_table(INDEX).map_err(db_err)?;
+        for row in table.iter().map_err(db_err)? {
+            let (_, value) = row.map_err(db_err)?;
+            f(BlockIndexEntry::decode(value.value())?);
+        }
+        Ok(())
+    }
+
     /// アクティブチェーンの指定した高さのブロックハッシュ。
     pub fn hash_at_height(&self, height: u64) -> Result<Option<Hash>, StoreError> {
         let txn = self.db.begin_read().map_err(db_err)?;
@@ -1098,6 +1119,14 @@ impl oag_chain::store::ChainStore for Store {
 
     fn all_index_entries(&self) -> Result<Vec<BlockIndexEntry>, StoreError> {
         Store::all_index_entries(self)
+    }
+
+    fn index_len(&self) -> Result<u64, StoreError> {
+        Store::index_len(self)
+    }
+
+    fn for_each_index_entry(&self, f: &mut dyn FnMut(BlockIndexEntry)) -> Result<(), StoreError> {
+        Store::for_each_index_entry(self, f)
     }
 
     fn children_of(&self, hash: &Hash) -> Result<Vec<Hash>, StoreError> {

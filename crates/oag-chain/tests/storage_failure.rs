@@ -12,7 +12,7 @@
 use std::cell::Cell;
 
 use oag_chain::index::BlockIndexEntry;
-use oag_chain::scenarios::{build_on, open, NOW};
+use oag_chain::scenarios::{build_on, entry_of, open, NOW};
 use oag_chain::store::{ChainStore, MemoryStore, MemoryStoreError};
 use oag_chain::{BlockStatus, ChainError};
 use oag_consensus::lock::Lock;
@@ -86,6 +86,14 @@ impl ChainStore for FlakyStore {
 
     fn all_index_entries(&self) -> Result<Vec<BlockIndexEntry>, Self::Error> {
         self.inner.all_index_entries()
+    }
+
+    fn index_len(&self) -> Result<u64, Self::Error> {
+        self.inner.index_len()
+    }
+
+    fn for_each_index_entry(&self, f: &mut dyn FnMut(BlockIndexEntry)) -> Result<(), Self::Error> {
+        self.inner.for_each_index_entry(f)
     }
 
     fn children_of(&self, hash: &Hash) -> Result<Vec<Hash>, Self::Error> {
@@ -169,7 +177,7 @@ fn a_storage_failure_does_not_mark_the_block_invalid() {
     }
 
     assert_ne!(
-        chain.entry(&hash).unwrap().status,
+        entry_of(&chain, &hash).status,
         BlockStatus::Invalid,
         "読めなかっただけのブロックに無効の印が付いている"
     );
@@ -186,7 +194,7 @@ fn the_verdict_is_only_deferred_not_lost() {
 
     chain.store().set_failing(true);
     chain.accept_block(block, &AcceptAnyPow, NOW).unwrap_err();
-    assert_ne!(chain.entry(&hash).unwrap().status, BlockStatus::Invalid);
+    assert_ne!(entry_of(&chain, &hash).status, BlockStatus::Invalid);
 
     // ディスクが直り、子が届いて接続をやり直す。今度は本当に読めるので、
     // このブロックが不正であることが分かる。
@@ -195,7 +203,7 @@ fn the_verdict_is_only_deferred_not_lost() {
     chain.accept_block(child, &AcceptAnyPow, NOW).unwrap();
 
     assert_eq!(
-        chain.entry(&hash).unwrap().status,
+        entry_of(&chain, &hash).status,
         BlockStatus::Invalid,
         "読めるようになっても判定が下りていない"
     );
@@ -214,7 +222,7 @@ fn a_readable_disk_still_marks_a_bad_block_invalid() {
     chain.accept_block(block, &AcceptAnyPow, NOW).unwrap();
 
     assert_eq!(
-        chain.entry(&hash).unwrap().status,
+        entry_of(&chain, &hash).status,
         BlockStatus::Invalid,
         "不正なブロックに印が付いていない"
     );

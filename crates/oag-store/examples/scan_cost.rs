@@ -35,7 +35,7 @@ fn a_chain(len: u64) -> (BlockIndex, Vec<BlockIndexEntry>) {
             status: BlockStatus::FullyValid,
         };
         prev = entry.hash;
-        index.insert(entry.clone());
+        index.record(&entry);
         entries.push(entry);
     }
     (index, entries)

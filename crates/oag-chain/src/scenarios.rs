@@ -37,11 +37,19 @@ pub fn open<S: ChainStore>(store: S) -> Chain<S> {
     Chain::open(store, genesis(), DIFFICULTY, Retarget::Enabled).expect("ジェネシスは有効")
 }
 
+/// インデックスの 1 件を引く。**知っていることを前提にする。**
+pub fn entry_of<S: ChainStore>(chain: &Chain<S>, hash: &Hash) -> crate::index::BlockIndexEntry {
+    chain
+        .entry(hash)
+        .expect("記憶域を読める")
+        .expect("そのブロックを知っている")
+}
+
 /// `parent` の上に載る有効なブロックを組み立てる。
 ///
 /// `salt` を変えるとコインベースが変わり、同じ高さの別のブロックになる。
 pub fn build_on<S: ChainStore>(chain: &Chain<S>, parent: Hash, salt: u64) -> Block {
-    let parent_entry = chain.entry(&parent).expect("親を知っている");
+    let parent_entry = entry_of(chain, &parent);
     let height = parent_entry.height() + 1;
 
     let mut input = TxInput::new(OutPoint::null());
@@ -146,7 +154,7 @@ pub fn children_come_from_the_store<S: ChainStore>(store: S) {
         .is_empty());
 
     // 同じブロックの状態が何度書き直されても、子は二重にならない。
-    let entry = chain.entry(&main[1]).expect("知っている").clone();
+    let entry = entry_of(&chain, &main[1]);
     chain.store().put_index_entry(&entry).expect("書ける");
     chain.store().put_index_entry(&entry).expect("書ける");
     assert_eq!(
@@ -162,7 +170,7 @@ pub fn starts_at_genesis<S: ChainStore>(store: S) {
     assert_eq!(chain.height().unwrap(), 0);
     assert_eq!(chain.tip().unwrap().hash, genesis().header.hash());
     assert_eq!(chain.tip().unwrap().cumulative_work, u128::from(DIFFICULTY));
-    assert_eq!(chain.indexed_blocks(), 1);
+    assert_eq!(chain.indexed_blocks().unwrap(), 1);
     assert_eq!(
         chain.store().utxo_count().unwrap(),
         0,
@@ -227,7 +235,11 @@ pub fn shorter_branch_stays_a_side_chain<S: ChainStore>(store: S) {
     );
     assert_eq!(chain.tip().unwrap().hash, *main.last().unwrap());
     assert_eq!(chain.height().unwrap(), 3);
-    assert_eq!(chain.indexed_blocks(), 5, "サイドチェーンも記録される");
+    assert_eq!(
+        chain.indexed_blocks().unwrap(),
+        5,
+        "サイドチェーンも記録される"
+    );
 }
 
 /// 作業量で上回る枝が現れたらリオーグすること。同点では切り替えないこと。
@@ -364,12 +376,12 @@ pub fn an_invalid_block_in_a_heavier_branch_is_contained<S: ChainStore>(store: S
 
     // 実際に失敗した b2 とその子孫にのみ印が付くこと。
     assert_eq!(
-        chain.entry(&b1_hash).unwrap().status,
+        entry_of(&chain, &b1_hash).status,
         BlockStatus::FullyValid,
         "巻き添えで無効にされている"
     );
-    assert_eq!(chain.entry(&b2_hash).unwrap().status, BlockStatus::Invalid);
-    assert_eq!(chain.entry(&b3_hash).unwrap().status, BlockStatus::Invalid);
+    assert_eq!(entry_of(&chain, &b2_hash).status, BlockStatus::Invalid);
+    assert_eq!(entry_of(&chain, &b3_hash).status, BlockStatus::Invalid);
 }
 
 /// 無効な祖先を持つブロックが到着時に拒否されること。
@@ -394,7 +406,7 @@ pub fn children_of_an_invalid_block_are_rejected<S: ChainStore>(store: S) {
     let b4 = build_on(&chain, b3_hash, 903);
     chain.accept_block(b4, &AcceptAnyPow, NOW).unwrap();
 
-    assert_eq!(chain.entry(&b2_hash).unwrap().status, BlockStatus::Invalid);
+    assert_eq!(entry_of(&chain, &b2_hash).status, BlockStatus::Invalid);
     let b5 = build_on(&chain, b3_hash, 904);
     assert!(matches!(
         chain.accept_block(b5, &AcceptAnyPow, NOW),
@@ -463,13 +475,16 @@ pub fn the_difficulty_is_fixed_until_the_window_is_full<S: ChainStore>(store: S)
 pub fn median_time_past_follows_the_chain<S: ChainStore>(store: S) {
     let mut chain = open(store);
     let tip = chain.tip().unwrap().hash;
-    assert_eq!(chain.median_time_past_for_child_of(&tip), GENESIS_TIME);
+    assert_eq!(
+        chain.median_time_past_for_child_of(&tip).unwrap(),
+        GENESIS_TIME
+    );
 
     extend(&mut chain, tip, 20, 1);
     let tip = chain.tip().unwrap().hash;
     // 直近 11 ブロック (高さ 10〜20) の中央値は高さ 15 のもの。
     assert_eq!(
-        chain.median_time_past_for_child_of(&tip),
+        chain.median_time_past_for_child_of(&tip).unwrap(),
         GENESIS_TIME + 15 * 60
     );
 }
@@ -502,10 +517,10 @@ pub fn headers_alone_do_not_move_the_tip<S: ChainStore>(store: S) {
     assert_eq!(chain.tip().unwrap().hash, genesis, "先端は動かないはず");
     assert_eq!(chain.height().unwrap(), 0);
     assert_eq!(chain.best_header().unwrap().height(), 5, "ヘッダは先行する");
-    assert_eq!(chain.indexed_blocks(), 6);
+    assert_eq!(chain.indexed_blocks().unwrap(), 6);
 
     for header in &headers {
-        let entry = chain.entry(&header.header.hash()).unwrap();
+        let entry = entry_of(&chain, &header.header.hash());
         assert_eq!(entry.status, BlockStatus::HeaderOnly);
         assert!(!entry.has_body());
     }
@@ -519,7 +534,7 @@ pub fn headers_alone_do_not_move_the_tip<S: ChainStore>(store: S) {
         );
         assert_eq!(chain.tip().unwrap().hash, hash);
         assert_eq!(chain.height().unwrap(), i as u64 + 1);
-        assert_eq!(chain.entry(&hash).unwrap().status, BlockStatus::FullyValid);
+        assert_eq!(entry_of(&chain, &hash).status, BlockStatus::FullyValid);
     }
     assert!(chain.missing_bodies(100).unwrap().is_empty());
 }
@@ -542,7 +557,7 @@ pub fn a_known_header_is_not_added_twice<S: ChainStore>(store: S) {
             .unwrap(),
         HeaderOutcome::Known
     );
-    assert_eq!(chain.indexed_blocks(), 2);
+    assert_eq!(chain.indexed_blocks().unwrap(), 2);
 
     // 本体を受け取った後は、ヘッダは「既知」のままである。
     chain
@@ -559,7 +574,7 @@ pub fn a_known_header_is_not_added_twice<S: ChainStore>(store: S) {
         chain.accept_block(block, &AcceptAnyPow, NOW).unwrap(),
         AcceptOutcome::Duplicate
     );
-    assert_eq!(chain.indexed_blocks(), 2);
+    assert_eq!(chain.indexed_blocks().unwrap(), 2);
 }
 
 /// 本体が飛び飛びに届いても、そろうまで先端が動かないこと。
@@ -699,7 +714,7 @@ pub fn a_header_for_an_invalid_block_is_refused<S: ChainStore>(store: S) {
         AcceptOutcome::SideChain,
         "接続に失敗するので先端にはならない"
     );
-    assert_eq!(chain.entry(&bad_hash).unwrap().status, BlockStatus::Invalid);
+    assert_eq!(entry_of(&chain, &bad_hash).status, BlockStatus::Invalid);
     assert_eq!(chain.tip().unwrap().hash, genesis);
 
     // 同じヘッダを送り直されても受け付けない。
@@ -707,7 +722,7 @@ pub fn a_header_for_an_invalid_block_is_refused<S: ChainStore>(store: S) {
         chain.accept_header(&header, &AcceptAnyPow, NOW),
         Err(ChainError::InvalidAncestor(_))
     ));
-    assert_eq!(chain.entry(&bad_hash).unwrap().status, BlockStatus::Invalid);
+    assert_eq!(entry_of(&chain, &bad_hash).status, BlockStatus::Invalid);
 }
 
 /// 調整を止めたチェーンでは、いくら速く積んでも難易度が動かないこと。
@@ -727,7 +742,7 @@ pub fn the_difficulty_never_moves_without_retargeting<S: ChainStore>(store: S) {
 
     for hash in &hashes {
         assert_eq!(
-            chain.entry(hash).unwrap().header.difficulty,
+            entry_of(&chain, hash).header.difficulty,
             DIFFICULTY,
             "難易度が動いている"
         );

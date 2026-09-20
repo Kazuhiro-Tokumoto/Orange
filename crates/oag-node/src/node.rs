@@ -86,7 +86,7 @@ pub struct NodeStatus {
     /// UTXO の件数。
     pub utxo_count: u64,
     /// 知っているブロックの数 (サイドチェーンを含む)。
-    pub indexed_blocks: usize,
+    pub indexed_blocks: u64,
     /// mempool の件数。
     pub mempool_len: usize,
     /// 住所帳に覚えているピアの数。
@@ -176,7 +176,7 @@ impl Node {
             cumulative_work: tip.cumulative_work,
             next_difficulty: self.chain.expected_difficulty_for_child_of(&tip.hash)?,
             utxo_count: self.chain.store().utxo_count()?,
-            indexed_blocks: self.chain.indexed_blocks(),
+            indexed_blocks: self.chain.indexed_blocks()?,
             mempool_len: self.mempool.len(),
             known_addresses: self.addresses.len(),
         })
@@ -286,7 +286,7 @@ impl Node {
 
         let tip = self.chain.tip()?;
         let next_height = tip.height() + 1;
-        let median_time_past = self.chain.median_time_past_for_child_of(&tip.hash);
+        let median_time_past = self.chain.median_time_past_for_child_of(&tip.hash)?;
         let view = self.chain.utxo_view()?;
         self.mempool
             .rebuild_after_reorg(orphaned, &view, next_height, median_time_past);
@@ -325,7 +325,7 @@ impl Node {
         let prev_hash = tip.hash;
         let height = tip.height() + 1;
         let difficulty = self.chain.expected_difficulty_for_child_of(&prev_hash)?;
-        let mtp = self.chain.median_time_past_for_child_of(&prev_hash);
+        let mtp = self.chain.median_time_past_for_child_of(&prev_hash)?;
 
         // タイムスタンプは Median Time Past より後でなければならない。
         let timestamp = now.max(mtp + 1);
@@ -393,7 +393,7 @@ impl Node {
         }
         // 親を知らなければシードも決められないが、**断る理由はシードでは
         // なく親である**。そのまま名乗る。
-        if !self.chain.contains(branch) {
+        if !self.chain.contains(branch)? {
             return Err(ChainError::UnknownParent(*branch).into());
         }
         self.chain

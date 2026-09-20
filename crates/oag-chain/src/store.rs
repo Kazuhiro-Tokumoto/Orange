@@ -47,8 +47,20 @@ pub trait ChainStore {
     /// インデックスの 1 件。
     fn index_entry(&self, hash: &Hash) -> Result<Option<BlockIndexEntry>, Self::Error>;
 
-    /// インデックスの全件。起動時にチェーンを組み立てるために用いる。
+    /// インデックスの全件。**全件を同時にメモリへ載せる。**
+    ///
+    /// 件数が高さに比例するため、起動経路では
+    /// [`for_each_index_entry`](Self::for_each_index_entry) を使うこと。
     fn all_index_entries(&self) -> Result<Vec<BlockIndexEntry>, Self::Error>;
+
+    /// インデックスに入っている件数。
+    fn index_len(&self) -> Result<u64, Self::Error>;
+
+    /// インデックスを 1 件ずつ渡す。**全件を同時に持たない。**
+    ///
+    /// 起動時に先端の候補を拾い直すために用いる。呼び出し側が要るものだけ
+    /// を残せば、常駐量は高さに比例しない (`docs/SPEC.md` §19)。
+    fn for_each_index_entry(&self, f: &mut dyn FnMut(BlockIndexEntry)) -> Result<(), Self::Error>;
 
     /// `hash` を親とするブロック。
     ///
@@ -181,6 +193,17 @@ impl ChainStore for MemoryStore {
 
     fn all_index_entries(&self) -> Result<Vec<BlockIndexEntry>, Self::Error> {
         Ok(self.inner.borrow().index.values().cloned().collect())
+    }
+
+    fn index_len(&self) -> Result<u64, Self::Error> {
+        Ok(self.inner.borrow().index.len() as u64)
+    }
+
+    fn for_each_index_entry(&self, f: &mut dyn FnMut(BlockIndexEntry)) -> Result<(), Self::Error> {
+        for entry in self.inner.borrow().index.values() {
+            f(entry.clone());
+        }
+        Ok(())
     }
 
     fn put_block(&self, block: &Block, entry: &BlockIndexEntry) -> Result<(), Self::Error> {

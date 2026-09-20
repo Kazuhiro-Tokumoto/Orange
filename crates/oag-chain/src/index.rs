@@ -111,7 +111,11 @@ impl PartialOrd for WorkKey {
 
 /// ブロックインデックス。
 ///
-/// # なぜ派生した索引を持つのか
+/// # 何を持ち、何を持たないか
+///
+/// **ブロックの実体は持たない。正本は記憶域である。** ここが覚えている
+/// のは「先端の候補」だけであり、その件数は鎖の長さではなく**競合する枝の
+/// 数**で決まる。分岐が無ければ 1 本ぶんである。
 ///
 /// ブロックを 1 個受け取るたびに知りたいことは 2 つある。
 ///
@@ -120,21 +124,23 @@ impl PartialOrd for WorkKey {
 ///
 /// どちらも全件を走査すれば求まる。**しかしブロック 1 個あたり O(n) は、
 /// 初期同期の全体では O(n²) になる。** 10 万ブロックで 10^10 回の比較
-/// であり、公開できる速さではない。
+/// であり、公開できる速さではない。そこで作業量順の集合を漸進的に保ち、
+/// 末尾だけを見る (O(log n))。Bitcoin の `setBlockIndexCandidates` と
+/// `pindexBestHeader` に相当する。
 ///
-/// そこで、登録・状態変更のたびに索引を張り替えて持つ。どちらも作業量順の
-/// 集合の末尾を見るだけ (O(log n)) になる。Bitcoin の
-/// `setBlockIndexCandidates` と `pindexBestHeader` に相当する。
+/// 先端を下回ったものは [`prune_below`](Self::prune_below) で落とす。
+/// 落とさないと、ここが高さに比例して伸びる (`docs/SPEC.md` §19)。
 ///
-/// **親から子への写像はここに持たない。** 無効の印を子孫へ広げるときに
-/// しか要らず、持つと高さに比例して伸びるため、記憶域が持つ
-/// ([`ChainStore::children_of`](crate::store::ChainStore::children_of))。
+/// # ここに無いもの
 ///
-/// **索引の整合はこの型の中だけで保たれる。** 登録も状態変更もここを
-/// 通す。外から `entries` を書き換える口は開けていない。
+/// - **ブロックの実体** — 記憶域が持つ
+///   ([`ChainStore::index_entry`](crate::store::ChainStore::index_entry))。
+///   手元の控えは [`Chain`](crate::chain::Chain) が上限つきで抱える
+/// - **親から子への写像** — 無効の印を子孫へ広げるときにしか要らない。
+///   記憶域が持つ
+///   ([`ChainStore::children_of`](crate::store::ChainStore::children_of))
 #[derive(Debug, Default)]
 pub struct BlockIndex {
-    entries: std::collections::HashMap<Hash, BlockIndexEntry>,
     /// 本体を持つもの。先端の候補になりうる。
     with_body: std::collections::BTreeSet<WorkKey>,
     /// 無効と判定されていないもの。本体の有無は問わない。
@@ -147,96 +153,27 @@ impl BlockIndex {
         BlockIndex::default()
     }
 
-    /// 登録されている件数。
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// 1 件も登録されていないか。
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// 1 件を引く。
-    pub fn get(&self, hash: &Hash) -> Option<&BlockIndexEntry> {
-        self.entries.get(hash)
-    }
-
-    /// 知っているか。
-    pub fn contains(&self, hash: &Hash) -> bool {
-        self.entries.contains_key(hash)
-    }
-
-    /// 1 件を登録する。同じハッシュがあれば置き換える。
+    /// 1 件ぶんの所属を書き直す。
     ///
-    /// 置き換えでは親子関係を張り直さない。**同じハッシュなら同じヘッダで
-    /// あり、親も変わらない**ためである。
-    pub fn insert(&mut self, entry: BlockIndexEntry) {
-        let hash = entry.hash;
+    /// 登録にも状態の変更にも、これ 1 つを通す。作業量は同じハッシュに
+    /// 対して不変である (親の作業量 + そのブロックの難易度であり、どちらも
+    /// ヘッダから決まる) ため、鍵が入れ替わることはない。変わるのは
+    /// **どちらの集合に入るか**だけである。
+    pub fn record(&mut self, entry: &BlockIndexEntry) {
         let key = WorkKey {
             work: entry.cumulative_work,
-            hash,
+            hash: entry.hash,
         };
-        let has_body = entry.has_body();
-        let valid_header = entry.is_valid_header();
-
-        if let Some(old) = self.entries.insert(hash, entry) {
-            // 作業量が変わっていれば古い鍵が残る。両方外してから入れ直す。
-            let stale = WorkKey {
-                work: old.cumulative_work,
-                hash,
-            };
-            self.with_body.remove(&stale);
-            self.valid_headers.remove(&stale);
-        }
-
-        if has_body {
+        if entry.has_body() {
             self.with_body.insert(key);
         } else {
             self.with_body.remove(&key);
         }
-        if valid_header {
+        if entry.is_valid_header() {
             self.valid_headers.insert(key);
         } else {
             self.valid_headers.remove(&key);
         }
-    }
-
-    /// 状態だけを書き換える。書き換えた結果を返す。
-    ///
-    /// 知らないハッシュなら何もせず `None` を返す。
-    pub fn set_status(&mut self, hash: &Hash, status: BlockStatus) -> Option<&BlockIndexEntry> {
-        let entry = self.entries.get_mut(hash)?;
-        entry.status = status;
-        let key = WorkKey {
-            work: entry.cumulative_work,
-            hash: *hash,
-        };
-        let (has_body, valid_header) = (entry.has_body(), entry.is_valid_header());
-
-        if has_body {
-            self.with_body.insert(key);
-        } else {
-            self.with_body.remove(&key);
-        }
-        if valid_header {
-            self.valid_headers.insert(key);
-        } else {
-            self.valid_headers.remove(&key);
-        }
-        self.entries.get(hash)
-    }
-
-    /// 本体を持ち、作業量が `work` を超えるものを**多い順に**返す。
-    ///
-    /// 先端の候補である。走るのは条件を満たす件数だけであり、全件では
-    /// ない。先端を 1 個伸ばしただけなら 1 件で止まる。
-    pub fn candidates_above(&self, work: u128) -> impl Iterator<Item = &BlockIndexEntry> {
-        self.with_body
-            .iter()
-            .rev()
-            .take_while(move |key| key.work > work)
-            .filter_map(move |key| self.entries.get(&key.hash))
     }
 
     /// 先端の作業量を下回る候補を捨てる。捨てた件数を返す。
@@ -257,7 +194,7 @@ impl BlockIndex {
     ///
     /// 捨てないと、この 2 つの集合はブロック 1 個につき 48 バイトの鍵を
     /// 2 つ、**永久に積み続ける**。60 秒間隔では年 52 万ブロック積まれる
-    /// ので、常駐量が高さに比例して伸びる ([`docs/SPEC.md` §19])。
+    /// ので、常駐量が高さに比例して伸びる (`docs/SPEC.md` §19)。
     ///
     /// 捨てたあとに残るのは、先端と、先端を上回る競合する枝だけである。
     /// 分岐が無ければ **1 件**になる。
@@ -283,22 +220,77 @@ impl BlockIndex {
         self.with_body.len() + self.valid_headers.len()
     }
 
-    /// 最も作業量の多い、無効でないヘッダ。
-    pub fn best_header(&self) -> Option<&BlockIndexEntry> {
-        self.valid_headers
+    /// 本体を持ち、作業量が `work` を超えるもののハッシュを**多い順に**返す。
+    ///
+    /// 先端の候補である。走るのは条件を満たす件数だけであり、全件では
+    /// ない。先端を 1 個伸ばしただけなら 1 件で止まる。
+    pub fn candidates_above(&self, work: u128) -> impl Iterator<Item = Hash> + '_ {
+        self.with_body
             .iter()
-            .next_back()
-            .and_then(|key| self.entries.get(&key.hash))
+            .rev()
+            .take_while(move |key| key.work > work)
+            .map(|key| key.hash)
+    }
+
+    /// 最も作業量の多い、無効でないヘッダのハッシュ。
+    pub fn best_header(&self) -> Option<Hash> {
+        self.valid_headers.iter().next_back().map(|key| key.hash)
     }
 }
 
-impl std::ops::Index<&Hash> for BlockIndex {
-    type Output = BlockIndexEntry;
+/// インデックスの 1 件を、上限つきで手元に控える器。
+///
+/// **正本ではない。** ここに無いことは「そのブロックを知らない」を意味
+/// しない。引けなかったときは記憶域に聞き直すこと。この 2 つを混同すると、
+/// 正しいブロックを「知らない」と扱って静かにチェーンから外れる。
+///
+/// 入れた順に落とす。新しいブロックを検証するときに触るのは、難易度の窓
+/// (90) と Median Time Past (11)、シードを引くときの祖先 (最大 2112) で
+/// あり、いずれも**先端の近く**である。古いものから落として困らない。
+#[derive(Debug)]
+pub struct EntryCache {
+    entries: std::collections::HashMap<Hash, BlockIndexEntry>,
+    /// 入れた順。**同じハッシュは 1 度しか入らない。**
+    order: std::collections::VecDeque<Hash>,
+    limit: usize,
+}
 
-    fn index(&self, hash: &Hash) -> &BlockIndexEntry {
-        self.entries
-            .get(hash)
-            .unwrap_or_else(|| panic!("インデックスに {hash} が無い"))
+impl EntryCache {
+    /// 上限を決めて作る。
+    pub fn new(limit: usize) -> EntryCache {
+        EntryCache {
+            entries: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    /// 控えを引く。
+    pub fn get(&self, hash: &Hash) -> Option<&BlockIndexEntry> {
+        self.entries.get(hash)
+    }
+
+    /// 控える。すでにあれば中身だけ入れ替える (順番は動かさない)。
+    pub fn put(&mut self, entry: BlockIndexEntry) {
+        let hash = entry.hash;
+        if self.entries.insert(hash, entry).is_none() {
+            self.order.push_back(hash);
+        }
+        while self.order.len() > self.limit {
+            if let Some(old) = self.order.pop_front() {
+                self.entries.remove(&old);
+            }
+        }
+    }
+
+    /// 控えている件数。
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// 1 件も控えていないか。
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -452,7 +444,7 @@ mod tests {
     fn a_chain(len: u64) -> (BlockIndex, Vec<BlockIndexEntry>) {
         let mut index = BlockIndex::new();
         let genesis = entry_at(Hash::ZERO, 0, 0, 1, BlockStatus::FullyValid);
-        index.insert(genesis.clone());
+        index.record(&genesis);
         let mut chain = vec![genesis];
         for height in 1..=len {
             let prev = chain.last().unwrap();
@@ -463,7 +455,7 @@ mod tests {
                 prev.cumulative_work + 1,
                 BlockStatus::FullyValid,
             );
-            index.insert(entry.clone());
+            index.record(&entry);
             chain.push(entry);
         }
         (index, chain)
@@ -472,11 +464,7 @@ mod tests {
     #[test]
     fn the_best_header_is_the_one_with_the_most_work() {
         let (index, chain) = a_chain(20);
-        assert_eq!(
-            index.best_header().unwrap().hash,
-            chain.last().unwrap().hash
-        );
-        assert_eq!(index.len(), 21);
+        assert_eq!(index.best_header().unwrap(), chain.last().unwrap().hash);
     }
 
     #[test]
@@ -488,7 +476,7 @@ mod tests {
         let tip_work = chain[chain.len() - 2].cumulative_work;
         let visited: Vec<_> = index.candidates_above(tip_work).collect();
         assert_eq!(visited.len(), 1, "先端 1 件を超えて走査している");
-        assert_eq!(visited[0].hash, chain.last().unwrap().hash);
+        assert_eq!(visited[0], chain.last().unwrap().hash);
 
         // 先端に並んだら 1 件も返らない。
         let tip_work = chain.last().unwrap().cumulative_work;
@@ -514,13 +502,10 @@ mod tests {
             parent.cumulative_work + 2,
             BlockStatus::HeaderValid,
         );
-        index.insert(heavy.clone());
-        index.insert(light.clone());
+        index.record(&heavy);
+        index.record(&light);
 
-        let order: Vec<Hash> = index
-            .candidates_above(parent.cumulative_work)
-            .map(|e| e.hash)
-            .collect();
+        let order: Vec<Hash> = index.candidates_above(parent.cumulative_work).collect();
         assert_eq!(order[0], heavy.hash, "作業量の多いほうが先に来ていない");
         assert!(order.contains(&light.hash));
     }
@@ -534,17 +519,16 @@ mod tests {
         let work = parent.cumulative_work + 7;
         let a = entry_at(parent.hash, 2, 500, work, BlockStatus::HeaderValid);
         let b = entry_at(parent.hash, 2, 501, work, BlockStatus::HeaderValid);
-        index.insert(a.clone());
-        index.insert(b.clone());
+        index.record(&a);
+        index.record(&b);
 
         let first = index
             .candidates_above(parent.cumulative_work)
             .next()
-            .unwrap()
-            .hash;
+            .unwrap();
         let expected = if a.hash < b.hash { a.hash } else { b.hash };
         assert_eq!(first, expected, "同点でハッシュの小さいほうを選んでいない");
-        assert_eq!(index.best_header().unwrap().hash, expected);
+        assert_eq!(index.best_header().unwrap(), expected);
     }
 
     #[test]
@@ -558,10 +542,10 @@ mod tests {
             parent.cumulative_work + 1,
             BlockStatus::HeaderOnly,
         );
-        index.insert(pending.clone());
+        index.record(&pending);
 
         assert_eq!(
-            index.best_header().unwrap().hash,
+            index.best_header().unwrap(),
             pending.hash,
             "本体が無くても最良ヘッダにはなる"
         );
@@ -583,12 +567,12 @@ mod tests {
             parent.cumulative_work + 1,
             BlockStatus::HeaderOnly,
         );
-        index.insert(entry.clone());
+        index.record(&entry);
         assert_eq!(index.candidates_above(parent.cumulative_work).count(), 0);
 
-        // 本体が届いた。同じハッシュで入れ直す。
+        // 本体が届いた。同じハッシュで書き直す。
         entry.status = BlockStatus::HeaderValid;
-        index.insert(entry.clone());
+        index.record(&entry);
         assert_eq!(index.candidates_above(parent.cumulative_work).count(), 1);
     }
 
@@ -599,26 +583,49 @@ mod tests {
         let before = chain[chain.len() - 2].cumulative_work;
         assert_eq!(index.candidates_above(before).count(), 1);
 
-        index.set_status(&tip.hash, BlockStatus::Invalid);
+        let mut invalid = tip.clone();
+        invalid.status = BlockStatus::Invalid;
+        index.record(&invalid);
         assert_eq!(
             index.candidates_above(before).count(),
             0,
             "無効なのに候補に残っている"
         );
         assert_eq!(
-            index.best_header().unwrap().hash,
+            index.best_header().unwrap(),
             chain[chain.len() - 2].hash,
             "最良ヘッダが 1 つ前に戻っていない"
         );
     }
 
+    // ━━━━━━━━ 控え ━━━━━━━━
+
     #[test]
-    fn setting_the_status_of_an_unknown_hash_does_nothing() {
-        let (mut index, _) = a_chain(1);
-        assert!(index
-            .set_status(&hash::block_hash(b"knowhere"), BlockStatus::Invalid)
-            .is_none());
-        assert_eq!(index.len(), 2);
+    fn the_cache_stops_growing_at_its_limit() {
+        let mut cache = EntryCache::new(8);
+        let (_, chain) = a_chain(100);
+        for entry in &chain {
+            cache.put(entry.clone());
+            assert!(cache.len() <= 8, "上限を超えて抱えている");
+        }
+        assert_eq!(cache.len(), 8);
+
+        // 残っているのは新しいほうである。
+        assert!(cache.get(&chain[100].hash).is_some());
+        assert!(cache.get(&chain[0].hash).is_none());
+    }
+
+    #[test]
+    fn putting_the_same_hash_twice_does_not_take_two_slots() {
+        let mut cache = EntryCache::new(4);
+        let (_, chain) = a_chain(1);
+        let mut entry = chain[1].clone();
+        for _ in 0..10 {
+            entry.status = BlockStatus::Invalid;
+            cache.put(entry.clone());
+        }
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(&entry.hash).unwrap().status, BlockStatus::Invalid);
     }
 
     #[test]

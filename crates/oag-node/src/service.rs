@@ -1254,7 +1254,7 @@ impl Service {
                 let _ = reply.send(result);
             }
             Request::GetEntry { hash, reply } => {
-                let _ = reply.send(Ok(self.node.chain().entry(&hash).cloned()));
+                let _ = reply.send(self.node.chain().entry(&hash).map_err(|e| e.to_string()));
             }
             Request::SubmitTx { tx, from, reply } => {
                 let _ = reply.send(self.submit_tx(*tx, from));
@@ -1530,7 +1530,11 @@ impl Service {
 
         let tip = self.node.chain().tip().map_err(|e| e.to_string())?;
         let next_height = tip.height() + 1;
-        let mtp = self.node.chain().median_time_past_for_child_of(&tip.hash);
+        let mtp = self
+            .node
+            .chain()
+            .median_time_past_for_child_of(&tip.hash)
+            .map_err(|e| e.to_string())?;
         let view = self.node.chain().utxo_view().map_err(|e| e.to_string())?;
         let accepted = self
             .node
