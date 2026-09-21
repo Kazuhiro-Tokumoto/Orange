@@ -48,14 +48,21 @@ For vulnerabilities, see [`SECURITY.md`](SECURITY.md).
 
 ## What a change has to pass
 
-CI runs four checks. **Run the same ones locally before sending.**
+CI runs four jobs. **Run the same things locally before sending.**
 
 ```sh
+export RUSTFLAGS="-D warnings"             # CI sets this; a warning fails the build
+
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features
 cargo test --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 cargo check --workspace --all-targets      # must build without RandomX too
 ```
+
+**Do not skip the `cargo doc` line.** A doc comment that links to something
+rustdoc cannot resolve — a crate this one does not depend on, for instance —
+compiles and tests perfectly well, and then fails CI. It has happened.
 
 If you touch any of `crates/oag-wallet-wasm`, `crates/oag-wallet`,
 `crates/oag-consensus` or `crates/oag-primitives`, **rebuild the browser

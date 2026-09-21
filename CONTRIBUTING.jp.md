@@ -45,11 +45,18 @@ cargo build --release
 CI は 4 つ走ります。**手元で同じものを通してから送ってください。**
 
 ```sh
+export RUSTFLAGS="-D warnings"             # CI が設定している。警告で落ちる
+
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features
 cargo test --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 cargo check --workspace --all-targets      # RandomX 無しでも通ること
 ```
+
+**`cargo doc` の行を飛ばさないでください。** rustdoc が解決できない先を
+指す doc コメント (依存していないクレートへのリンクなど) は、ビルドも
+テストも普通に通ったうえで CI だけが落ちます。実際に落としました。
 
 `crates/oag-wallet-wasm` `crates/oag-wallet` `crates/oag-consensus`
 `crates/oag-primitives` のどれかを触ったら、**ブラウザのウォレットを
