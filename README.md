@@ -1,209 +1,231 @@
 # Orange (OAG)
 
-RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロックチェーン。
-[chroma](https://github.com/kusogakiller/chroma) をベースにしている。
+[English](README.md) · [日本語](README.jp.md)
 
-> **状態: mainnet 稼働中。** 2026 年 9 月にジェネシスを確定させ、以後
-> 採掘が続いています。送金・ブラウザのウォレット・エクスプローラまで
-> ひととおり動きます。
+A CPU-mined UTXO blockchain that uses RandomX for proof of work.
+Based on [chroma](https://github.com/kusogakiller/chroma).
+
+> **Status: mainnet is live.** The genesis block was fixed in September 2026
+> and mining has continued since. Payments, the browser wallet and the block
+> explorer all work.
 >
-> ただし**参加者はまだごく少数**で、**testnet は公開していません**
-> (シードの DNS レコードが未設定)。取引所にも上場しておらず、
-> **通貨としての価格は存在しません。** 自分で掘って自分で試す段階です。
+> That said, **there are still very few participants**, and **testnet is not
+> public yet** (its DNS seed record is not set up). It is not listed on any
+> exchange, so **there is no price.** This is still the stage where you mine
+> it yourself and try it yourself.
 
-| 項目 | 内容 |
+| | |
 | --- | --- |
-| 合意形成 | Proof of Work (RandomX) |
-| 会計モデル | UTXO |
-| 署名 | Schnorr / BIP340 (secp256k1) |
-| ブロック間隔 | 60 秒 |
-| 総発行量 | 1,000,000,000 OAG |
-| 発行 | 10 OAG/ブロック 固定、半減期なし、約 190 年で完了 |
-| 初期配布 | **なし** (全量マイニング。ブロック 0 の 10 OAG は焼却) |
-| プライバシー | なし (透明台帳) |
-| 実装 | Rust |
+| Consensus | Proof of Work (RandomX) |
+| Accounting model | UTXO |
+| Signatures | Schnorr / BIP340 (secp256k1) |
+| Block interval | 60 seconds |
+| Total supply | 1,000,000,000 OAG |
+| Emission | 10 OAG per block, flat, no halving, complete in roughly 190 years |
+| Initial distribution | **None** (all mined; the 10 OAG in block 0 is burned) |
+| Privacy | None (transparent ledger) |
+| Implementation | Rust |
 
-## 設計目標
+## A note on language
 
-1. **公平な分配** — プレマイン・ICO・開発者報酬を一切持たない
-2. **単純さ** — スクリプト言語も仮想マシンも持たない。攻撃面を最小に保つ
-3. **長期的な分配** — 半減期を持たない線形発行
+This README is the only part of the project that is in English so far.
+**The node's log output, the CLI messages, the block explorer and the browser
+wallet are all in Japanese**, and so is [`docs/SPEC.md`](docs/SPEC.md). Command
+names, flags and RPC methods are in English, so the commands below work as
+written.
 
-明示的な非目標: プライバシー、スマートコントラクト、高スループット。
+If you hit Japanese text you cannot read, open an Issue in English and it will
+be answered. Localisation is not implemented; it would be a welcome
+contribution.
 
-## 仕様書
+## Design goals
 
-**[`docs/SPEC.md`](docs/SPEC.md) が正典です。** すべてのパラメータ、コンセンサス
-ルール、および設計判断の理由が記載されています。実装との差異は仕様書側を優先して
-解消します。
+1. **Fair distribution** — no premine, no ICO, no developer reward
+2. **Simplicity** — no script language, no virtual machine; keep the attack surface small
+3. **Long-term distribution** — linear emission with no halving
 
-## 進捗
+Explicit non-goals: privacy, smart contracts, high throughput.
 
-| フェーズ | 内容 | 状態 |
+## Specification
+
+**[`docs/SPEC.md`](docs/SPEC.md) is normative.** It records every parameter,
+every consensus rule, and the reasoning behind each design decision. Where the
+implementation disagrees with the spec, the spec wins and the implementation is
+corrected. (The spec is currently written in Japanese.)
+
+## Progress
+
+| Phase | Item | Status |
 | ---: | --- | --- |
-| 0 | ワークスペース、CI、仕様書 | 完了 |
-| 1 | 基本型 (金額・ハッシュ・アドレス・鍵) | 完了 |
-| 2 | トランザクション・ブロック・シリアライズ・sighash | 完了 |
-| 3 | 検証ロジック、UTXO セット | 完了 |
-| 4 | RandomX、難易度調整 (LWMA) | 完了 |
-| 5 | チェーン状態、リオーグ | 完了 |
-| 5b | 永続化 (redb)・チェーンとの接続 | 完了 |
-| 6 | mempool、手数料ポリシー | 完了 |
-| 7a | P2P プロトコル (枠組み・メッセージ・ハンドシェイク) | 完了 |
-| 7b | ブロックロケータ、取り寄せの割り振り | 完了 |
-| 7c | Compact Blocks | 完了 |
-| 7d | TCP トランスポート | 完了 |
-| 8 | マイナー | 完了 |
-| 9a | ノード (oag-node) — 記憶域・チェーン・採掘・CLI | 完了 |
-| 9b | ノードへの P2P 組み込み (2 台での同期) | 完了 |
-| 10a | JSON-RPC (ノード側) | 完了 |
-| 10b | CLI ウォレット (鍵・残高・送金) | 完了 |
-| 10c | 安全性の強化 (鍵の暗号化・種からの導出) | 完了 |
-| 11a | チェーン選択の候補探しを漸進的にする | 完了 |
-| 11b | ジェネシス確定 (3 ネットワークすべて) | 完了 |
-| 11c | RandomX の fast モード (採掘) | 完了 |
-| 11d | ピア発見 (アドレス帳・`addr`・シードノード) | 完了 |
-| 11e | BIP39 / BIP32 / BIP44 (控えの語) | 完了 |
-| 11f | テストネット公開 | 未着手 |
-| 12a | 取引索引・アドレス索引 (任意機能) | 完了 |
-| 12b | ブロックエクスプローラ | 完了 |
+| 0 | Workspace, CI, specification | done |
+| 1 | Primitive types (amount, hash, address, keys) | done |
+| 2 | Transactions, blocks, serialization, sighash | done |
+| 3 | Validation logic, UTXO set | done |
+| 4 | RandomX, difficulty adjustment (LWMA) | done |
+| 5 | Chain state, reorgs | done |
+| 5b | Persistence (redb), wiring it to the chain | done |
+| 6 | Mempool, fee policy | done |
+| 7a | P2P protocol (framing, messages, handshake) | done |
+| 7b | Block locators, download scheduling | done |
+| 7c | Compact blocks | done |
+| 7d | TCP transport | done |
+| 8 | Miner | done |
+| 9a | Node (oag-node) — storage, chain, mining, CLI | done |
+| 9b | P2P wired into the node (two nodes syncing) | done |
+| 10a | JSON-RPC (node side) | done |
+| 10b | CLI wallet (keys, balance, payments) | done |
+| 10c | Hardening (key encryption, seed derivation) | done |
+| 11a | Incremental candidate search for chain selection | done |
+| 11b | Genesis fixed (all three networks) | done |
+| 11c | RandomX fast mode (mining) | done |
+| 11d | Peer discovery (address book, `addr`, seed nodes) | done |
+| 11e | BIP39 / BIP32 / BIP44 (recovery phrase) | done |
+| 11f | Public testnet | not started |
+| 12a | Transaction index, address index (optional) | done |
+| 12b | Block explorer | done |
 
-フェーズ番号を振っていたのはここまでです。以降は必要になった順に足して
-いるので、番号を振っていません。
+Phase numbering stops here. Everything after this was added as it became
+necessary, so it is not numbered.
 
-| 内容 | 状態 |
+| Item | Status |
 | --- | --- |
-| 部分署名トランザクション (PST) | 完了 |
-| UTXO をまとめる手続き (`consolidate`) | 完了 |
-| ブラウザのウォレット (wasm) | 完了 |
-| **mainnet 公開・稼働** | **完了** |
+| Partially signed transactions (PST) | done |
+| UTXO consolidation (`consolidate`) | done |
+| Browser wallet (wasm) | done |
+| **mainnet launched and running** | **done** |
 
-## クレート構成
+## Crate layout
 
 ```
 crates/
-├── oag-primitives/   金額 (u128)・BLAKE3・マークル・varint・鍵・アドレス
-├── oag-consensus/    符号化・パラメータ・トランザクション・ブロック・
-│                    sighash・UTXO セット・検証
-├── oag-pow/          難易度・ターゲット・LWMA・シードエポック・RandomX
-├── oag-chain/        ブロックインデックス・最良チェーン選択・リオーグ・ジェネシス
-│                    記憶域の抽象 (ChainStore) とメモリ実装
-├── oag-store/        永続化 (redb)
-├── oag-mempool/      mempool・中継ポリシー
-├── oag-net/          P2P プロトコル (枠組み・メッセージ・ハンドシェイク・
-│                    ロケータ・取り寄せの割り振り・Compact Blocks・TCP)
-├── oag-miner/        ブロックテンプレートの組み立てと nonce の探索
-├── oag-rpc/          JSON-RPC 2.0・最小限の HTTP・合言葉・呼び出し側
-├── oag-node/         ノード本体・専用スレッド・ピアとのやり取り・実行ファイル
-├── oag-wallet/       鍵の保管・支払いの組み立てと署名・実行ファイル
-└── oag-wallet-wasm/  上をブラウザで動かすための殻 (wasm)
+├── oag-primitives/   amounts (u128), BLAKE3, merkle, varint, keys, addresses
+├── oag-consensus/    encoding, parameters, transactions, blocks,
+│                     sighash, UTXO set, validation
+├── oag-pow/          difficulty, target, LWMA, seed epochs, RandomX
+├── oag-chain/        block index, best-chain selection, reorgs, genesis,
+│                     storage abstraction (ChainStore) and in-memory impl
+├── oag-store/        persistence (redb)
+├── oag-mempool/      mempool, relay policy
+├── oag-net/          P2P protocol (framing, messages, handshake,
+│                     locators, download scheduling, compact blocks, TCP)
+├── oag-miner/        block template assembly and nonce search
+├── oag-rpc/          JSON-RPC 2.0, minimal HTTP, cookie auth, client
+├── oag-node/         the node itself, dedicated threads, peer handling, binary
+├── oag-wallet/       key storage, payment construction and signing, binary
+└── oag-wallet-wasm/  the shell that runs the above in a browser (wasm)
 ```
 
-`oag-pow` の RandomX は feature `randomx` の背後にある。C++ 実装のビルドに
-cmake と C++ コンパイラを要するため、既定では無効にしてある。
+RandomX in `oag-pow` sits behind the `randomx` feature. Building the C++
+implementation needs cmake and a C++ compiler, so it is off by default.
 
 ```sh
 cargo test -p oag-pow --features randomx
 ```
 
-同様に `oag-net` の TCP を扱う層は feature `tokio` の背後にあります。
-プロトコルの規則そのものは feature なしで使えます。
+Likewise, the TCP layer in `oag-net` sits behind the `tokio` feature. The
+protocol rules themselves are usable without any feature.
 
 ```sh
 cargo test -p oag-net --features tokio
 ```
 
-## 動かす
+## Running a node
 
-mainnet / testnet / regtest のいずれも起動します。**手元で試すなら
-regtest** です。難易度が 1 なので 1 台ですぐにブロックが積み上がります。
+mainnet, testnet and regtest all start. **If you want to try things locally,
+use regtest** — difficulty is 1, so a single machine stacks up blocks
+immediately.
 
-| ネットワーク | ジェネシス難易度 |
+| Network | Genesis difficulty |
 | --- | ---: |
 | mainnet | 1,000 |
 | testnet | 10 |
 | regtest | 1 |
 
-最初の 90 ブロックはこの難易度のままです (LWMA は窓が埋まるまで働かない)。
+The first 90 blocks stay at that difficulty (LWMA does not act until its window
+is full).
 
-### 掘らないで動かす
+### Running without mining
 
-**採掘は任意です。既定では掘りません。** `--mine` を付けなければ、
-ブロックを検証して中継するだけのノードとして動きます。
+**Mining is optional and off by default.** Without `--mine`, the node simply
+validates and relays blocks.
 
 ```sh
 ./target/release/oag-node run --network mainnet --datadir ./oag-data
 ```
 
-検証は RandomX の light モード (256 MB) だけで済みます。**2 GB を積んで
-いない機械でもフルノードを動かせます** (SPEC §11.2)。採掘するかどうかと、
-検証できるかどうかは別です。
+Validation only needs RandomX light mode (256 MB). **You can run a full node on
+a machine that does not have 2 GB to spare** (SPEC §11.2). Being able to mine
+and being able to validate are separate questions.
 
-### 掘る
+### Mining
 
-`--mine` を付けたときだけ掘ります。報酬の受取先 `--payout` が要ります。
-さらに `--fast` を付けると RandomX の fast モード (2 GB) を使います。
-省くと light モード (256 MB) のまま掘ります。
+The node mines only when you pass `--mine`, which requires a `--payout` address
+for the reward. Adding `--fast` uses RandomX fast mode (2 GB); without it,
+mining stays in light mode (256 MB).
 
 ```sh
 ./target/release/oag-node run --network mainnet --datadir ./oag-data \
-    --mine --fast --payout <アドレス> --blocks 5
+    --mine --fast --payout <address> --blocks 5
 ```
 
-手元のハッシュレートは次で測れます。
+You can measure your local hashrate with:
 
 ```sh
 cargo run --release -p oag-pow --features randomx --example hashrate
 ```
 
-#### 何スレッドで掘るか
+#### How many threads
 
-既定は 1 本です。`--mining-threads` で増やせます。`0` を渡すとコア数に
-合わせます。
+The default is 1. `--mining-threads` raises it; passing `0` matches your core
+count.
 
 ```sh
 ./target/release/oag-node run --network mainnet --datadir ./oag-data \
-    --mine --payout <アドレス> --mining-threads 4
+    --mine --payout <address> --mining-threads 4
 ```
 
-**本数を増やすと memory も増えます。** RandomX の採掘器はスレッドを
-またげないので、1 本ごとに自分の分を建てます。
+**More threads means more memory.** A RandomX miner cannot share its dataset
+across threads, so each thread builds its own.
 
-| モード | 1 本あたり | 4 本なら |
+| Mode | Per thread | With 4 threads |
 | --- | ---: | ---: |
 | light | 256 MB | 1 GB |
 | fast | 2 GB | 8 GB |
 
-`--fast` と `--mining-threads 0` を同時に渡しても 1 本のままにします。
-積んでいる memory が分からないのに、2 GB ずつ確保しにいかないためです。
-fast を何本も建てたいときは本数を明示してください。
+Passing `--fast` together with `--mining-threads 0` still gives you one thread.
+The node will not go allocating 2 GB per core when it does not know how much
+memory the machine has. If you do want several fast threads, say how many.
 
-light を何本も建てるのと fast を 1 本建てるのは、どちらも 2 GB 前後に
-なります。**どちらが速いかは機械によります。** 上の `hashrate` で
-light の 1 本あたりの速さを測り、本数を掛けて比べてください。
+Several light threads and one fast thread both land around 2 GB. **Which is
+faster depends on the machine.** Measure one light thread with `hashrate` above
+and multiply by the thread count to compare.
 
 ```sh
 cargo build --release -p oag-node
 
-# 受取先アドレスを作る
+# create a payout address
 ./target/release/oag-node keygen --network regtest --out regtest.key
 
-# 5 ブロック掘る (--blocks を省くと止まらない)
+# mine 5 blocks (omit --blocks and it does not stop)
 ./target/release/oag-node run --network regtest --datadir ./oag-data \
-    --mine --payout <上で出たアドレス> --blocks 5
+    --mine --payout <the address printed above> --blocks 5
 
-# 今の状態を見る
+# look at the current state
 ./target/release/oag-node info --network regtest --datadir ./oag-data
 
-# block/<高さ>/<ブロックハッシュ>.dat の形で書き出す
+# dump blocks as block/<height>/<block hash>.dat
 ./target/release/oag-node export-blocks --network regtest \
     --datadir ./oag-data --out ./block
 ```
 
-### ログの読み方
+### Reading the log
 
-行の先頭に何の話かが付きます。**「運んでいる」と「確かめた」は別の話**
-なので、止まったときにどちらで止まったのかが分かります。
+Each line is tagged with what it is about. **"Carried it here" and "checked it
+myself" are different claims**, so when things stall you can tell which one
+stalled.
+
+**The node currently logs in Japanese.** The tags are listed below with their
+meanings; an English locale is not implemented yet.
 
 ```text
 [ピア] 127.0.0.1:19444 と繋がった (/oag-node:0.1.0/、高さ 303)
@@ -216,317 +238,330 @@ cargo build --release -p oag-node
 [取引] 受信 9aa5bac0  手数料 5 OAG  151 B  mempool 1 件
 ```
 
-| 印 | 何の話か |
-| --- | --- |
-| `[ピア]` | 接続の出入り、シードの結果 |
-| `[同期]` | 相手から運んでくる話。**中身が正しいかはここでは言わない** |
-| `[検証]` | 運んできたものを自分で確かめた話 |
-| `[取引]` | mempool の出入り |
-| `[採掘]` | 掘れた、掘り方 |
-| `[警告]` | 困ったこと。**ここだけ標準エラーに出る** |
+| Tag | Reads as | What it is about |
+| --- | --- | --- |
+| `[ピア]` | peer | connections coming and going, seed results |
+| `[同期]` | sync | what is being carried from a peer. **It says nothing about whether the contents are valid** |
+| `[検証]` | check | what the node verified for itself |
+| `[取引]` | tx | mempool traffic |
+| `[採掘]` | mining | blocks found, how mining is configured |
+| `[警告]` | warning | trouble. **This tag alone goes to stderr** |
 
-初期同期の間は 2 秒ごとにまとめ、追いついたら 1 ブロックずつ出します。
-**遅れているのに本体が 30 秒来なければ、その旨を 1 度出します** —
-黙って待っているだけの時間を作らないためです。
+During initial sync, lines are batched every 2 seconds; once caught up, one
+line per block. **If the node is behind and no block body arrives for 30
+seconds, it says so once** — so there is never a stretch of silent waiting.
 
-進んでいることの記録は標準出力、困ったことは標準エラーなので、
-`2> node-warn.log` で困ったことだけを別に残せます。
+Progress goes to stdout and trouble goes to stderr, so `2> node-warn.log`
+keeps just the trouble in its own file.
 
-### 公開ネットワークに繋ぐ
+### Connecting to the public network
 
-mainnet と testnet では、繋ぎ先を指定しなければ自動で探します。住所帳が
-空のときだけ DNS シード (`seed.manh2309.org`) を引き、あとはノード同士が
-住所を教え合います。外向きの接続を 8 本保ちます。
+On mainnet and testnet, a node finds peers by itself unless you name them. It
+queries the DNS seed (`seed.manh2309.org`) only when its address book is empty;
+after that, nodes tell each other about addresses. It keeps 8 outbound
+connections.
 
-外から繋いでもらいたいノード (シードに載せるノードなど) では、自分の
-住所を名乗る必要があります。**自分の外向きの住所を自分で確かめる手立ては
-無いので、明示してください。**
+A node that wants inbound connections (a seed node, for instance) has to
+announce its own address. **There is no reliable way for a node to determine
+its own external address, so state it explicitly.**
 
 ```sh
 ./target/release/oag-node run --network testnet \
-    --listen 0.0.0.0:19444 --external-addr <公開IP>:19444
+    --listen 0.0.0.0:19444 --external-addr <public IP>:19444
 ```
 
-`--no-discovery` を付けると、住所帳もシードも使わず `--connect` で
-名指しした相手だけに繋ぎます。
+`--no-discovery` skips both the address book and the seed, connecting only to
+the peers named with `--connect`.
 
-### 手元で 2 台を繋ぐ
+### Two nodes on one machine
 
-2 台を繋ぐには、片方を待ち受けにして、もう片方から `--connect` します。
+Have one listen and the other `--connect` to it.
 
 ```sh
-# 1 台目: 待ち受けて掘る
+# node A: listen and mine
 ./target/release/oag-node run --network regtest --datadir ./node-a \
-    --listen 127.0.0.1:19444 --mine --payout <アドレス>
+    --listen 127.0.0.1:19444 --mine --payout <address>
 
-# 2 台目: 掘らずに繋いで同期する
+# node B: don't mine, just connect and sync
 ./target/release/oag-node run --network regtest --datadir ./node-b \
     --no-listen --connect 127.0.0.1:19444
 ```
 
-同期は headers-first です。ヘッダを先に集めてチェーンの形を確かめ、
-そのうえで本体を取り寄せます。受け取ったブロックは**自分で検証**して
-おり、UTXO セットは相手から貰うのではなく自分で組み立てています。
+Sync is headers-first: collect headers, confirm the shape of the chain, then
+fetch bodies. **Every block received is validated locally**, and the UTXO set is
+built by the node itself rather than accepted from a peer.
 
-## エクスプローラで見る
+## The block explorer
 
-`--explorer` を付けると、ブラウザで鎖の中身を見られます。既定は
-`http://127.0.0.1:8080/` です。
+`--explorer` serves a browsable view of the chain, by default at
+`http://127.0.0.1:8080/`.
 
 ```sh
 ./target/release/oag-node run --network mainnet --datadir ./nodedata --explorer
 ```
 
-高さ・ブロックハッシュ・取引 ID・アドレスのどれでも探せます。取引の頁には
-入力側の金額と相手まで出ます。**読むだけの口**で、送金も設定変更もここから
-はできません。
+You can search by height, block hash, transaction ID or address. A transaction
+page shows the amounts and counterparties on the input side too. **It is
+read-only** — you cannot send coins or change settings from it.
 
-住所を変えたいときは `--explorer 127.0.0.1:9000` のように渡します。
-ループバック以外にすると外から見えるようになります。
+Pass an address to move it: `--explorer 127.0.0.1:9000`. Binding to anything
+other than loopback makes it reachable from outside.
 
-### ブロックが太っても重くならないようにしてあること
+### What keeps it cheap as blocks fill up
 
-先頭の一覧は、並べる 25 ブロックの**本体を読みません**。時刻と難易度は
-ブロックインデックスのヘッダから、大きさは保存した記録の長さから、取引数は
-ヘッダ直後の varint 1 個から取ります。本体を復号すると、表に出さない取引
-まで全部組み立てることになり、満杯のブロック (約 670 取引) が 25 個なら
-16,000 件あまりを確保して捨てる計算になります。しかもそれはノード本体の
-処理列の中で起きるので、その間ブロックもピアも捌けなくなります。
+The front page **does not read the bodies** of the 25 blocks it lists. Time and
+difficulty come from the header in the block index, size from the length of the
+stored record, and transaction count from the single varint right after the
+header. Decoding the bodies would mean constructing every transaction,
+including the ones never displayed: 25 full blocks (about 670 transactions
+each) would allocate and discard over 16,000 of them. Worse, that happens
+inside the node's own work queue, so blocks and peers stall while it runs.
 
-一覧はまとめて 1 回の読み取りで作ります。行ごとに引き直すと、描いている
-最中に届いたブロックで上下の行が違う時点を映すためです。
+The list is built from one read. Querying row by row would show rows from
+different points in time, because blocks can arrive mid-render.
 
-ブロック内の取引表は 50 件ずつに区切ります。番号はブロック内の通し番号
-なので、索引が指す位置とそのまま照らし合わせられます。
+The transaction table inside a block is paged 50 at a time. The numbering is the
+index within the block, so it lines up directly with what the index points at.
 
-### 索引について
+### About the indexes
 
-取引 ID とアドレスで引くには**索引が要ります**。`--explorer` を付けると
-自動で作られますが、エクスプローラなしで RPC からだけ使うなら `--index`
-を付けてください。
+Lookups by transaction ID or address **need an index**. `--explorer` builds one
+automatically; if you only want it over RPC, pass `--index`.
 
 ```sh
 ./target/release/oag-node run --network mainnet --datadir ./nodedata --index
 ```
 
-初回だけ鎖全体を走査します。以後はブロックを受け取るたびに更新されるので、
-組み直す必要はありません。`--drop-index` で捨てられます。
+The first run scans the whole chain. After that it updates as blocks arrive, so
+there is no rebuild. `--drop-index` throws it away.
 
-**既定では作りません。** コンセンサスは索引を必要とせず、ブロックが満杯の
-まま 1 年続けば 37 GB の上乗せになるからです (`docs/SPEC.md` §19)。実際の
-使われ方ではもっとずっと小さく、1 ブロックに 10 取引なら年 0.5 GB 程度です。
+**It is off by default.** Consensus does not need an index, and a year of full
+blocks would add 37 GB (`docs/SPEC.md` §19). Real usage is far smaller — at 10
+transactions per block it is about 0.5 GB a year.
 
-索引があると、次の手続きも使えるようになります。
+With an index, these methods become available:
 
-| 手続き | 返すもの |
+| Method | Returns |
 | --- | --- |
-| `getaddresshistory` | そのアドレスに触れた取引 |
-| `getrawtransaction` | 確定した取引 (索引が無いと mempool のみ) |
-| `getindexinfo` | 索引を持っているか |
+| `getaddresshistory` | transactions touching that address |
+| `getrawtransaction` | confirmed transactions (mempool only, without an index) |
+| `getindexinfo` | whether an index is present |
 
-## ブラウザのウォレット
+## The browser wallet
 
-`--wallet` を付けると、ブラウザで使えるウォレットが開きます。既定は
-`http://127.0.0.1:25565/` です。**開くとそのまま画面が出ます。**
+`--wallet` serves a wallet you can use from a browser, by default at
+`http://127.0.0.1:25565/`. **Opening it shows the wallet directly.**
 
 ```sh
 ./target/release/oag-node run --network mainnet --datadir ./nodedata --wallet
 ```
 
-作る・語から戻す・残高を見る・送る・まとめる、がひととおりできます。
+You can create a wallet, restore from a phrase, check a balance, send, and
+consolidate.
 
-### 鍵はノードを通りません
+### Keys never pass through the node
 
-署名は**ブラウザの中**で終わります。ノードへ渡るのは署名の済んだ
-トランザクションだけです。種も秘密鍵も、この過程でノードにもネットワークに
-も出ません。
+Signing finishes **inside the browser**. Only signed transactions reach the
+node. Neither the seed nor any private key is exposed to the node or to the
+network at any point.
 
-ノードが差し出す口は 4 つだけです。
+The node offers exactly four endpoints:
 
-| 口 | できること |
+| Endpoint | What it does |
 | --- | --- |
-| `/api/info` | 高さとネットワークを見る |
-| `/api/scan` | 渡されたアドレスの未使用出力を数える |
-| `/api/history` | 渡されたアドレスの履歴を読む |
-| `/api/send` | 署名済みのものを mempool へ渡す |
+| `/api/info` | report height and network |
+| `/api/scan` | count unspent outputs for the addresses you hand it |
+| `/api/history` | read history for the addresses you hand it |
+| `/api/send` | pass a signed transaction to the mempool |
 
-どれも P2P で既に誰にでもできることです。放送する権利は元から全員にあり、
-鎖の中身は公開情報です。ここを開けてもノードにできることは増えません。
+Every one of these is something anyone can already do over P2P. The right to
+broadcast belongs to everyone, and the chain's contents are public. Opening
+these endpoints does not widen what the node can do.
 
-### CLI と同じ原稿が動きます
+### The same code as the CLI
 
-ブラウザが読む wasm は `oag-wallet` を組んだものです。鍵の導出も、記録の
-暗号化も、sighash の計算も、`oag-wallet` の実行ファイルと**同じ原稿**が
-動きます。暗号まわりを JavaScript で書き直してはいません。
+The wasm the browser loads is `oag-wallet` compiled for a different target. Key
+derivation, record encryption and sighash computation run **the same code** as
+the `oag-wallet` binary. None of the cryptography was rewritten in JavaScript.
 
-記録の形式も同じなので、行き来できます。
+The file format is identical too, so you can move between them.
 
 ```sh
-# CLI で作ったものをブラウザで開く
-cat wallet.json        # 中身をそのまま「開く」欄に貼る
+# open a CLI-created wallet in the browser
+cat wallet.json        # paste the contents into the "open" field
 
-# ブラウザで作ったものを CLI で開く
-#   「控えを書き出す」で落とした oag-wallet.json を --wallet に渡す
+# open a browser-created wallet in the CLI
+#   pass the oag-wallet.json you exported to --wallet
 ```
 
-### エクスプローラとは別のポートです
+### It runs on a different port from the explorer
 
-ブラウザの保存領域はポートごとに仕切られます。**別の口にしてあるので、
-エクスプローラ側に万一穴があっても、暗号化された記録はそちらから読めません。**
+Browser storage is partitioned per origin. **They are deliberately on separate
+ports, so that a hole in the explorer could not read the encrypted wallet
+record.**
 
-### 外に出すには証明書が要ります
+### Exposing it needs a certificate
 
-通信路が平文でも、署名が中身を守ります。宛先も金額も署名が及んでいるので、
-途中で書き換えられません。
+Plaintext transport is not what protects a payment — the signature is. It covers
+the recipient and the amount, so neither can be altered in transit.
 
-守れないのは**頁を配る線**です。署名するコードは毎回ブラウザへ送られるので、
-そこを差し替えられれば、見た目は同じまま鍵を抜き取れます。
+What a signature cannot protect is **the channel that delivers the page.** The
+signing code is sent to the browser every time, so anyone who can replace it
+can lift the keys while the page looks unchanged.
 
-そのため、ループバック以外で待ち受けようとすると**起動を断ります**。手元の
-機械から開くぶんには平文で構いません。
+For that reason the node **refuses to start** if you ask it to serve the wallet
+on anything but loopback. Opening it from the same machine over plaintext is
+fine.
 
-### 控えの語は必ず書き留めてください
+### Write the recovery phrase down
 
-暗号化した記録はブラウザの localStorage に置きますが、これは**控えでは
-ありません**。ポートや `https` への切り替えで origin が変われば消えますし、
-しばらく開かないだけで消す処理系もあります。
+The encrypted record lives in the browser's localStorage, which is **not a
+backup**. Changing the port, or switching to `https`, changes the origin and it
+is gone; some browsers clear it simply because you have not visited in a while.
 
-消えても、控えの語があれば戻せます。**語だけが最後の綱です。**
+If it disappears, the recovery phrase brings it back. **The phrase is the only
+thing that is final.**
 
-語から戻したときは、どこまで使われていたかを鎖に問い合わせて探します
-(索引が要るので `--wallet` は `--index` を含みます)。
+Restoring from a phrase asks the chain how far the wallet had been used, so
+`--wallet` implies `--index`.
 
-### 解錠に数秒かかります
+### Unlocking takes a few seconds
 
-Argon2id を m=128 MiB, t=4 で回しています。総当たりの費用はここで決まる
-ので、わざと重くしてあります。手元の PC で 0.5 秒前後、携帯ではその数倍
-です。
+Argon2id runs at m=128 MiB, t=4. The cost of a brute-force attack is decided
+right there, so it is slow on purpose — around 0.5 seconds on a desktop, several
+times that on a phone.
 
-## 送金する
+## Sending coins
 
-ウォレットはノードと **JSON-RPC でしか話しません**。秘密鍵はノードに
-渡らず、署名はウォレット側で済ませます。
+The wallet talks to the node **over JSON-RPC only**. Private keys never reach
+the node; signing happens on the wallet side.
 
 ```sh
 cargo build --release -p oag-wallet
 
-# ウォレットを作る (パスフレーズを尋ねられ、控えの 12 語が表示される)
+# create a wallet (asks for a passphrase, prints a 12-word recovery phrase)
 ./target/release/oag-wallet --wallet ./alice.json new
 ./target/release/oag-wallet --wallet ./bob.json new
 
-# alice のアドレス宛てに掘る (コインベースは 120 ブロック後に使える)
+# mine to alice's address (coinbase is spendable after 120 blocks)
 ./target/release/oag-node run --network regtest --datadir ./oag-data \
     --mine --payout $(./target/release/oag-wallet --wallet ./alice.json address) \
     --blocks 130
 
-# 残高を見る
+# check the balance
 ./target/release/oag-wallet --wallet ./alice.json --datadir ./oag-data balance
 
-# 送る
+# send
 ./target/release/oag-wallet --wallet ./alice.json --datadir ./oag-data \
     send $(./target/release/oag-wallet --wallet ./bob.json address) 12.5
 ```
 
-### 掘り続けるなら、ときどきまとめてください
+### If you keep mining, consolidate occasionally
 
-掘っていると **1 ブロックにつき UTXO が 1 つ増えます**。コインベースの出力は
-1 つだからです。放っておくと `scanutxos` の上限 (10,000 件) に当たり、そこで
-**残高も送金も引けなくなります**。60 秒間隔なら 10,000 ブロックは**約 7 日**
-です。
+Mining adds **one UTXO per block**, because a coinbase has a single output. Left
+alone, you will hit the `scanutxos` ceiling (10,000 entries), and at that point
+**neither balance nor send will work**. At 60-second blocks, 10,000 blocks is
+**about 7 days**.
 
 ```sh
-# まず見るだけ
+# look first
 ./target/release/oag-wallet --wallet ./alice.json --datadir ./oag-data \
     consolidate --dry-run
 
-# 畳む
+# fold them up
 ./target/release/oag-wallet --wallet ./alice.json --datadir ./oag-data \
     consolidate
 ```
 
-細かい出力を集めて、自分宛ての 1 つにまとめます。
+This gathers small outputs into a single one paid back to yourself.
 
-- **1 回では畳み切れません。** 1 取引の上限 (100,000 バイト) が入力 980 件
-  前後で頭を打つので、多いときは確定を待って繰り返します。あと何件残るかは
-  毎回表示します
-- **成熟していないコインベースは触りません。** 120 ブロック経つまで使えない
-  ためで、その件数は畳み残しとは別に表示します
-- **二度押しても損しません。** まとめるものが無ければ何もせず終わります。
-  未確定のまとめが使っている出力も手持ちから外すので、同じ取引を二重に
-  送ろうとして断られることもありません
-- `--max-inputs` で 1 回に畳む本数を絞れます
-- **上限を越えてしまった後でも使えます。** `balance` と `send` は打ち切られた
-  走査を断りますが (残高を過少に見せないため)、`consolidate` は進みます。
-  畳むのに手持ち全部は要らないからです。返ってくるのは「直近の 10,000 件」
-  ではなく手持ちから適当な 10,000 件なので、繰り返せば上限を下回ります
+- **One pass is not enough.** The per-transaction limit (100,000 bytes) caps out
+  around 980 inputs, so when there are many you wait for confirmation and repeat.
+  It prints how many remain each time
+- **Immature coinbases are left alone.** They are unspendable until 120 blocks
+  have passed; that count is reported separately from the remainder
+- **Running it twice costs nothing.** With nothing to fold, it exits having done
+  nothing. Outputs used by an unconfirmed consolidation are excluded from your
+  holdings, so you will not have a second attempt rejected as a duplicate
+- `--max-inputs` limits how many are folded per pass
+- **It still works after you have gone over the limit.** `balance` and `send`
+  refuse a truncated scan (so as not to understate your balance), but
+  `consolidate` proceeds — folding does not require seeing everything. What comes
+  back is an arbitrary 10,000 of your outputs rather than "the most recent
+  10,000", so repeating brings you under the ceiling
 
-手数料は安いです。満杯に近い 1 本 (100,000 バイト) で **0.5 OAG**、そこに
-入る 980 件が 10 OAG ずつなら 9,800 OAG を 0.5 OAG で畳む計算になります。
+Fees are cheap. A near-full transaction (100,000 bytes) costs **0.5 OAG**, so
+folding the 980 outputs that fit — 10 OAG each, 9,800 OAG in total — costs 0.5
+OAG.
 
-### 受け取る側は何承認待つか
+### How many confirmations to wait for
 
-**目安は 10 ブロック (約 10 分) です。** 高額なもの、渡すと取り戻せない
-ものは 20 以上。**0 承認 (mempool にあるだけ) は支払いとして受け取っては
-いけません。**
+**Ten blocks (about 10 minutes) is the guideline.** Twenty or more for large
+amounts, or for anything you cannot claw back. **Never accept 0 confirmations
+(present in the mempool only) as payment.**
 
-覆される確率は攻撃者のハッシュレート比と承認数だけで決まり、**ブロック
-間隔には依存しません**。Bitcoin の慣習は 6 で、10 なら同じ占有率に対して
-確率はおよそ 1 桁下がります。6 で足りないのは確率ではなく費用の問題で、
-若いチェーンは全体のハッシュレートが小さいぶん、同じ占有率が安く買える
-ためです。詳細と数表は SPEC §10.7 にあります。
+The probability of a reversal depends only on the attacker's hashrate share and
+the confirmation count; **it does not depend on the block interval.** Bitcoin's
+convention is 6; at 10, the probability for the same share is roughly an order
+of magnitude lower. The reason 6 is not enough here is cost, not probability: a
+young chain has a small total hashrate, so the same share is cheaper to buy.
+Details and tables are in SPEC §10.7.
 
-`balance --verbose` が UTXO ごとの確認数を出します。10 に満たないものには
-`!` が付きます。**印は表示だけで、送金は妨げません。**
+`balance --verbose` prints the confirmation count per UTXO. Anything under 10 is
+marked with `!`. **The mark is informational and does not block a send.**
 
 ```sh
 ./target/release/oag-wallet --wallet ./alice.json --datadir ./oag-data \
     balance --verbose
 ```
 
-なお、ウォレットの残高はチェーンの UTXO セットだけを見ており、mempool は
-一切見ません。**0 承認の出力は残高に出ず、使うこともできません。**
+Note that the wallet's balance looks only at the chain's UTXO set and never at
+the mempool. **Zero-confirmation outputs do not appear in the balance and cannot
+be spent.**
 
-#### 確認数は減ることがあります
+#### Confirmation counts can go down
 
-ブロックが分岐して、こちらが見ていた枝が負けると、そこに入っていた支払いは
-未確認に戻ります。**確認数は増えるだけではありません。**
+When the chain forks and the branch you were watching loses, payments in it
+return to unconfirmed. **Confirmation counts do not only increase.**
 
-- 新しい枝にも同じ支払いが入っていれば、確認数がその分だけ戻ります
-  (9 → 2 など)。いずれまた伸びます
-- まだ入っていなければ 0 に戻り、mempool で掘られるのを待ちます
-- 新しい枝が同じ資金を別の宛先へ使っていれば、**その支払いは二度と確認
-  されません**。これが二重使用です
+- If the new branch also contains the payment, the count comes back at that depth
+  (9 → 2, say) and grows again
+- If it does not, the count returns to 0 and the payment waits in the mempool to
+  be mined
+- If the new branch spends the same funds to a different recipient, **that
+  payment will never confirm.** That is a double spend
 
-ウォレットは毎回チェーンを見直すので、`balance` を実行し直せば正しい値が
-出ます。ただし**減ったことを知らせる仕組みはありません。** 承認数は
-**品物を渡す直前に確かめてください。**
+The wallet re-reads the chain every time, so running `balance` again gives the
+right answer. But **nothing notifies you that a count went down.** Check the
+confirmations **immediately before handing over goods.**
 
-### 鍵を持つ機械を分ける
+### Keeping keys on a separate machine
 
-鍵を持つ機械とノードに繋がる機械を分けたい場合は、**部分署名トランザクション
-(PST)** を経由します。Bitcoin の PSBT 相当で、署名に要るもの (使う出力の金額と
-支払い条件) を一緒に運ぶため、署名する側はチェーンを見に行く必要がありません。
+To keep your keys on a machine that never touches the network, use **partially
+signed transactions (PST)**. They are the equivalent of Bitcoin's PSBT: they
+carry everything signing needs (the amount and spending condition of each input),
+so the signing side never has to consult the chain.
 
 ```sh
-# 繋がる側: 組み立てるだけ。署名しない
+# online side: build only, do not sign
 ./target/release/oag-wallet --wallet ./alice.json --datadir ./oag-data \
     pst create $(./target/release/oag-wallet --wallet ./bob.json address) 12.5 \
     --out ./payment.pst
 
-# 鍵を持つ側: ノードに繋がずに署名する
+# key-holding side: sign without touching a node
 ./target/release/oag-wallet --wallet ./alice.json pst sign ./payment.pst
 
-# 繋がる側: 仕上げて送る
+# online side: finalize and broadcast
 ./target/release/oag-wallet --wallet ./alice.json --datadir ./oag-data \
     pst send ./payment.pst
 ```
 
-複数の持ち主がそれぞれ署名した場合は `pst combine` で束ねます。中身はいつでも
-`pst show` で確かめられます。**署名する前に手数料を見てください。**
+When several owners each sign, `pst combine` merges the results. `pst show`
+prints the contents at any point. **Look at the fee before you sign.**
 
-RPC は**ループバックのみ**で待ち受け、合言葉による認証を要求します
-(合言葉は起動のたびに作られ、`<datadir>/.cookie` に書かれます)。
-`curl` からも呼べます。
+RPC listens **on loopback only** and requires cookie authentication (the cookie
+is regenerated at every start and written to `<datadir>/.cookie`). You can call
+it from `curl`:
 
 ```sh
 curl -s --user "$(cat ./oag-data/.cookie)" -H 'content-type: application/json' \
@@ -534,79 +569,83 @@ curl -s --user "$(cat ./oag-data/.cookie)" -H 'content-type: application/json' \
   http://127.0.0.1:9445/
 ```
 
-ウォレットは**種 1 つをパスフレーズで暗号化して**保管します
-(Argon2id + ChaCha20-Poly1305、ファイルの権限は 0600)。鍵は種から導くため、
-**控えは種 1 つで足ります** — アドレスをあとから何個増やしても、同じ控えで
-復元できます。
+The wallet stores **a single seed encrypted under your passphrase** (Argon2id +
+ChaCha20-Poly1305, file mode 0600). Keys are derived from the seed, so **one
+backup of one seed is enough** — however many addresses you add later, the same
+phrase restores them.
 
 ```sh
-# 控えの語を表示する
+# show the recovery phrase
 ./target/release/oag-wallet --wallet ./alice.json seed
 
-# 控えの語から復元する
+# restore from a recovery phrase
 ./target/release/oag-wallet --wallet ./recovered.json restore
 ```
 
-控えは **BIP39 の 12 語**です。鍵の導出は BIP32 / BIP44 に従います。
+The phrase is **12 BIP39 words**. Key derivation follows BIP32 / BIP44.
 
 ```
 m / 44' / <coin_type>' / 0' / 0 / <index>
 ```
 
-> **控えの語を知る者は資金を動かせます。** 紙に書き写して安全な場所に
-> 保管してください。パスフレーズが弱ければ暗号化は守ってくれません。
+> **Anyone who knows the recovery phrase can move the funds.** Copy it onto
+> paper and keep it somewhere safe. Encryption will not save you if the
+> passphrase is weak.
 
-> **mainnet のアドレスへ資金を入れないでください。** mainnet の
-> coin_type は 1033 ですが、SLIP-0044 へ申請したところで**まだ審査中**です。
-> 別の番号で受理されれば経路が変わり、同じ控えから出るアドレスも変わります。
-> ウォレットの動作確認は testnet と regtest (予約番号 1) で行ってください
-> ([SPEC §6.6](docs/SPEC.md))。
+> **Do not put funds on a mainnet address yet.** mainnet's coin_type is 1033,
+> but the SLIP-0044 registration is **still under review**. If a different
+> number is accepted, the derivation path changes and so do the addresses
+> produced from the same phrase. Test the wallet on testnet and regtest
+> (reserved number 1) instead ([SPEC §6.6](docs/SPEC.md)).
 
-BIP39 の追加パスフレーズを使う場合は `--mnemonic-passphrase` を渡します。
-**打ち間違えても失敗としては現れません。** 別のパスフレーズは残高 0 の別の
-ウォレットを作るだけで、どこにも誤りは表示されません。
+To use a BIP39 passphrase, pass `--mnemonic-passphrase`. **A typo does not
+surface as an error.** A different passphrase simply produces a different wallet
+with a zero balance, and nothing anywhere reports a mistake.
 
-`oag-node` は RandomX を必ず使うため、ビルドに cmake と C++ コンパイラが
-必要です。
+`oag-node` always uses RandomX, so building it requires cmake and a C++
+compiler.
 
-## ビルド
+## Building
 
 ```sh
-cargo test                    # テスト
+cargo test                    # tests
 cargo clippy --all-targets    # lint
-cargo fmt --all -- --check    # 書式
+cargo fmt --all -- --check    # formatting
 ```
 
-ツールチェーンは `rust-toolchain.toml` で **1.98.0 に固定**しています。
-rustup が自動で該当バージョンを取得するため、追加の操作は不要です。
-固定しているのは、新しい rustc で追加された lint が CI でのみ失敗する事態を
-避けるためです。
+The toolchain is **pinned to 1.98.0** in `rust-toolchain.toml`. rustup fetches
+that version automatically, so there is nothing extra to do. It is pinned to
+avoid the situation where a lint added in a newer rustc fails only in CI.
 
-MSRV (最低必要バージョン) は **1.90** で、CI が毎回検証しています。
-永続化に用いる redb がこのバージョンを要求するため、それに合わせています。
+The MSRV is **1.90**, verified on every CI run. redb, used for persistence,
+requires it.
 
-## 話しかけてください
+## Talk to us
 
-**動かしてみた、というだけの報告が一番嬉しいです。**
+**"I ran it" is the report we most want to hear.**
 
-今このネットワークにはノードが数台しかありません。繋いだ時点であなたは
-一角です。動いた・動かなかったのどちらでも、
-[Issue](https://github.com/Kazuhiro-Tokumoto/Orange/issues) に一行あると、
-こちらからは見えないものが見えます。
+There are only a handful of nodes on this network right now. The moment you
+connect, you are one of them. Whether it worked or not, one line in an
+[Issue](https://github.com/Kazuhiro-Tokumoto/Orange/issues) shows us something
+we cannot see from here.
 
 | | |
 |---|---|
-| 報告・質問・指摘 | [Issues](https://github.com/Kazuhiro-Tokumoto/Orange/issues) |
-| それ以外・雑談 | `manh@manh2309.org` |
-| 脆弱性 | [`SECURITY.md`](SECURITY.md) (**公開の Issue には書かないでください**) |
+| Reports, questions, corrections | [Issues](https://github.com/Kazuhiro-Tokumoto/Orange/issues) |
+| Anything else | `manh@manh2309.org` |
+| Vulnerabilities | [`SECURITY.md`](SECURITY.md) (**please do not open a public Issue**) |
 
-書き方は [`CONTRIBUTING.md`](CONTRIBUTING.md) にあります。分からないまま
-送ってもらって構いません。**読めなかったのは、たいてい書いた側の問題です。**
+[`CONTRIBUTING.md`](CONTRIBUTING.md) explains how to write things up. You are
+welcome to send something in without having understood everything.
+**If it did not read clearly, that is usually the writer's fault, not yours.**
 
-別の言語で実装してみた、という話が実は一番価値があります。合意形成のバグには
-「仕様は正しいが実装が食い違う」型があり、これは**実装が 1 つしかないと
-永久に見つかりません。**
+English and Japanese are both fine — Issues in either language are read.
 
-## ライセンス
+The most valuable thing anyone could do is implement this in another language.
+Consensus bugs come in a shape where "the spec is right but the implementations
+disagree", and that shape is **invisible forever while only one implementation
+exists.**
 
-MIT。全文は [`LICENSE`](LICENSE) にあります。
+## License
+
+MIT. Full text in [`LICENSE`](LICENSE).
