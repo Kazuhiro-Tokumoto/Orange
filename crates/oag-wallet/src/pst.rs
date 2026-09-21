@@ -39,7 +39,7 @@
 use oag_consensus::codec::{write_var_bytes, write_varint, CodecError, Decode, Encode, Reader};
 use oag_consensus::lock::Lock;
 use oag_consensus::params;
-use oag_consensus::sighash::{sighash, SighashType};
+use oag_consensus::sighash::{SighashCache, SighashType};
 use oag_consensus::{Transaction, TxOutput};
 use oag_primitives::{Amount, Hash, SecretKey, Signature};
 
@@ -381,7 +381,13 @@ impl Pst {
         key_for: impl Fn(&Lock) -> Option<SecretKey>,
     ) -> Result<usize, PstError> {
         let spent = self.spent();
-        let mut added = 0;
+
+        // **署名対象を先に全部出してから、署名を入れる。** 中間ハッシュを
+        // 控えるには取引を借り続ける必要があり、借りている間は署名欄に
+        // 書き込めない (`build.rs` の署名と同じ理由である)。
+        let cache = SighashCache::new(&self.unsigned, &spent)
+            .map_err(|e| PstError::Sighash(e.to_string()))?;
+        let mut pending = Vec::new();
         for index in 0..self.inputs.len() {
             if self.inputs[index].signature.is_some() {
                 continue;
@@ -390,15 +396,19 @@ impl Pst {
                 continue;
             };
             let hash_type = self.inputs[index].sighash;
-            let msg = sighash(&self.unsigned, &spent, index, hash_type)
+            let msg = cache
+                .sighash(index, hash_type)
                 .map_err(|e| PstError::Sighash(e.to_string()))?;
+            pending.push((index, key, hash_type, msg));
+        }
+        let added = pending.len();
+        for (index, key, hash_type, msg) in pending {
             let mut bytes = key.sign(&msg).to_bytes().to_vec();
             // 既定の種類は 1 バイト省く。SPEC §8.3 の取り決めである。
             if !hash_type.is_default() {
                 bytes.push(hash_type.to_byte());
             }
             self.inputs[index].signature = Some(bytes);
-            added += 1;
         }
         Ok(added)
     }
@@ -468,10 +478,12 @@ impl Pst {
             tx.inputs[index].signature = signature.clone();
         }
 
+        // ここも中間ハッシュは 1 回だけ作る。署名はすでに入れ終わっている
+        // ので、取引を借りたままでよい。
+        let cache = SighashCache::new(&tx, &spent).map_err(|e| PstError::Sighash(e.to_string()))?;
         for (index, input) in self.inputs.iter().enumerate() {
-            verify_input(&tx, &spent, index, &input.utxo.lock)?;
+            verify_input(&cache, index, &input.utxo.lock)?;
         }
-
         let size = tx.encode().len();
         if size > params::MAX_TX_SIZE {
             return Err(PstError::TooLarge {
@@ -575,12 +587,8 @@ impl Pst {
 }
 
 /// 1 つの入力の署名を検証する。
-fn verify_input(
-    tx: &Transaction,
-    spent: &[TxOutput],
-    index: usize,
-    lock: &Lock,
-) -> Result<(), PstError> {
+fn verify_input(cache: &SighashCache<'_>, index: usize, lock: &Lock) -> Result<(), PstError> {
+    let tx = cache.transaction();
     let Some(pubkey) = lock.to_pubkey() else {
         // 公開鍵への支払いでなければ、ここで確かめられることはない。
         // コンセンサス側も同じ扱いをする (SPEC §10.4)。
@@ -602,7 +610,9 @@ fn verify_input(
         }
     };
     let signature = Signature::from_slice(bytes).map_err(|_| PstError::BadSignature { index })?;
-    let msg = sighash(tx, spent, index, hash_type).map_err(|e| PstError::Sighash(e.to_string()))?;
+    let msg = cache
+        .sighash(index, hash_type)
+        .map_err(|e| PstError::Sighash(e.to_string()))?;
     if !pubkey.verify(&msg, &signature) {
         return Err(PstError::BadSignature { index });
     }

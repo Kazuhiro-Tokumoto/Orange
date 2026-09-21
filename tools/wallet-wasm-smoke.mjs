@@ -70,10 +70,14 @@ for (let i = 0; i < 400; i++) {
   many.push({ txid: i.toString(16).padStart(64, "0"), index: 0,
               amount: "100000000000000000", height: 10, coinbase: true, address: mine });
 }
+// Timed: signing 400 inputs is where the per-input sighash work shows up.
+const t2 = Date.now();
 const swept = call({
   cmd: "sweep", network: "regtest", fee_rate: "50000000000",
   next_height: 500, coins: many,
 });
+const sweepMs = Date.now() - t2;
 console.log(`consolidate: ${swept.inputs} inputs / ${swept.size} bytes / fee ${swept.fee} OAG`);
+console.log(`             ${sweepMs} ms`);
 
 console.log("\neverything passed");

@@ -22,7 +22,9 @@
 use oag_consensus::codec::Encode;
 use oag_consensus::lock::Lock;
 use oag_consensus::params;
-use oag_consensus::sighash::{sighash, SighashType};
+#[cfg(test)]
+use oag_consensus::sighash::sighash;
+use oag_consensus::sighash::{SighashCache, SighashType};
 use oag_consensus::tx::{OutPoint, TxInput, CURRENT_TX_VERSION};
 use oag_consensus::{Transaction, TxOutput};
 use oag_primitives::amount::MAX_SUPPLY_ATOMIC;
@@ -445,10 +447,26 @@ pub fn sign(
         keys.push(key_for(&output.lock).ok_or(BuildError::MissingKey { index })?);
     }
 
+    // **署名対象を先に全部出してから、署名を入れる。**
+    //
+    // 中間ハッシュを控えるには取引を借り続ける必要があり、借りている間は
+    // 署名欄に書き込めない。先に出し切ってしまえば借用がそこで終わる。
+    //
+    // 分けるもう一つの利点は、**sighash が署名欄を見ていないことに
+    // 頼らずに済む**ことである。頼ると、将来 sighash が変わったときに
+    // 静かに間違う。
+    let cache =
+        SighashCache::new(&tx, &draft.spent).map_err(|e| BuildError::Sighash(e.to_string()))?;
+    let mut messages = Vec::with_capacity(keys.len());
+    for index in 0..keys.len() {
+        messages.push(
+            cache
+                .sighash(index, SighashType::DEFAULT)
+                .map_err(|e| BuildError::Sighash(e.to_string()))?,
+        );
+    }
     for (index, key) in keys.iter().enumerate() {
-        let msg = sighash(&tx, &draft.spent, index, SighashType::DEFAULT)
-            .map_err(|e| BuildError::Sighash(e.to_string()))?;
-        tx.inputs[index].signature = key.sign(&msg).to_bytes().to_vec();
+        tx.inputs[index].signature = key.sign(&messages[index]).to_bytes().to_vec();
     }
     Ok(tx)
 }

@@ -769,6 +769,21 @@ Under `SINGLE`, if there is no corresponding output, no signature can be
 produced. Bitcoin's behaviour of "return the hash value 1" is not adopted; here
 it is an outright error.
 
+#### The inner hashes do not depend on the input index
+
+Of the parts above, five — `H(prevouts)`, `H(amounts)`, `H(locks)`,
+`H(sequences)`, and `H(outputs)` under `ALL` — **are not a function of the
+input index**. They come out the same for every input of the same transaction.
+
+An implementation SHOULD compute them once per transaction. Rebuilding them
+for each input means hashing the same bytes n times for a transaction with n
+inputs, which **makes the work O(n²)**. Each input adds about 76 bytes to
+those buffers, so a transaction filling `MAX_TX_SIZE` — roughly 980 inputs —
+would hash 73 MB.
+
+**This is an optimisation, not a rule.** Either way the sighash comes out the
+same, and consensus is unaffected.
+
 ### 8.2 Committing to every input amount
 
 Including `H(amounts of the UTXOs every input references)` is a key point of

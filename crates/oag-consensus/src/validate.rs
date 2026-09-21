@@ -12,7 +12,9 @@
 use crate::block::{Block, BlockHeader, VERSION_BIT_AUX_POW};
 use crate::lock::Lock;
 use crate::params;
-use crate::sighash::{sighash, SighashError, SighashType};
+#[cfg(test)]
+use crate::sighash::sighash;
+use crate::sighash::{SighashCache, SighashError, SighashType};
 use crate::tx::{decode_coinbase_height, Transaction, TxOutput, LOCKTIME_THRESHOLD};
 use crate::utxo::{OverlayView, UtxoEntry, UtxoError, UtxoView};
 use oag_primitives::address::VERSION_PUBKEY;
@@ -383,15 +385,13 @@ pub fn validate_transaction(
     }
 
     // 署名。
+    //
+    // **中間ハッシュは 1 回だけ作る。** 入力ごとに作り直すと、同じものを
+    // n 回組み立てて n 回ハッシュすることになる (SPEC §8)。
     let spent_outputs: Vec<TxOutput> = spent_entries.iter().map(|e| e.output.clone()).collect();
+    let cache = SighashCache::new(tx, &spent_outputs)?;
     for (input_index, spent) in spent_outputs.iter().enumerate() {
-        verify_input_signature(
-            tx,
-            &spent_outputs,
-            input_index,
-            &spent.lock,
-            signature_checks,
-        )?;
+        verify_input_signature(&cache, input_index, &spent.lock, signature_checks)?;
     }
 
     Ok(TransactionSummary { fee })
@@ -424,8 +424,7 @@ fn locktime_is_satisfied(tx: &Transaction, height: u64, median_time_past: i64) -
 /// ウォレットは警告を出し、ノードポリシーは未知の版数を含む
 /// トランザクションを中継しない。
 fn verify_input_signature(
-    tx: &Transaction,
-    spent_outputs: &[TxOutput],
+    cache: &SighashCache<'_>,
     index: usize,
     lock: &Lock,
     signature_checks: SignatureChecks,
@@ -434,7 +433,7 @@ fn verify_input_signature(
         return Ok(());
     }
 
-    let signature_field = &tx.inputs[index].signature;
+    let signature_field = &cache.transaction().inputs[index].signature;
     let (sig_bytes, hash_type) = match signature_field.len() {
         64 => (&signature_field[..], SighashType::DEFAULT),
         65 => (
@@ -448,7 +447,7 @@ fn verify_input_signature(
         .map_err(|_| ValidationError::BadLockPubkey { index })?;
     let signature =
         Signature::from_slice(sig_bytes).map_err(|_| ValidationError::BadSignature { index })?;
-    let msg = sighash(tx, spent_outputs, index, hash_type)?;
+    let msg = cache.sighash(index, hash_type)?;
 
     // ここまでの検査はいずれも安価であり、`Skip` でも飛ばさない。
     // 飛ばすのは次の 1 行だけである。
