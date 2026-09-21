@@ -32,7 +32,7 @@ use crate::store::ChainStore;
 use oag_consensus::params;
 use oag_consensus::validate::{
     median_time_past, validate_block, validate_header, BlockContext, HeaderContext, PowVerifier,
-    ValidationError,
+    SignatureChecks, ValidationError,
 };
 use oag_consensus::{Block, BlockHeader};
 use oag_pow::lwma::{self, LwmaError};
@@ -159,6 +159,32 @@ struct ConnectFailure {
 /// 高さには比例しない (`docs/SPEC.md` §19)。
 pub const CACHED_ENTRIES: usize = 4096;
 
+/// assumevalid の経路を手元に置く高さの数。
+///
+/// 経路は assumevalid ブロックから親をたどって作るため、1 回あたり
+/// 「assumevalid の高さ − 求める高さ」だけインデックスを引く。窓を出るたびに
+/// 引き直すので、**狭いと引き直しが増え、広いと常駐量が増える。**
+///
+/// 65536 なら常駐は 2 MB で、高さ 50 万からの初期同期でも引き直しは 8 回に
+/// 収まる。ブロック 1 個ごとに引き直す実装は O(n²) になって、
+/// 節約した署名検証より高くつく。
+const ASSUME_VALID_WINDOW: u64 = 65_536;
+
+/// assumevalid の状態 (`docs/SPEC.md` §10.8)。
+///
+/// **これはコンセンサス規則ではない。** 判定が変わるのは「手元で署名を
+/// 検証し直すか」だけであり、受け入れるブロックの集合は変わらない。
+struct AssumeValid {
+    /// 設定されたブロックのハッシュ。
+    hash: Hash,
+    /// 経路の窓。`window[i]` が高さ `base + i` のハッシュにあたる。
+    base: u64,
+    window: Vec<Hash>,
+    /// 窓に置く高さの数。試験のために縮められるようにしてある。
+    /// **正しさは値によらない。** 狭くすると引き直しが増えるだけである。
+    limit: u64,
+}
+
 /// チェーンの状態。
 pub struct Chain<S: ChainStore> {
     store: S,
@@ -171,6 +197,10 @@ pub struct Chain<S: ChainStore> {
     entries: RefCell<EntryCache>,
     genesis_difficulty: u64,
     retarget: Retarget,
+    /// assumevalid。**既定は無効 (`None`) である。**
+    ///
+    /// 引くのは `&self` の経路なので、窓を持つには内側の可変性が要る。
+    assume_valid: RefCell<Option<AssumeValid>>,
 }
 
 impl<S: ChainStore> Chain<S> {
@@ -254,6 +284,7 @@ impl<S: ChainStore> Chain<S> {
             entries: RefCell::new(EntryCache::new(cache_limit)),
             genesis_difficulty,
             retarget,
+            assume_valid: RefCell::new(None),
         })
     }
 
@@ -402,6 +433,154 @@ impl<S: ChainStore> Chain<S> {
             return Ok(false);
         };
         Ok(self.hash_at_height(entry.height())? == Some(*hash))
+    }
+
+    /// assumevalid のブロックを設定する。`None` で無効にする。
+    ///
+    /// # これは何か
+    ///
+    /// 指定したブロック**とその祖先**について、手元での署名検証を飛ばす。
+    /// 初期同期の大半は創世記から先端までの署名を検証し直す時間であり、
+    /// そこが消える。PoW、マークルルート、金額の帳尻、二重使用、成熟期間、
+    /// locktime、サイズは**すべて従来どおり検証する**。
+    ///
+    /// # なぜ安全か
+    ///
+    /// 飛ばす条件が「**指定したハッシュの祖先であること**」だからである。
+    /// 攻撃者が別のチェーンを食わせても、そのブロックは指定ハッシュの祖先に
+    /// ならないので、検証は飛ばされない。指定ハッシュそのものを偽造するには
+    /// BLAKE3 の原像を求める必要がある。
+    ///
+    /// 指定したハッシュがインデックスに無い間は、何も起きない (全部検証する)。
+    ///
+    /// # 何を信じることになるか
+    ///
+    /// **指定したハッシュが本物のチェーン上にあること**を信じる。これは
+    /// 検証ではなく仮定である。だから利用者が無効にできなければならない。
+    pub fn set_assume_valid(&mut self, hash: Option<Hash>) {
+        *self.assume_valid.borrow_mut() = hash.map(|hash| AssumeValid {
+            hash,
+            base: 0,
+            window: Vec::new(),
+            limit: ASSUME_VALID_WINDOW,
+        });
+    }
+
+    /// 設定されている assumevalid のブロック。
+    pub fn assume_valid(&self) -> Option<Hash> {
+        self.assume_valid.borrow().as_ref().map(|av| av.hash)
+    }
+
+    /// このブロックの署名を検証するか (`docs/SPEC.md` §10.8)。
+    ///
+    /// **迷ったら [`SignatureChecks::Verify`] を返す。** 引けない、分からない、
+    /// 経路が合わない、のいずれも検証する側に倒す。
+    fn signature_checks_for(
+        &self,
+        hash: &Hash,
+        height: u64,
+    ) -> Result<SignatureChecks, ChainError> {
+        let av_hash = match self.assume_valid.borrow().as_ref() {
+            Some(av) => av.hash,
+            None => return Ok(SignatureChecks::Verify),
+        };
+
+        // assumevalid のブロックをまだ受け取っていなければ、何も飛ばさない。
+        let Some(av_entry) = self.entry(&av_hash)? else {
+            return Ok(SignatureChecks::Verify);
+        };
+        let av_height = av_entry.height();
+
+        // assumevalid より上は常に完全検証である。**攻撃はそこにしか来ない。**
+        if height > av_height {
+            return Ok(SignatureChecks::Verify);
+        }
+
+        // その高さで assumevalid の経路が通るハッシュと一致するか。
+        if self.assume_valid_path_hash(&av_hash, av_height, height)? == Some(*hash) {
+            Ok(SignatureChecks::Skip)
+        } else {
+            Ok(SignatureChecks::Verify)
+        }
+    }
+
+    /// assumevalid の経路が高さ `height` で通るハッシュ。
+    ///
+    /// 窓に無ければ引き直す。引けなければ `None` を返し、呼び出し側は
+    /// 検証する側に倒す。
+    fn assume_valid_path_hash(
+        &self,
+        av_hash: &Hash,
+        av_height: u64,
+        height: u64,
+    ) -> Result<Option<Hash>, ChainError> {
+        let limit = {
+            let cache = self.assume_valid.borrow();
+            let Some(av) = cache.as_ref() else {
+                return Ok(None);
+            };
+            if height >= av.base {
+                if let Some(found) = av.window.get((height - av.base) as usize) {
+                    return Ok(Some(*found));
+                }
+            }
+            av.limit
+        };
+
+        let window = self.build_assume_valid_window(av_hash, av_height, height, limit)?;
+        let found = window.first().copied();
+        if let Some(av) = self.assume_valid.borrow_mut().as_mut() {
+            av.base = height;
+            av.window = window;
+        }
+        Ok(found)
+    }
+
+    /// 高さ `base` から上に向かって、assumevalid の経路を窓の分だけ集める。
+    ///
+    /// assumevalid から親をたどるため、`base` に届くまでの手数は
+    /// `av_height - base` である。届かなければ空を返す。
+    fn build_assume_valid_window(
+        &self,
+        av_hash: &Hash,
+        av_height: u64,
+        base: u64,
+        limit: u64,
+    ) -> Result<Vec<Hash>, ChainError> {
+        // 指名したブロックより上に経路は無い。ここで断らないと、
+        // **窓の先頭が `base` ではない高さのハッシュになる。** 添字が
+        // ずれ、別のブロックを「祖先である」と答えてしまう。
+        if base > av_height {
+            return Ok(Vec::new());
+        }
+
+        let top = base.saturating_add(limit.max(1) - 1).min(av_height);
+        let mut window = Vec::new();
+        let mut cursor = *av_hash;
+        // 辿っている先の高さ。1 段ごとにちょうど 1 ずつ下がるはずである。
+        let mut expected = av_height;
+        loop {
+            let Some(entry) = self.entry(&cursor)? else {
+                // 経路が途切れた。**部分的な窓を返してはならない。**
+                return Ok(Vec::new());
+            };
+            if entry.height() != expected {
+                // インデックスが壊れている。ここで気付けないと、
+                // ずれた窓をそのまま信じることになる。
+                return Ok(Vec::new());
+            }
+            if expected <= top {
+                window.push(entry.hash);
+            }
+            if expected == base {
+                break;
+            }
+            expected -= 1;
+            cursor = entry.prev_hash();
+        }
+        // 低い高さが先頭に来るようにする。
+        window.reverse();
+        Ok(window)
     }
 
     /// `from` から親をたどって最大 `count` 件のヘッダを新しい順に集める。
@@ -772,12 +951,14 @@ impl<S: ChainStore> Chain<S> {
             .ok_or(ChainError::MissingBlockBody(hash))?;
         let parent_hash = block.header.prev_hash;
 
+        let height = self
+            .entry(&parent_hash)?
+            .ok_or(ChainError::UnknownParent(parent_hash))?
+            .height()
+            + 1;
+
         let header_ctx = HeaderContext {
-            expected_height: self
-                .entry(&parent_hash)?
-                .ok_or(ChainError::UnknownParent(parent_hash))?
-                .height()
-                + 1,
+            expected_height: height,
             expected_prev_hash: parent_hash,
             median_time_past: self.median_time_past_for_child_of(&parent_hash)?,
             expected_difficulty: self.expected_difficulty_for_child_of(&parent_hash)?,
@@ -789,6 +970,7 @@ impl<S: ChainStore> Chain<S> {
             let ctx = BlockContext {
                 header: header_ctx,
                 utxo: &view,
+                signature_checks: self.signature_checks_for(&hash, height)?,
             };
             validate_block(&block, &ctx, pow)?;
         }
@@ -973,4 +1155,162 @@ fn locator_fork_height<S: ChainStore>(
         }
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod assume_valid_tests {
+    use super::*;
+    use crate::scenarios::{self, NOW};
+    use crate::MemoryStore;
+    use oag_consensus::validate::AcceptAnyPow;
+
+    /// 窓を狭めて開く。**正しさは窓の広さによらない**ので、境界を跨ぐ
+    /// 振る舞いを短いチェーンで確かめられる。
+    fn with_window(chain: &Chain<MemoryStore>, hash: Hash, limit: u64) {
+        *chain.assume_valid.borrow_mut() = Some(AssumeValid {
+            hash,
+            base: 0,
+            window: Vec::new(),
+            limit,
+        });
+    }
+
+    /// 高さ 0..=n のハッシュを持つ一本道を作る。
+    fn straight_chain(n: usize) -> (Chain<MemoryStore>, Vec<Hash>) {
+        let mut chain = scenarios::open(MemoryStore::new());
+        let genesis = chain.tip().unwrap().hash;
+        let mut hashes = vec![genesis];
+        let mut parent = genesis;
+        for i in 0..n {
+            let block = scenarios::build_on(&chain, parent, i as u64 + 1);
+            parent = block.header.hash();
+            chain
+                .accept_block(block, &AcceptAnyPow, NOW)
+                .expect("a valid block");
+            hashes.push(parent);
+        }
+        (chain, hashes)
+    }
+
+    #[test]
+    fn the_window_answers_every_height_on_the_path() {
+        // 窓を 4 に縮めて、高さ 0..=20 をすべて引く。**引き直しが何度も
+        // 起きる**が、答えは経路そのものと一致しなければならない。
+        let (chain, hashes) = straight_chain(20);
+        with_window(&chain, hashes[20], 4);
+
+        for (height, expected) in hashes.iter().enumerate() {
+            let got = chain
+                .assume_valid_path_hash(&hashes[20], 20, height as u64)
+                .expect("the index is readable");
+            assert_eq!(
+                got,
+                Some(*expected),
+                "the window gave the wrong hash at height {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_window_answers_the_same_going_backwards() {
+        // 繋ぎ替えでは高さが戻る。降順でも同じ答えが出ること。
+        let (chain, hashes) = straight_chain(20);
+        with_window(&chain, hashes[20], 4);
+
+        for height in (0..=20u64).rev() {
+            let got = chain
+                .assume_valid_path_hash(&hashes[20], 20, height)
+                .expect("the index is readable");
+            assert_eq!(got, Some(hashes[height as usize]));
+        }
+    }
+
+    #[test]
+    fn a_height_above_the_named_block_has_no_answer() {
+        let (chain, hashes) = straight_chain(10);
+        with_window(&chain, hashes[5], 4);
+        assert_eq!(
+            chain
+                .assume_valid_path_hash(&hashes[5], 5, 6)
+                .expect("the index is readable"),
+            None,
+            "there is no path above the named block"
+        );
+    }
+
+    #[test]
+    fn a_block_off_the_path_is_verified() {
+        // 分岐を作り、枝の側のブロックが Skip にならないことを確かめる。
+        let (mut chain, hashes) = straight_chain(5);
+        let fork = scenarios::build_on(&chain, hashes[2], 777);
+        let fork_hash = fork.header.hash();
+        chain
+            .accept_block(fork, &AcceptAnyPow, NOW)
+            .expect("a valid block");
+
+        chain.set_assume_valid(Some(hashes[5]));
+
+        // 本線の高さ 3 は祖先なので飛ばす。
+        assert_eq!(
+            chain.signature_checks_for(&hashes[3], 3).unwrap(),
+            SignatureChecks::Skip
+        );
+        // 同じ高さの枝は祖先ではないので飛ばさない。
+        assert_eq!(
+            chain.signature_checks_for(&fork_hash, 3).unwrap(),
+            SignatureChecks::Verify
+        );
+    }
+
+    #[test]
+    fn the_named_block_itself_is_skipped_and_its_child_is_not() {
+        let (mut chain, hashes) = straight_chain(5);
+        chain.set_assume_valid(Some(hashes[3]));
+
+        assert_eq!(
+            chain.signature_checks_for(&hashes[3], 3).unwrap(),
+            SignatureChecks::Skip
+        );
+        assert_eq!(
+            chain.signature_checks_for(&hashes[4], 4).unwrap(),
+            SignatureChecks::Verify
+        );
+    }
+
+    #[test]
+    fn a_right_hash_at_a_wrong_height_is_verified() {
+        // 高さとハッシュの組が経路と食い違う場合。窓の添字がずれていると
+        // ここを通してしまう。
+        let (mut chain, hashes) = straight_chain(5);
+        chain.set_assume_valid(Some(hashes[5]));
+
+        assert_eq!(
+            chain.signature_checks_for(&hashes[2], 3).unwrap(),
+            SignatureChecks::Verify
+        );
+    }
+
+    #[test]
+    fn without_a_setting_everything_is_verified() {
+        let (chain, hashes) = straight_chain(3);
+        assert_eq!(chain.assume_valid(), None);
+        for (height, hash) in hashes.iter().enumerate() {
+            assert_eq!(
+                chain.signature_checks_for(hash, height as u64).unwrap(),
+                SignatureChecks::Verify
+            );
+        }
+    }
+
+    #[test]
+    fn a_hash_that_is_not_in_the_index_verifies_everything() {
+        let (mut chain, hashes) = straight_chain(3);
+        chain.set_assume_valid(Some(oag_primitives::hash::block_hash(b"elsewhere")));
+        for (height, hash) in hashes.iter().enumerate() {
+            assert_eq!(
+                chain.signature_checks_for(hash, height as u64).unwrap(),
+                SignatureChecks::Verify
+            );
+        }
+    }
 }

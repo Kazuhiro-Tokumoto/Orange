@@ -32,5 +32,5 @@ pub use tx::{OutPoint, Transaction, TxInput, TxOutput};
 pub use utxo::{UtxoEntry, UtxoSet, UtxoView};
 pub use validate::{
     validate_block, validate_header, validate_transaction, BlockContext, HeaderContext,
-    PowVerifier, ValidationError,
+    PowVerifier, SignatureChecks, ValidationError,
 };

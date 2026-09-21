@@ -55,12 +55,42 @@ pub struct HeaderContext {
     pub now: i64,
 }
 
+/// 署名を実際に検証するか (SPEC §10.8)。
+///
+/// # なぜ選べるようにするのか
+///
+/// 初期同期では、創世記から先端までの全署名を検証し直す。これが同期時間の
+/// 大半を占める。十分に深く埋まった過去のブロックについては、**手元で
+/// 検証し直さない**という選択があり得る。攻撃者はそこまで遡って PoW を
+/// 積み直せないためである。
+///
+/// **[`Skip`](SignatureChecks::Skip) を渡してよいのは、そのブロックが
+/// 既知の正しいブロックの祖先であると確かめられた場合だけである。**
+/// 判定そのものは [`oag_chain`] 側の責務であり、この列挙はその結論を
+/// 受け取るだけである。
+///
+/// # 何を飛ばし、何を飛ばさないのか
+///
+/// 飛ばすのは楕円曲線上の検証 1 回だけである。署名欄の長さ、sighash 種別、
+/// 公開鍵と署名の形式、sighash の計算は**飛ばさない**。これらはいずれも
+/// 安価であり、飛ばすと完全検証との差が広がって、差分試験で押さえるべき
+/// 面が増える。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureChecks {
+    /// 署名を検証する。**既定。**
+    Verify,
+    /// 署名の検証だけを飛ばす。
+    Skip,
+}
+
 /// ブロック全体を検証するために必要な文脈。
 pub struct BlockContext<'a> {
     /// ヘッダの検証に必要な文脈。
     pub header: HeaderContext,
     /// 親までを適用した UTXO の状態。
     pub utxo: &'a dyn UtxoView,
+    /// 署名を検証するか。**迷ったら [`SignatureChecks::Verify`]。**
+    pub signature_checks: SignatureChecks,
 }
 
 /// 検証の失敗。
@@ -287,6 +317,7 @@ pub fn validate_transaction(
     height: u64,
     median_time_past: i64,
     index: usize,
+    signature_checks: SignatureChecks,
 ) -> Result<TransactionSummary, ValidationError> {
     if tx.inputs.is_empty() {
         return Err(ValidationError::NoInputs { index });
@@ -354,7 +385,13 @@ pub fn validate_transaction(
     // 署名。
     let spent_outputs: Vec<TxOutput> = spent_entries.iter().map(|e| e.output.clone()).collect();
     for (input_index, spent) in spent_outputs.iter().enumerate() {
-        verify_input_signature(tx, &spent_outputs, input_index, &spent.lock)?;
+        verify_input_signature(
+            tx,
+            &spent_outputs,
+            input_index,
+            &spent.lock,
+            signature_checks,
+        )?;
     }
 
     Ok(TransactionSummary { fee })
@@ -391,6 +428,7 @@ fn verify_input_signature(
     spent_outputs: &[TxOutput],
     index: usize,
     lock: &Lock,
+    signature_checks: SignatureChecks,
 ) -> Result<(), ValidationError> {
     if lock.version() != VERSION_PUBKEY {
         return Ok(());
@@ -411,6 +449,12 @@ fn verify_input_signature(
     let signature =
         Signature::from_slice(sig_bytes).map_err(|_| ValidationError::BadSignature { index })?;
     let msg = sighash(tx, spent_outputs, index, hash_type)?;
+
+    // ここまでの検査はいずれも安価であり、`Skip` でも飛ばさない。
+    // 飛ばすのは次の 1 行だけである。
+    if signature_checks == SignatureChecks::Skip {
+        return Ok(());
+    }
 
     if !pubkey.verify(&msg, &signature) {
         return Err(ValidationError::BadSignature { index });
@@ -561,6 +605,7 @@ pub fn validate_block(
             header.height,
             ctx.header.median_time_past,
             index,
+            ctx.signature_checks,
         )?;
 
         // (c) ビューへ反映する。
@@ -739,6 +784,7 @@ mod tests {
     impl Fixture {
         fn context(&self) -> BlockContext<'_> {
             BlockContext {
+                signature_checks: SignatureChecks::Verify,
                 header: HeaderContext {
                     expected_height: SPEND_HEIGHT,
                     expected_prev_hash: self.tip,
@@ -1035,12 +1081,15 @@ mod tests {
         // 119 ブロック経過では未成熟。
         let too_early = 1 + params::COINBASE_MATURITY - 1;
         assert!(matches!(
-            validate_transaction(&tx, &f.utxo, too_early, MTP, 1),
+            validate_transaction(&tx, &f.utxo, too_early, MTP, 1, SignatureChecks::Verify),
             Err(ValidationError::ImmatureCoinbase { .. })
         ));
 
         // 120 ブロック経過で使用できる。
-        assert!(validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1).is_ok());
+        assert!(
+            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1049,7 +1098,7 @@ mod tests {
         let mut tx = f.spend("0.001");
         tx.inputs[0].prev_out = OutPoint::new(hash::txid(b"ghost"), 0);
         assert_eq!(
-            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1),
+            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify),
             Err(ValidationError::MissingUtxo)
         );
     }
@@ -1061,7 +1110,7 @@ mod tests {
         let input = tx.inputs[0].clone();
         tx.inputs.push(input);
         assert_eq!(
-            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1),
+            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify),
             Err(ValidationError::DuplicateInput)
         );
     }
@@ -1073,7 +1122,7 @@ mod tests {
         tx.outputs[0].amount = params::BLOCK_REWARD.checked_add(Amount::ONE_OAG).unwrap();
         sign(&mut tx, std::slice::from_ref(&f.funded_output), &[&f.key]);
         assert!(matches!(
-            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1),
+            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify),
             Err(ValidationError::OutputsExceedInputs { .. })
         ));
     }
@@ -1084,7 +1133,7 @@ mod tests {
         let mut tx = f.spend("0.001");
         tx.outputs.clear();
         assert_eq!(
-            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 3),
+            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 3, SignatureChecks::Verify),
             Err(ValidationError::NoOutputs { index: 3 })
         );
     }
@@ -1097,7 +1146,7 @@ mod tests {
         let mut tx = f.spend("0.001");
         tx.outputs[0].amount = Amount::from_oag(1).unwrap();
         assert_eq!(
-            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1),
+            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify),
             Err(ValidationError::BadSignature { index: 0 })
         );
     }
@@ -1109,7 +1158,7 @@ mod tests {
         let other = SecretKey::generate();
         sign(&mut tx, std::slice::from_ref(&f.funded_output), &[&other]);
         assert_eq!(
-            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1),
+            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify),
             Err(ValidationError::BadSignature { index: 0 })
         );
     }
@@ -1121,7 +1170,7 @@ mod tests {
             let mut tx = f.spend("0.001");
             tx.inputs[0].signature = vec![0u8; len];
             assert_eq!(
-                validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1),
+                validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify),
                 Err(ValidationError::BadSignatureLength(len))
             );
         }
@@ -1137,7 +1186,10 @@ mod tests {
         let mut sig = f.key.sign(&msg).to_bytes().to_vec();
         sig.push(t.to_byte());
         tx.inputs[0].signature = sig;
-        assert!(validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1).is_ok());
+        assert!(
+            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1148,7 +1200,7 @@ mod tests {
         sig.push(0x7f);
         tx.inputs[0].signature = sig;
         assert!(matches!(
-            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1),
+            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify),
             Err(ValidationError::Sighash(SighashError::UnknownType(0x7f)))
         ));
     }
@@ -1191,7 +1243,7 @@ mod tests {
             locktime: 0,
         };
         assert!(
-            validate_transaction(&tx, &utxo, SPEND_HEIGHT, MTP, 1).is_ok(),
+            validate_transaction(&tx, &utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify).is_ok(),
             "an unknown version must be spendable by anyone"
         );
     }
@@ -1221,7 +1273,7 @@ mod tests {
         let mut empty = base.clone();
         empty.inputs[0].signature = Vec::new();
         assert_eq!(
-            validate_transaction(&empty, &utxo, SPEND_HEIGHT, MTP, 1),
+            validate_transaction(&empty, &utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify),
             Err(ValidationError::BadSignatureLength(0)),
             "it was spendable without a signature"
         );
@@ -1230,7 +1282,14 @@ mod tests {
         let mut forged = base.clone();
         forged.inputs[0].signature = vec![0x11; 64];
         assert_eq!(
-            validate_transaction(&forged, &utxo, SPEND_HEIGHT, MTP, 1),
+            validate_transaction(
+                &forged,
+                &utxo,
+                SPEND_HEIGHT,
+                MTP,
+                1,
+                SignatureChecks::Verify
+            ),
             Err(ValidationError::BadLockPubkey { index: 0 }),
             "verification proceeded to the signature for the zero key"
         );
@@ -1241,7 +1300,14 @@ mod tests {
         let spent = [TxOutput::new(params::BLOCK_REWARD, Lock::unspendable())];
         sign(&mut signed, &spent, &[&key]);
         assert_eq!(
-            validate_transaction(&signed, &utxo, SPEND_HEIGHT, MTP, 1),
+            validate_transaction(
+                &signed,
+                &utxo,
+                SPEND_HEIGHT,
+                MTP,
+                1,
+                SignatureChecks::Verify
+            ),
             Err(ValidationError::BadLockPubkey { index: 0 }),
             "it could be spent by signing with our own key"
         );
@@ -1267,11 +1333,19 @@ mod tests {
         sign(&mut tx, std::slice::from_ref(&f.funded_output), &[&f.key]);
 
         assert!(matches!(
-            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1),
+            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify),
             Err(ValidationError::LocktimeNotSatisfied { .. })
         ));
         // locktime と同じ高さで有効になる。
-        assert!(validate_transaction(&tx, &f.utxo, SPEND_HEIGHT + 1, MTP, 1).is_ok());
+        assert!(validate_transaction(
+            &tx,
+            &f.utxo,
+            SPEND_HEIGHT + 1,
+            MTP,
+            1,
+            SignatureChecks::Verify
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1283,10 +1357,18 @@ mod tests {
 
         assert!(tx.locktime >= LOCKTIME_THRESHOLD);
         assert!(matches!(
-            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1),
+            validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP, 1, SignatureChecks::Verify),
             Err(ValidationError::LocktimeNotSatisfied { .. })
         ));
-        assert!(validate_transaction(&tx, &f.utxo, SPEND_HEIGHT, MTP + 100, 1).is_ok());
+        assert!(validate_transaction(
+            &tx,
+            &f.utxo,
+            SPEND_HEIGHT,
+            MTP + 100,
+            1,
+            SignatureChecks::Verify
+        )
+        .is_ok());
     }
 
     // ━━━━━━━━ ブロック内の依存関係 ━━━━━━━━

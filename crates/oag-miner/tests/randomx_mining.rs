@@ -8,7 +8,9 @@
 use oag_consensus::codec::Encode;
 use oag_consensus::lock::Lock;
 use oag_consensus::utxo::UtxoSet;
-use oag_consensus::validate::{validate_block, AcceptAnyPow, BlockContext, HeaderContext};
+use oag_consensus::validate::{
+    validate_block, AcceptAnyPow, BlockContext, HeaderContext, SignatureChecks,
+};
 use oag_mempool::Mempool;
 use oag_miner::{build_template, mine, NeverStop, TemplateRequest};
 use oag_pow::randomx::RandomXVerifier;
@@ -63,6 +65,7 @@ fn a_block_mined_with_randomx_passes_validation() {
     // コンセンサスの検証も通ること。
     let utxo = UtxoSet::new();
     let ctx = BlockContext {
+        signature_checks: SignatureChecks::Verify,
         header: HeaderContext {
             expected_height: HEIGHT,
             expected_prev_hash: hash::block_hash(b"parent"),

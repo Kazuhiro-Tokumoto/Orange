@@ -7,10 +7,10 @@ use clap::{Parser, Subcommand};
 use oag_consensus::lock::Lock;
 use oag_net::magic::magic_for;
 use oag_net::transport::Listener;
-use oag_node::node::{self, Node};
+use oag_node::node::{self, AssumeValidSetting, Node, NodeOptions};
 use oag_node::service::{MiningMode, NodeEvent, NodeHandle, NodeService};
 use oag_node::{accept_loop, dial};
-use oag_primitives::{Address, Network, SecretKey};
+use oag_primitives::{Address, Hash, Network, SecretKey};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -142,6 +142,24 @@ enum Command {
         /// The private key (PEM) for the wallet interface. Pass with `--tls-cert`.
         #[arg(long, value_name = "path", requires = "tls_cert")]
         tls_key: Option<PathBuf>,
+        /// Skip checking signatures at and below this block. `0` turns it off.
+        ///
+        /// Most of an initial sync is spent re-checking every signature from the
+        /// genesis block onwards. An attacker cannot rebuild the proof of work
+        /// behind a block that is already buried, so those signatures can be taken
+        /// as settled instead of checked again.
+        ///
+        /// **Everything else is still checked**: proof of work, the merkle root,
+        /// the amounts, double spends, coinbase maturity, locktimes and sizes.
+        /// Blocks above the one named here are checked in full, and so is anything
+        /// that is not an ancestor of it, so a chain fed to you by an attacker
+        /// never skips a thing.
+        ///
+        /// **This is a thing you assume, not a thing you check.** You are taking
+        /// someone's word that this block is on the real chain. Verify the hash
+        /// against a node you already trust, or leave this alone.
+        #[arg(long, value_name = "hash")]
+        assumevalid: Option<String>,
         /// Exit this many seconds after mining and connections have finished.
         ///
         /// For testing. Without it, it does not exit.
@@ -219,6 +237,7 @@ fn run() -> Result<(), String> {
             wallet,
             tls_cert,
             tls_key,
+            assumevalid,
             exit_after,
         } => {
             let network = common.network()?;
@@ -232,8 +251,19 @@ fn run() -> Result<(), String> {
                 (false, _) => None,
             };
 
-            let service =
-                NodeService::start(network, &common.datadir).map_err(|e| e.to_string())?;
+            // 記憶域を開く前に解釈する。開いてから断るのは無駄である。
+            let assume_valid = match assumevalid.as_deref() {
+                None => AssumeValidSetting::Network,
+                Some("0") => AssumeValidSetting::Off,
+                Some(text) => AssumeValidSetting::Block(
+                    text.parse::<Hash>()
+                        .map_err(|e| format!("--assumevalid is not a block hash: {e}"))?,
+                ),
+            };
+
+            let options = NodeOptions { assume_valid };
+            let service = NodeService::start_with(network, &common.datadir, options)
+                .map_err(|e| e.to_string())?;
             let handle = service.handle();
 
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -250,6 +280,15 @@ fn run() -> Result<(), String> {
                     status.height,
                     status.next_difficulty
                 );
+
+                // **黙って効かせてはならない。** 検証を一部やめているので、
+                // 起動のたびに言う。
+                if let Some(hash) = assume_valid.resolve(network) {
+                    oag_node::log_warn!(
+                        "taking signatures at and below {hash} as settled; \
+                         pass --assumevalid=0 to check every one"
+                    );
+                }
 
                 if !no_listen {
                     let addr = listen.unwrap_or_else(|| {

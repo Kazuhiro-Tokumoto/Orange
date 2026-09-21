@@ -1222,6 +1222,82 @@ under 10. **The mark is display only and does not block a send.** What to wait
 for is the receiver's decision, not the wallet's.
 
 ---
+
+### 10.8 assumevalid (shortening the initial sync)
+
+An initial sync re-checks **every signature** from the genesis block to the
+tip. The taller the chain grows, the more of the sync time this accounts for.
+
+For blocks that are already buried deeply enough, there is a case for not
+checking them again locally: an attacker cannot go back that far and rebuild
+the proof of work.
+
+**This is not a consensus rule.** The set of blocks that are accepted does not
+change. Nodes configured differently still converge on the same chain. An
+implementation therefore need not have this at all, and may leave it off by
+default.
+
+#### The rule
+
+Where an implementation does have it, signature checking may be omitted only
+for a block that meets **all** of the following.
+
+1. There is a block A that the user or the implementation **named in advance**.
+2. The block B being checked **is A, or is an ancestor of A**.
+
+That B is an ancestor of A is established by walking back from A to height B
+and finding B's hash there.
+
+#### Only the signature check may be omitted
+
+All of the following are still checked as before.
+
+- Proof of work, difficulty, timestamp, height, the reference to the parent
+- The merkle root
+- Block and transaction sizes
+- The amounts, and what the coinbase pays itself
+- Double spends, both within the block and against the UTXO set
+- Coinbase maturity and locktimes
+- The length of the signature field, the sighash type, and the form of the
+  public key and the signature
+
+**Exactly one elliptic-curve check is omitted.**
+
+#### Why ancestry is required
+
+Without it, an attacker could switch signature checking off simply by feeding
+you a different chain at or below height h. Requiring ancestry means an
+attacker's chain is never an ancestor of the named block, so nothing is
+omitted on it. Forging the named block itself would mean finding a BLAKE3
+preimage.
+
+While the named block has not been received, **nothing is omitted**.
+
+#### What you are taking on trust
+
+**That the named block is on the real chain.** This is not something you check;
+it is something you **assume**. You are taking someone's word for it.
+
+Accordingly:
+
+- An implementation **MUST** let the user turn it off.
+- Where a per-network default is shipped, its **hash and height MUST be
+  published** so that a user can confirm them independently.
+- The node **MUST** say at startup that it is in effect. It must not quietly
+  stop checking.
+
+#### In the implementation
+
+`oag-node` takes `--assumevalid <hash>`, and `--assumevalid=0` turns it off.
+Every per-network default is currently empty (`None`): putting a value there
+means claiming that a block at that height is genuine, and not enough time has
+passed to make that claim.
+
+The mempool is **always checked in full**. This is a relaxation that is only
+defensible for the deeply buried past; it does not apply to unconfirmed
+transactions.
+
+---
 ## 11. Proof of work
 
 ### 11.1 Algorithm

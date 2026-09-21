@@ -19,7 +19,7 @@ use crate::policy::Policy;
 use oag_consensus::params;
 use oag_consensus::tx::OutPoint;
 use oag_consensus::utxo::{UtxoEntry, UtxoError, UtxoView};
-use oag_consensus::validate::{validate_transaction, ValidationError};
+use oag_consensus::validate::{validate_transaction, SignatureChecks, ValidationError};
 use oag_consensus::{Block, Transaction, TxOutput};
 use oag_primitives::{Amount, Hash};
 use std::collections::{HashMap, HashSet};
@@ -485,7 +485,16 @@ impl Mempool {
         }
 
         // ここまではポリシー。ここからコンセンサス。
-        let summary = validate_transaction(&tx, &view, next_height, median_time_past, 0)?;
+        // mempool は常に完全検証である。assumevalid は「深く埋まった過去」に
+        // だけ許される緩和であり、未確認トランザクションには適用されない。
+        let summary = validate_transaction(
+            &tx,
+            &view,
+            next_height,
+            median_time_past,
+            0,
+            SignatureChecks::Verify,
+        )?;
 
         // ── 以降はポリシーの判断 ──
         let required = self.policy.required_fee(size).ok_or(Reject::FeeTooLow {

@@ -19,6 +19,7 @@
 
 use oag_chain::genesis::GenesisSpec;
 use oag_consensus::Block;
+use oag_primitives::Hash;
 use oag_primitives::Network;
 
 /// mainnet と testnet のジェネシスのタイムスタンプ
@@ -55,6 +56,30 @@ pub fn genesis_for(network: Network) -> Block {
                 .build(0)
         }
         other => GenesisSpec::with_burned_reward(other, TIMESTAMP, MESSAGE).build(0),
+    }
+}
+
+/// ネットワークごとの assumevalid の既定値 (`docs/SPEC.md` §10.8)。
+///
+/// # 今はどれも `None` である
+///
+/// 値を置くということは、**そのブロックが本物のチェーン上にあると
+/// 実装者が主張する**ことである。主張できるだけの時間が経ったブロックが
+/// まだ無い。据わっていないハッシュを埋めるくらいなら、既定では効かない
+/// 方がよい。
+///
+/// # 入れるときの手順
+///
+/// 1. 十分に深く埋まった (数万ブロック単位) ブロックを選ぶ。
+/// 2. 複数の独立したノードで同じハッシュが出ることを確かめる。
+/// 3. **リリースノートにハッシュと高さを書く。** 利用者が自分で確かめ
+///    られなければ、これはただの「開発者を信じろ」になる。
+/// 4. ここに置く。
+///
+/// 置いたあとも `--assumevalid=0` で無効にできなければならない。
+pub fn assume_valid_for(network: Network) -> Option<Hash> {
+    match network {
+        Network::Mainnet | Network::Testnet | Network::Regtest => None,
     }
 }
 

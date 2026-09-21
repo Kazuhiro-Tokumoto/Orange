@@ -120,9 +120,51 @@ pub struct Node {
     addresses: AddressBook,
 }
 
+/// assumevalid をどう決めるか。
+///
+/// **ネットワークの既定に従う**のが普通である。`Off` と `Block` は利用者が
+/// 明示したときだけ使う。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AssumeValidSetting {
+    /// ネットワークの既定 ([`crate::genesis::assume_valid_for`]) に従う。
+    #[default]
+    Network,
+    /// 無効にする。創世記から全署名を検証し直す。
+    Off,
+    /// このブロックとその祖先の署名検証を飛ばす。
+    Block(Hash),
+}
+
+impl AssumeValidSetting {
+    /// このネットワークで実際に使うハッシュ。
+    pub fn resolve(self, network: Network) -> Option<Hash> {
+        match self {
+            AssumeValidSetting::Network => crate::genesis::assume_valid_for(network),
+            AssumeValidSetting::Off => None,
+            AssumeValidSetting::Block(hash) => Some(hash),
+        }
+    }
+}
+
+/// ノードを開くときの設定。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NodeOptions {
+    /// assumevalid。
+    pub assume_valid: AssumeValidSetting,
+}
+
 impl Node {
     /// 記憶域を開き、必要ならジェネシスで初期化する。
     pub fn open(network: Network, data_dir: &Path) -> Result<Node, NodeError> {
+        Node::open_with(network, data_dir, NodeOptions::default())
+    }
+
+    /// 設定を渡して開く。
+    pub fn open_with(
+        network: Network,
+        data_dir: &Path,
+        options: NodeOptions,
+    ) -> Result<Node, NodeError> {
         let genesis = crate::genesis::genesis_for(network);
         std::fs::create_dir_all(data_dir)
             .map_err(|e| StoreError::Io(format!("cannot create {}: {e}", data_dir.display())))?;
@@ -132,7 +174,8 @@ impl Node {
         } else {
             Retarget::Disabled
         };
-        let chain = Chain::open(store, genesis, network.genesis_difficulty(), retarget)?;
+        let mut chain = Chain::open(store, genesis, network.genesis_difficulty(), retarget)?;
+        chain.set_assume_valid(options.assume_valid.resolve(network));
         let addresses = AddressBook::open(network, &data_dir.join("peers.json"));
         Ok(Node {
             chain,

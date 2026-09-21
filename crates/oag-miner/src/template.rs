@@ -184,7 +184,9 @@ mod tests {
     use oag_consensus::sighash::{sighash, SighashType};
     use oag_consensus::tx::{TxInput as Input, MAX_INPUT_SIGNATURE_LEN};
     use oag_consensus::utxo::{UtxoEntry, UtxoSet};
-    use oag_consensus::validate::{validate_block, AcceptAnyPow, BlockContext, HeaderContext};
+    use oag_consensus::validate::{
+        validate_block, AcceptAnyPow, BlockContext, HeaderContext, SignatureChecks,
+    };
     use oag_primitives::{hash, Network, SecretKey};
 
     const HEIGHT: u64 = 500;
@@ -304,6 +306,7 @@ mod tests {
         let block = template.into_block();
 
         let ctx = BlockContext {
+            signature_checks: SignatureChecks::Verify,
             header: HeaderContext {
                 expected_height: HEIGHT,
                 expected_prev_hash: hash::block_hash(b"parent"),

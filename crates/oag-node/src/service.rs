@@ -23,7 +23,7 @@
 //! **少数の nonce を試すごとに要求を捌く**。応答が遅れる上限が
 //! 少数の nonce 分の計算時間になる。
 
-use crate::node::{MinedBlock, Node, NodeError, NodeStatus};
+use crate::node::{MinedBlock, Node, NodeError, NodeOptions, NodeStatus};
 use oag_chain::chain::{AcceptOutcome, HeaderOutcome};
 use oag_chain::index::BlockIndexEntry;
 use oag_consensus::lock::Lock;
@@ -782,6 +782,15 @@ impl NodeService {
     /// 開くのは呼び出し元のスレッドではなく専用スレッドの上で行う。
     /// 開いた結果を待ち合わせてから返すため、失敗はここで分かる。
     pub fn start(network: Network, data_dir: &Path) -> Result<NodeService, NodeError> {
+        NodeService::start_with(network, data_dir, NodeOptions::default())
+    }
+
+    /// 設定を渡して起こす。
+    pub fn start_with(
+        network: Network,
+        data_dir: &Path,
+        options: NodeOptions,
+    ) -> Result<NodeService, NodeError> {
         let (tx, rx) = mpsc::channel(REQUEST_CAPACITY);
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -791,7 +800,7 @@ impl NodeService {
         let thread = std::thread::Builder::new()
             .name("oag-node".to_string())
             .spawn(move || {
-                let node = match Node::open(network, &data_dir) {
+                let node = match Node::open_with(network, &data_dir, options) {
                     Ok(node) => {
                         let _ = ready_tx.send(Ok(()));
                         node
