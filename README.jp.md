@@ -600,9 +600,9 @@ MSRV (最低必要バージョン) は **1.90** で、CI が毎回検証して�
 |---|---|
 | 報告・質問・指摘 | [Issues](https://github.com/Kazuhiro-Tokumoto/Orange/issues) |
 | それ以外・雑談 | `manh@manh2309.org` |
-| 脆弱性 | [`SECURITY.md`](SECURITY.md) (**公開の Issue には書かないでください**) |
+| 脆弱性 | [`SECURITY.jp.md`](SECURITY.jp.md) (**公開の Issue には書かないでください**) |
 
-書き方は [`CONTRIBUTING.md`](CONTRIBUTING.md) にあります。分からないまま
+書き方は [`CONTRIBUTING.jp.md`](CONTRIBUTING.jp.md) にあります。分からないまま
 送ってもらって構いません。**読めなかったのは、たいてい書いた側の問題です。**
 
 別の言語で実装してみた、という話が実は一番価値があります。合意形成のバグには

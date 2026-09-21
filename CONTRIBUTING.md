@@ -1,79 +1,87 @@
-# 話しかけかた
+# How to get in touch
 
-**動かしてみた、というだけの報告が一番嬉しいです。**
+[English](CONTRIBUTING.md) · [日本語](CONTRIBUTING.jp.md)
 
-このチェーンは今のところノードが数台しかありません。あなたが繋いだ時点で
-ネットワークの一角です。動いた・動かなかったのどちらでも、
-[Issue](https://github.com/Kazuhiro-Tokumoto/Orange/issues) に一行書いて
-もらえると、こちらからは見えないものが見えます。
+**"I ran it" is the report we most want to hear.**
 
-メールでも構いません。`manh@manh2309.org`
+This chain has only a handful of nodes right now. The moment you connect, you
+are part of the network. Whether it worked or not, one line in an
+[Issue](https://github.com/Kazuhiro-Tokumoto/Orange/issues) shows us something
+we cannot see from here.
 
-## 繋ぐ
+Email is fine too: `manh@manh2309.org`
+
+**Write in English or Japanese — either is read.** The project's own documents
+are mostly Japanese (see [the note on language](README.md#a-note-on-language)),
+but you do not have to write in it.
+
+## Connecting
 
 ```sh
 cargo build --release
 ./target/release/oag-node run --network mainnet
 ```
 
-シードの DNS を引いて勝手に繋ぎます。**追いつくまで `--mine` は付けない
-ほうが速いです** (検証と採掘で CPU を取り合います)。
+It queries the DNS seed and connects on its own. **Leave `--mine` off until you
+have caught up** — validation and mining compete for the CPU.
 
-外から繋いでもらえる環境なら `--external-addr <ホスト:9444>` を付けてください。
-**これを付けた住所だけが他のノードに伝わります。** 付けないと、あなたのノードは
-誰の住所帳にも載りません。
+If your machine can accept inbound connections, pass
+`--external-addr <host:9444>`. **Only the address you pass there is propagated
+to other nodes.** Without it, your node never appears in anyone's address book.
 
-## 何を送ってもらってもいい
+## Anything is worth sending
 
 | | |
 |---|---|
-| 質問 | 仕様の意図が読めない、なぜこうなっているのか分からない |
-| 報告 | 動かした、落ちた、同期が止まった、表示が変 |
-| 指摘 | ここは間違っている、この場合が抜けている |
-| 修正 | Pull Request |
-| 移植 | 別の言語での実装。**食い違いが出たら教えてください** |
+| Questions | the intent of a rule is unclear, or you cannot tell why something is the way it is |
+| Reports | it ran, it crashed, sync stalled, the display looks wrong |
+| Corrections | this is wrong, this case is missing |
+| Fixes | pull requests |
+| Ports | an implementation in another language. **Tell us when the answers disagree** |
 
-最後のが実は一番価値があります。合意形成のバグには「仕様は正しいが実装が
-食い違う」型があり、これは**実装が 1 つしかないと永久に見つかりません。**
+That last one is the most valuable. Consensus bugs come in a shape where "the
+spec is right but the implementations disagree", and that shape is **invisible
+forever while only one implementation exists.**
 
-脆弱性は [`SECURITY.md`](SECURITY.md) を見てください。
+For vulnerabilities, see [`SECURITY.md`](SECURITY.md).
 
-## 直すときに通すもの
+## What a change has to pass
 
-CI は 4 つ走ります。**手元で同じものを通してから送ってください。**
+CI runs four checks. **Run the same ones locally before sending.**
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features
 cargo test --all-features
-cargo check --workspace --all-targets      # RandomX 無しでも通ること
+cargo check --workspace --all-targets      # must build without RandomX too
 ```
 
-`crates/oag-wallet-wasm` `crates/oag-wallet` `crates/oag-consensus`
-`crates/oag-primitives` のどれかを触ったら、**ブラウザのウォレットを
-組み直してください。**
+If you touch any of `crates/oag-wallet-wasm`, `crates/oag-wallet`,
+`crates/oag-consensus` or `crates/oag-primitives`, **rebuild the browser
+wallet.**
 
 ```sh
 sh tools/wallet-wasm.sh
 ```
 
-出来た `wallet.wasm` と `wallet.wasm.sources` を一緒にコミットします。
-忘れると CI が落ちます (実際に落としました)。
+Commit the resulting `wallet.wasm` and `wallet.wasm.sources` along with your
+change. Forgetting breaks CI (it has happened).
 
-## 仕様書が正典です
+## The specification is normative
 
-[`docs/SPEC.md`](docs/SPEC.md) に書いてあることと、コードの振る舞いが
-食い違っていたら、**それは仕様書ではなくコードのバグ**です。
+If [`docs/SPEC.md`](docs/SPEC.md) and the code disagree, **the bug is in the
+code, not in the spec.** (The spec is written in Japanese.)
 
-逆に、仕様書に書いていないことを実装が決めている箇所を見つけたら、
-それは仕様書の穴です。**そちらも教えてください。** ノードが 2 つ以上ある
-ネットワークでは、書いていない決めごとが割れ目になります。
+Conversely, if you find a place where the implementation decides something the
+spec does not mention, that is a hole in the spec. **Tell us about those too.**
+On a network with more than one node, an unwritten rule is where the chain
+splits.
 
-仕様を変えるほうが正しい場合もあります。そのときは理由を添えてください。
+Sometimes changing the spec is the right answer. When it is, say why.
 
-## コミットメッセージ
+## Commit messages
 
-日本語です。**何をしたかではなく、なぜそうしたかを書いてください。**
+They are written in Japanese. **Write why, not what.**
 
 ```
 シードを、アクティブチェーンではなくヘッダ自身の枝から引く
@@ -83,18 +91,21 @@ sh tools/wallet-wasm.sh
 ...
 ```
 
-差分を見れば何をしたかは分かります。分からないのは、なぜそれが必要だった
-のか、なぜ別のやり方にしなかったのかです。
+The diff already shows what you did. What it cannot show is why it was needed,
+and why you did not do it some other way.
 
-## 試験について
+**If you cannot write Japanese, write the message in English.** A clear English
+explanation is worth more than an unclear Japanese one.
 
-**振る舞いを変えたなら、それが落ちる試験を先に書いてください。**
+## About tests
 
-直す前に落ちることを確かめてから直す。そうしないと、その試験が本当に
-何かを押さえているのか分かりません。通ったまま何も守っていない試験は、
-無いより悪いです。
+**If you changed a behaviour, write the test that fails first.**
 
-## 分からないまま送ってもらって構いません
+Confirm it fails before you fix it. Otherwise you cannot tell whether the test
+is holding anything down. A test that passes while guarding nothing is worse
+than no test.
 
-「ここが読めなかった」「なぜこうなのか分からない」も Issue です。
-**読めなかったのは、たいてい書いた側の問題です。**
+## Send it even if you do not understand it
+
+"I could not read this" and "I cannot tell why it is like this" are Issues too.
+**If it did not read clearly, that is usually the writer's fault, not yours.**

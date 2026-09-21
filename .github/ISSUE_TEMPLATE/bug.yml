@@ -1,31 +1,37 @@
-name: おかしい
-description: 落ちる、止まる、数字が合わない、表示が変。
+name: "Something is wrong / おかしい"
+description: "Crashes, hangs, numbers that do not add up, a broken display. — 落ちる、止まる、数字が合わない、表示が変。"
 labels: ["不具合"]
 body:
   - type: markdown
     attributes:
       value: |
+        **English or Japanese is fine. 英語でも日本語でも構いません。**
+
+        Anything that lets someone steal funds or break the chain goes to
+        `manh@manh2309.org` instead of here
+        ([SECURITY.md](https://github.com/Kazuhiro-Tokumoto/Orange/blob/HEAD/SECURITY.md)).
+
         資金を盗める・鎖を壊せる類のものは、ここではなく
-        `manh@manh2309.org` へお願いします ([SECURITY.md](https://github.com/Kazuhiro-Tokumoto/Orange/blob/HEAD/SECURITY.md))。
+        `manh@manh2309.org` へお願いします。
 
   - type: textarea
     id: what
     attributes:
-      label: 何が起きましたか
+      label: "What happened? / 何が起きましたか"
     validations:
       required: true
 
   - type: textarea
     id: expected
     attributes:
-      label: どうなるはずだと思いましたか
-      description: 仕様書のどこを読んでそう思ったか、まで書けると早いです。
+      label: "What did you expect instead? / どうなるはずだと思いましたか"
+      description: "Saying which part of the spec led you to expect that makes it much faster. 仕様書のどこを読んでそう思ったか、まで書けると早いです。"
 
   - type: textarea
     id: steps
     attributes:
-      label: 再現のしかた
-      description: 分からなければ空で構いません。
+      label: "How to reproduce it / 再現のしかた"
+      description: "Leave blank if you do not know. 分からなければ空で構いません。"
       placeholder: |
         1. ...
         2. ...
@@ -33,11 +39,11 @@ body:
   - type: textarea
     id: log
     attributes:
-      label: ログ
+      label: "Log / ログ"
       render: text
 
   - type: input
     id: version
     attributes:
-      label: どの版か
-      placeholder: "コミットハッシュ、または oag-node --version の出力"
+      label: "Which version / どの版か"
+      placeholder: "Commit hash, or the output of oag-node --version"

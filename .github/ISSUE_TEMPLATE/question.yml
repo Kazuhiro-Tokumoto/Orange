@@ -1,22 +1,25 @@
-name: 分からない
-description: 仕様の意図が読めない、なぜこうなっているのか分からない。
+name: "I could not follow this / 分からない"
+description: "The intent of a rule is unclear, or you cannot tell why something is the way it is. — 仕様の意図が読めない、なぜこうなっているのか分からない。"
 labels: ["質問"]
 body:
   - type: markdown
     attributes:
       value: |
+        **If it did not read clearly, that is usually the writer's fault, not yours.**
+        Ask freely. English or Japanese is fine.
+
         **読めなかったのは、たいてい書いた側の問題です。**
         遠慮なくどうぞ。
 
   - type: textarea
     id: question
     attributes:
-      label: 何が分かりませんか
+      label: "What is unclear? / 何が分かりませんか"
     validations:
       required: true
 
   - type: input
     id: where
     attributes:
-      label: どこを読んでいましたか
+      label: "What were you reading? / どこを読んでいましたか"
       placeholder: "docs/SPEC.md §10.6 / crates/oag-chain/src/chain.rs:505 など"

@@ -1,10 +1,15 @@
-name: 動かしてみた
-description: 動いた・動かなかった、どちらでも。一行で構いません。
+name: "I ran it / 動かしてみた"
+description: "Whether it worked or not. One line is enough. — 動いた・動かなかった、どちらでも。一行で構いません。"
 labels: ["報告"]
 body:
   - type: markdown
     attributes:
       value: |
+        **Thank you for connecting.**
+        There are only a handful of nodes on this network right now, so the
+        moment you connect you are one of them. The stories where it did not
+        work are the more useful ones. English or Japanese is fine.
+
         **繋いでくれてありがとうございます。**
         今このネットワークにはノードが数台しかないので、あなたが繋いだ
         時点で一角です。うまくいかなかった話のほうが役に立ちます。
@@ -12,8 +17,10 @@ body:
   - type: textarea
     id: what
     attributes:
-      label: どうなりましたか
+      label: "What happened? / どうなりましたか"
       placeholder: |
+        e.g. connected to mainnet and synced to 2804, took about 30 minutes.
+        e.g. it starts but never finds a peer.
         例) mainnet に繋いで 2804 まで同期できた。30 分くらい。
         例) 起動はするがピアが見つからない。
     validations:
@@ -22,12 +29,12 @@ body:
   - type: input
     id: env
     attributes:
-      label: 環境
+      label: "Environment / 環境"
       placeholder: "Windows 11 / Ubuntu 24.04 / macOS 15 など"
 
   - type: textarea
     id: log
     attributes:
-      label: ログ
-      description: 貼れる範囲で。`[同期]` `[検証]` `[警告]` の行があると助かります。
+      label: "Log / ログ"
+      description: "Whatever you can paste. Lines tagged `[同期]` `[検証]` `[警告]` help most. 貼れる範囲で。"
       render: text

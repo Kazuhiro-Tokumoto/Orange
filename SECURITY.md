@@ -1,40 +1,48 @@
-# 脆弱性を見つけたら
+# If you find a vulnerability
 
-`manh@manh2309.org` に送ってください。
+[English](SECURITY.md) · [日本語](SECURITY.jp.md)
 
-**公開の Issue には書かないでください。** 資金を盗める・鎖を壊せる類のものは、
-直るより先に読まれます。それ以外 (落ちる、同期が止まる、表示がおかしい) は
-Issue で構いません。判断に迷ったらメールで。
+Send it to `manh@manh2309.org`.
 
-## 先に言っておくこと
+**Please do not open a public Issue.** Anything that lets someone steal funds or
+break the chain gets read before it gets fixed. Everything else — crashes,
+stalled sync, a display that looks wrong — is fine as an Issue. When in doubt,
+email.
 
-**これは個人の趣味です。** 会社もチームも居ません。
+English or Japanese, either is fine.
 
-- **対応を約束しません。** 見る時間があるとは限らず、返事が遅れることも、
-  そのまま返せないこともあります
-- **報奨金はありません。** 払う原資がありません
-- **期限も決めません。** 「90 日で公開します」と言われても、こちらが
-  それに合わせられる保証がありません
+## Said up front
 
-急いで直ってほしいものを見つけてしまった場合は、**fork して直してください。**
-MIT なので誰にも断らずにできます。そのほうが確実です。
+**This is one person's hobby project.** There is no company and no team.
 
-黙っていられるのが嫌なら、公開してもらって構いません。恨みません。
+- **No commitment to respond.** There may not be time to look, replies may be
+  slow, and some reports may go unanswered
+- **No bounty.** There is no money to pay one from
+- **No deadlines.** If you tell me "I will publish in 90 days", there is no
+  guarantee I can work to that
 
-まぁ暇人なので基本的に返信します。
+If you find something you need fixed quickly, **fork it and fix it.** It is MIT,
+so you need nobody's permission. That is the more reliable route.
 
-## それでも送ってもらえると嬉しいもの
+If staying quiet does not suit you, publish it. No hard feelings.
 
-- 合意形成が割れる条件 (`docs/SPEC.md` §10.2 / §10.3 のどれかを抜ける入力)
-- 署名や鍵の導出まわりで、他の実装と答えが食い違うところ
-- ウォレットの記録から、パスフレーズ無しに鍵が出てしまう経路
-- 相手のノードを落とせる、あるいは同期を止められるメッセージ
+That said, I have plenty of free time, so I do generally reply.
 
-**再現手順があると本当に助かります。** 「たぶんここが危ない」でも構いません。
-コードを読んでもらえたこと自体が、今のところ一番ありがたいことなので。
+## What is most worth sending anyway
 
-## 今のところ、失うものは小さいです
+- Conditions under which consensus splits (input that slips past any of
+  `docs/SPEC.md` §10.2 / §10.3)
+- Places where signing or key derivation gives a different answer than another
+  implementation
+- Any path that recovers a key from a wallet record without the passphrase
+- Messages that crash a peer's node, or stall its sync
 
-価格が付いておらず、参加者もごく少数です。**被害額という意味では、今が
-いちばん安全に壊せる時期**です。後で見つかるより、今のうちに見つかったほうが
-ずっといい。
+**Reproduction steps help enormously.** "I think this part might be dangerous"
+is fine too. Right now, someone having read the code at all is the most welcome
+thing there is.
+
+## There is little to lose at the moment
+
+There is no price and there are very few participants. **In terms of money lost,
+this is the safest time there will ever be to break it.** Far better found now
+than later.
