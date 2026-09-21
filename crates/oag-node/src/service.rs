@@ -395,12 +395,12 @@ pub struct NodeHandle {
 /// 引きうる。鍵と同じ乱数源から取る。
 fn make_nonce() -> u64 {
     let bytes = oag_primitives::SecretKey::generate().to_bytes();
-    u64::from_le_bytes(bytes[..8].try_into().expect("32 バイトある"))
+    u64::from_le_bytes(bytes[..8].try_into().expect("there are 32 bytes"))
 }
 
 /// 専用スレッドが死んだときの文言。
 fn gone() -> String {
-    "ノードの作業スレッドが応答しない".to_string()
+    "the node's worker thread is not responding".to_string()
 }
 
 impl NodeHandle {
@@ -834,7 +834,9 @@ impl NodeService {
                 thread: Some(thread),
             }),
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(NodeError::Thread("作業スレッドが起動前に終わった".into())),
+            Err(_) => Err(NodeError::Thread(
+                "the worker thread ended before it started".into(),
+            )),
         }
     }
 
@@ -932,7 +934,7 @@ impl Service {
                     self.template_built = Some(Instant::now());
                 }
                 Err(e) => {
-                    crate::log_warn!("採掘の土台を組めない: {e}。採掘を止める。");
+                    crate::log_warn!("cannot assemble a mining template: {e}. Stopping mining.");
                     self.stop_mining();
                     return;
                 }
@@ -947,7 +949,7 @@ impl Service {
         match self.node.accept_mined(block, now()) {
             Ok(MinedBlock { hash, height }) => {
                 self.mined += 1;
-                crate::log_mine!("掘れた  高さ {height}  {hash}{}", self.rate_suffix());
+                crate::log_mine!("found  height {height}  {hash}{}", self.rate_suffix());
                 self.announce_tip(None);
                 self.stale_template = true;
                 if self.mine_until.is_some_and(|limit| self.mined >= limit) {
@@ -957,7 +959,7 @@ impl Service {
             Err(e) => {
                 // 掘り当てたが先端になれなかった。**土台が古い。**
                 // 組み直して続ける。止める理由ではない。
-                crate::log_warn!("掘ったブロックが先端にならなかった: {e}");
+                crate::log_warn!("the block we mined did not become the tip: {e}");
                 self.stale_template = true;
             }
         }
@@ -974,7 +976,7 @@ impl Service {
         let (epoch, seed) = match self.node.mining_seed() {
             Ok(found) => found,
             Err(e) => {
-                crate::log_warn!("採掘のシードを引けない: {e}");
+                crate::log_warn!("cannot resolve the mining seed: {e}");
                 return false;
             }
         };
@@ -989,8 +991,8 @@ impl Service {
         let fast = self.mode.fast;
         if fast {
             crate::log_mine!(
-                "fast モードのデータセットを {threads} 個構築する \
-                 (合計 {:.1} GB、1 分前後かかる)",
+                "building {threads} fast-mode datasets \
+                 ({:.1} GB in total, takes about a minute)",
                 DATASET_GIB * threads.get() as f64
             );
         }
@@ -1019,17 +1021,17 @@ impl Service {
             Ok(pool) => {
                 let light = fell_back.load(Ordering::SeqCst);
                 let kind = if !fast {
-                    "light モード".to_string()
+                    "light mode".to_string()
                 } else if light == 0 {
-                    "fast モード".to_string()
+                    "fast mode".to_string()
                 } else {
-                    format!("fast {} 本・light {light} 本", threads.get() - light)
+                    format!("{} fast, {light} light", threads.get() - light)
                 };
-                crate::log_mine!("{threads} スレッドで採掘する ({kind})");
+                crate::log_mine!("mining with {threads} threads ({kind})");
                 if fast && light > 0 {
                     crate::log_warn!(
-                        "2 GB を確保できなかった分は light モード (256 MB) で掘る。\n\
-                         本数を減らすか、積んでいる memory を確かめること。"
+                        "threads that could not allocate 2 GB mine in light mode (256 MB) instead.\n\
+                         Reduce the thread count, or check how much memory is installed."
                     );
                 }
                 self.pool = Some(pool);
@@ -1043,7 +1045,7 @@ impl Service {
                 true
             }
             Err(e) => {
-                crate::log_warn!("採掘を始められない: {e}");
+                crate::log_warn!("cannot start mining: {e}");
                 false
             }
         }
@@ -1074,7 +1076,10 @@ impl Service {
         if seconds <= 0.0 || attempts == 0 {
             return String::new();
         }
-        format!("  ({attempts} 回、{:.0} H/s)", attempts as f64 / seconds)
+        format!(
+            "  ({attempts} attempts, {:.0} H/s)",
+            attempts as f64 / seconds
+        )
     }
 
     fn stop_mining(&mut self) {
@@ -1232,7 +1237,7 @@ impl Service {
             Request::SaveAddresses => {
                 if self.node.addresses().is_dirty() {
                     if let Err(e) = self.node.addresses_mut().save() {
-                        crate::log_warn!("住所帳を書き出せない: {e}");
+                        crate::log_warn!("cannot write out the address book: {e}");
                     }
                 }
             }
@@ -1408,7 +1413,7 @@ impl Service {
         if new > 0 {
             let top = headers.last().map(|h| h.height).unwrap_or(0);
             crate::log_sync!(
-                "ヘッダ +{new} ({} 件中)  高さ {top} まで判明",
+                "headers +{new} ({} total)  chain known to height {top}",
                 headers.len()
             );
         }
@@ -1462,7 +1467,7 @@ impl Service {
             // まとめている途中でも必ず出す。枝が入れ替わったことは、
             // 進み具合とは比べものにならないほど重要である。
             crate::log_verify!(
-                "リオーグ  -{} +{}  高さ {height}",
+                "reorg  -{} +{}  height {height}",
                 reorg.disconnected.len(),
                 reorg.connected.len()
             );
@@ -1479,10 +1484,10 @@ impl Service {
 
         if best.saturating_sub(height) <= SYNC_BEHIND {
             if self.progress.take().is_some() {
-                crate::log_sync!("追いついた  高さ {height}");
+                crate::log_sync!("caught up  height {height}");
             }
             crate::log_verify!(
-                "高さ {height} を接続  取引 {transactions}  {}  mempool {} 件",
+                "connected height {height}  {transactions} tx  {}  mempool {}",
                 crate::log::bytes(size),
                 self.node.mempool().len()
             );
@@ -1503,7 +1508,7 @@ impl Service {
         let rate = done as f64 / elapsed.as_secs_f64();
         let pct = height as f64 * 100.0 / best.max(1) as f64;
         crate::log_sync!(
-            "本体 {height}/{best} ({pct:.0}%)  {rate:.1} blk/s  残り {}",
+            "bodies {height}/{best} ({pct:.0}%)  {rate:.1} blk/s  {} left",
             best - height
         );
         self.progress = Some((now, height));
@@ -1521,7 +1526,7 @@ impl Service {
         let txid = tx.txid();
         if let Some(peer) = from {
             if !self.tx_requests.was_requested_from(peer, &txid) {
-                return Err("頼んでいないトランザクションが来た".to_string());
+                return Err("an unrequested transaction arrived".to_string());
             }
             // 頼んだ分は使い切る。以降の検証が失敗しても、同じものを
             // もう一度この相手から受け取ることはない。
@@ -1545,18 +1550,15 @@ impl Service {
         // **受け取ったことを出す。** 届いていないのか、届いたが断られた
         // のかは、外から見分けがつかない。断った側 (呼び出し元) は理由を
         // 出すので、ここでは通った分だけを出せばよい。
-        let source = if from.is_some() { "受信" } else { "自前" };
+        let source = if from.is_some() { "received" } else { "own" };
         let len = self.node.mempool().len();
         match self.node.mempool().get(&accepted).map(|e| (e.fee, e.size)) {
             Some((fee, size)) => crate::log_tx!(
-                "{source} {}  手数料 {fee} OAG  {}  mempool {len} 件",
+                "{source} {}  fee {fee} OAG  {}  mempool {len}",
                 crate::log::short(&accepted),
                 crate::log::bytes(size)
             ),
-            None => crate::log_tx!(
-                "{source} {}  mempool {len} 件",
-                crate::log::short(&accepted)
-            ),
+            None => crate::log_tx!("{source} {}  mempool {len}", crate::log::short(&accepted)),
         }
 
         // **通ったものだけを流す。** くれた相手には流し返さない。

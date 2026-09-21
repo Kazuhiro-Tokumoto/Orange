@@ -405,7 +405,11 @@ mod tests {
         assert_eq!(download.want(hashes(0..5)), 5);
 
         let assigned = download.assign(1, 0);
-        assert_eq!(assigned, hashes(0..5), "古い順に割り振られるべき");
+        assert_eq!(
+            assigned,
+            hashes(0..5),
+            "they should be assigned oldest first"
+        );
         assert_eq!(download.queued_len(), 0);
         assert_eq!(download.in_flight_len(), 5);
     }
@@ -414,13 +418,13 @@ mod tests {
     fn the_same_block_is_not_requested_twice() {
         let mut download = BlockDownload::new();
         download.want(hashes(0..3));
-        assert_eq!(download.want(hashes(0..3)), 0, "重ねて加えられている");
+        assert_eq!(download.want(hashes(0..3)), 0, "added twice");
 
         download.assign(1, 0);
         assert_eq!(
             download.want(hashes(0..3)),
             0,
-            "依頼中のものが再び加えられている"
+            "an in-flight request was added again"
         );
     }
 
@@ -432,14 +436,17 @@ mod tests {
 
         let first = download.assign(1, 0);
         assert_eq!(first.len(), MAX_IN_FLIGHT_PER_PEER);
-        assert!(download.assign(1, 0).is_empty(), "上限を超えて頼んでいる");
+        assert!(
+            download.assign(1, 0).is_empty(),
+            "requesting beyond the limit"
+        );
 
         // 別のピアには頼める。
         let second = download.assign(2, 0);
         assert_eq!(second.len(), MAX_IN_FLIGHT_PER_PEER);
         assert!(
             first.iter().all(|h| !second.contains(h)),
-            "重複して頼んでいる"
+            "requesting duplicates"
         );
     }
 
@@ -466,11 +473,11 @@ mod tests {
         assert!(download.received(&block_hash(0)));
         assert!(
             !download.received(&block_hash(0)),
-            "同じブロックを二度受け取ったことになっている"
+            "the same block counts as received twice"
         );
         assert!(
             !download.received(&block_hash(99)),
-            "頼んでいないブロックが受理されている"
+            "an unrequested block was accepted"
         );
     }
 
@@ -503,7 +510,7 @@ mod tests {
         assert_eq!(download.assign(1, 0), hashes(0..1));
         assert!(
             download.assign(2, 0).is_empty(),
-            "依頼中のものが二重に配られている"
+            "an in-flight request was handed out twice"
         );
 
         assert!(download.not_found(&block_hash(0), 1));
@@ -511,7 +518,7 @@ mod tests {
         assert_eq!(
             download.assign(2, 0),
             hashes(0..1),
-            "断られた直後に別のピアへ回せていない"
+            "not reassigned to another peer immediately after the refusal"
         );
     }
 
@@ -551,7 +558,7 @@ mod tests {
         assert_eq!(
             download.assign(2, 0),
             hashes(0..1),
-            "戻したものが後回しになっている"
+            "the requeued one was put behind"
         );
     }
 
@@ -568,7 +575,7 @@ mod tests {
         assert_eq!(
             download.in_flight_len(),
             second.len(),
-            "他のピアの依頼まで戻されている"
+            "another peer's requests were requeued too"
         );
     }
 
@@ -595,7 +602,7 @@ mod tests {
         assert_eq!(
             &assigned[..3],
             &hashes(0..3)[..],
-            "取りこぼした古い方が後回しになっている"
+            "the older missed one was put behind"
         );
     }
 
@@ -650,7 +657,7 @@ mod tests {
         assert_eq!(
             received.len() as u64,
             total,
-            "取りこぼしがある ({} 件しか届いていない)",
+            "some were missed (only {} arrived)",
             received.len()
         );
         assert!(download.is_idle());
@@ -670,14 +677,17 @@ mod tests {
         let asked = reqs.assign(7, 0);
         assert_eq!(asked, vec![txid(1)]);
 
-        assert!(reqs.was_requested_from(7, &txid(1)), "頼んだ相手からは通る");
+        assert!(
+            reqs.was_requested_from(7, &txid(1)),
+            "it passes from the peer it was requested from"
+        );
         assert!(
             !reqs.was_requested_from(8, &txid(1)),
-            "別のピアが割り込んで送ってきても通してはならない"
+            "another peer cutting in must not be accepted"
         );
         assert!(
             !reqs.was_requested_from(7, &txid(2)),
-            "頼んでいないものは通してはならない"
+            "what was not requested must not be accepted"
         );
     }
 
@@ -687,7 +697,7 @@ mod tests {
         assert_eq!(
             reqs.want([txid(1), txid(1), txid(2)]),
             2,
-            "重複は 1 つに畳む"
+            "duplicates fold into one"
         );
         assert_eq!(reqs.assign(1, 0).len(), 2);
         // 依頼中のものをもう一度積もうとしても増えない。
@@ -730,7 +740,7 @@ mod tests {
 
         assert_eq!(reqs.expire(TX_REQUEST_TIMEOUT_SECS), 1);
         assert_eq!(reqs.in_flight_len(), 0);
-        assert_eq!(reqs.queued_len(), 0, "待ち行列に戻してはならない");
+        assert_eq!(reqs.queued_len(), 0, "it must not be put back in the queue");
         assert!(!reqs.is_tracked(&txid(1)));
     }
 
@@ -750,7 +760,7 @@ mod tests {
         reqs.assign(1, 0);
         assert_eq!(reqs.peer_disconnected(1), 2);
         assert_eq!(reqs.in_flight_len(), 0);
-        assert_eq!(reqs.queued_len(), 0, "こちらも頼み直さない");
+        assert_eq!(reqs.queued_len(), 0, "we do not re-request it either");
     }
 
     #[test]

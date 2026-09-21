@@ -96,10 +96,13 @@ pub unsafe extern "C" fn oag_call(ptr: *const u8, len: usize) -> *mut u8 {
     let request = unsafe { std::slice::from_raw_parts(ptr, len) };
     let answer = match std::str::from_utf8(request) {
         Ok(text) => handle(text),
-        Err(_) => json!({ "error": "要求が UTF-8 ではない" }),
+        Err(_) => json!({ "error": "the request is not UTF-8" }),
     };
-    let body = serde_json::to_vec(&answer)
-        .unwrap_or_else(|_| r#"{"error":"応答を JSON にできない"}"#.as_bytes().to_vec());
+    let body = serde_json::to_vec(&answer).unwrap_or_else(|_| {
+        r#"{"error":"the response cannot be turned into JSON"}"#
+            .as_bytes()
+            .to_vec()
+    });
 
     let mut out = Vec::with_capacity(4 + body.len());
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
@@ -117,11 +120,12 @@ fn handle(text: &str) -> Value {
 }
 
 fn dispatch(text: &str) -> Result<Value, String> {
-    let request: Value = serde_json::from_str(text).map_err(|e| format!("要求が読めない: {e}"))?;
+    let request: Value =
+        serde_json::from_str(text).map_err(|e| format!("the request cannot be read: {e}"))?;
     let cmd = request
         .get("cmd")
         .and_then(Value::as_str)
-        .ok_or("cmd が無い")?;
+        .ok_or("cmd is missing")?;
 
     match cmd {
         "seed" => cmd_seed(&request),
@@ -134,7 +138,7 @@ fn dispatch(text: &str) -> Result<Value, String> {
         "phrase" => cmd_phrase(),
         "pay" => cmd_pay(&request),
         "sweep" => cmd_sweep(&request),
-        other => Err(format!("知らない命令: {other}")),
+        other => Err(format!("unknown command: {other}")),
     }
 }
 
@@ -145,7 +149,7 @@ fn cmd_seed(request: &Value) -> Result<Value, String> {
     let seed: [u8; rng::SEED_LEN] = bytes
         .as_slice()
         .try_into()
-        .map_err(|_| format!("種は {} バイトであること", rng::SEED_LEN))?;
+        .map_err(|_| format!("the seed must be {} bytes", rng::SEED_LEN))?;
     rng::seed(&seed);
     Ok(json!({ "seeded": true }))
 }
@@ -159,12 +163,16 @@ fn cmd_create(request: &Value) -> Result<Value, String> {
     let entropy_len = match words {
         12 => 16,
         24 => 32,
-        other => return Err(format!("語数は 12 か 24 であること ({other} が来た)")),
+        other => {
+            return Err(format!(
+                "the word count must be 12 or 24 ({other} was given)"
+            ))
+        }
     };
 
     let mut entropy = vec![0u8; entropy_len];
     if !rng::fill(&mut entropy) {
-        return Err("乱数の種がまだ入っていない".to_string());
+        return Err("the random seed has not been supplied yet".to_string());
     }
     let mnemonic = Mnemonic::from_entropy(&entropy).map_err(|e| e.to_string())?;
 
@@ -216,7 +224,7 @@ fn cmd_derive(request: &Value) -> Result<Value, String> {
     let count = request.get("count").and_then(Value::as_u64).unwrap_or(0) as u32;
     // 一度に作りすぎると、ブラウザが固まったように見える。
     if count > 1_000 {
-        return Err("一度に導けるのは 1000 個まで".to_string());
+        return Err("at most 1000 can be derived at once".to_string());
     }
     with_open(|store| {
         let addresses = store
@@ -234,7 +242,7 @@ fn cmd_grow(request: &Value) -> Result<Value, String> {
     let accounts = request
         .get("accounts")
         .and_then(Value::as_u64)
-        .ok_or("accounts が無い")? as u32;
+        .ok_or("accounts is missing")? as u32;
     with_open_mut(|store| {
         store.grow_to(accounts).map_err(|e| e.to_string())?;
         let record = seal(store)?;
@@ -251,7 +259,7 @@ fn cmd_pay(request: &Value) -> Result<Value, String> {
     let to = lock_field(request, "to")?;
     let amount: Amount = str_field(request, "amount")?
         .parse()
-        .map_err(|e| format!("送る額が読めない: {e}"))?;
+        .map_err(|e| format!("the amount to send cannot be read: {e}"))?;
     let fee_rate = fee_rate_field(request)?;
     let next_height = u64_field(request, "next_height")?;
 
@@ -260,7 +268,7 @@ fn cmd_pay(request: &Value) -> Result<Value, String> {
         let change_to = Lock::from_address(
             &store
                 .default_address()
-                .map_err(|e| format!("おつりの受取先を引けない: {e}"))?,
+                .map_err(|e| format!("cannot look up the change address: {e}"))?,
         );
         let spend = Spend {
             to,
@@ -333,7 +341,7 @@ fn put(store: Keystore) {
 fn with_open<T>(f: impl FnOnce(&Keystore) -> Result<T, String>) -> Result<T, String> {
     OPEN.with(|cell| {
         let slot = cell.borrow();
-        let store = slot.as_ref().ok_or("ウォレットが開いていない")?;
+        let store = slot.as_ref().ok_or("no wallet is open")?;
         f(store)
     })
 }
@@ -341,7 +349,7 @@ fn with_open<T>(f: impl FnOnce(&Keystore) -> Result<T, String>) -> Result<T, Str
 fn with_open_mut<T>(f: impl FnOnce(&mut Keystore) -> Result<T, String>) -> Result<T, String> {
     OPEN.with(|cell| {
         let mut slot = cell.borrow_mut();
-        let store = slot.as_mut().ok_or("ウォレットが開いていない")?;
+        let store = slot.as_mut().ok_or("no wallet is open")?;
         f(store)
     })
 }
@@ -360,32 +368,32 @@ fn str_field(request: &Value, name: &str) -> Result<String, String> {
         .get(name)
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| format!("{name} が無い"))
+        .ok_or_else(|| format!("{name} is missing"))
 }
 
 fn u64_field(request: &Value, name: &str) -> Result<u64, String> {
     request
         .get(name)
         .and_then(Value::as_u64)
-        .ok_or_else(|| format!("{name} が無い"))
+        .ok_or_else(|| format!("{name} is missing"))
 }
 
 fn hex_field(request: &Value, name: &str) -> Result<Vec<u8>, String> {
     let text = str_field(request, name)?;
-    hex::decode(&text).map_err(|e| format!("{name} が 16 進として読めない: {e}"))
+    hex::decode(&text).map_err(|e| format!("{name} cannot be read as hexadecimal: {e}"))
 }
 
 fn network_field(request: &Value) -> Result<Network, String> {
     str_field(request, "network")?
         .parse()
-        .map_err(|_| "知らないネットワーク".to_string())
+        .map_err(|_| "unknown network".to_string())
 }
 
 fn fee_rate_field(request: &Value) -> Result<Amount, String> {
     let atomic = str_field(request, "fee_rate")?
         .parse::<u128>()
-        .map_err(|e| format!("料率が読めない: {e}"))?;
-    Amount::from_atomic(atomic).map_err(|e| format!("料率が読めない: {e}"))
+        .map_err(|e| format!("the fee rate cannot be read: {e}"))?;
+    Amount::from_atomic(atomic).map_err(|e| format!("the fee rate cannot be read: {e}"))
 }
 
 fn lock_field(request: &Value, name: &str) -> Result<Lock, String> {
@@ -396,7 +404,7 @@ fn lock_field(request: &Value, name: &str) -> Result<Lock, String> {
 
 fn parse_lock(network: Network, text: &str) -> Result<Lock, String> {
     let address = Address::decode_on(network, text)
-        .map_err(|e| format!("アドレス {text} が読めない: {e}"))?;
+        .map_err(|e| format!("the address {text} cannot be read: {e}"))?;
     Ok(Lock::from_address(&address))
 }
 
@@ -408,7 +416,7 @@ fn coins_field(request: &Value) -> Result<Vec<Coin>, String> {
     let list = request
         .get("coins")
         .and_then(Value::as_array)
-        .ok_or("coins が無い")?;
+        .ok_or("coins is missing")?;
     let network = network_field(request)?;
 
     let mut out = Vec::with_capacity(list.len());
@@ -419,12 +427,13 @@ fn coins_field(request: &Value) -> Result<Vec<Coin>, String> {
         let lock = parse_lock(network, address)?;
         let txid: Hash = str_field(item, "txid")?
             .parse()
-            .map_err(|e| format!("txid が読めない: {e}"))?;
+            .map_err(|e| format!("the txid cannot be read: {e}"))?;
         let index = u64_field(item, "index")? as u32;
         let atomic = str_field(item, "amount")?
             .parse::<u128>()
-            .map_err(|e| format!("金額が読めない: {e}"))?;
-        let amount = Amount::from_atomic(atomic).map_err(|e| format!("金額が読めない: {e}"))?;
+            .map_err(|e| format!("the amount cannot be read: {e}"))?;
+        let amount =
+            Amount::from_atomic(atomic).map_err(|e| format!("the amount cannot be read: {e}"))?;
         out.push(Coin {
             outpoint: OutPoint { txid, index },
             output: TxOutput { amount, lock },
@@ -456,7 +465,7 @@ mod tests {
         answer
             .get("ok")
             .cloned()
-            .unwrap_or_else(|| panic!("失敗した: {answer}"))
+            .unwrap_or_else(|| panic!("it failed: {answer}"))
     }
 
     fn err(text: &str) -> String {
@@ -464,7 +473,7 @@ mod tests {
         answer
             .get("error")
             .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("通ってしまった: {answer}"))
+            .unwrap_or_else(|| panic!("it passed after all: {answer}"))
             .to_string()
     }
 
@@ -510,7 +519,7 @@ mod tests {
             "cmd": "open", "network": "regtest", "pass": "chigau-mono", "record": record
         }))
         .unwrap());
-        assert!(message.contains("復号できない"), "{message}");
+        assert!(message.contains("cannot decrypt"), "{message}");
     }
 
     /// **鍵が要る命令は、閉じているときに通ってはならない。**
@@ -523,7 +532,7 @@ mod tests {
             r#"{"cmd":"derive","from":0,"count":1}"#,
             r#"{"cmd":"grow","accounts":5}"#,
         ] {
-            assert_eq!(err(cmd), "ウォレットが開いていない", "{cmd}");
+            assert_eq!(err(cmd), "no wallet is open", "{cmd}");
         }
     }
 
@@ -552,7 +561,7 @@ mod tests {
 
         let raw = hex::decode(paid["hex"].as_str().unwrap()).unwrap();
         let tx = oag_consensus::Transaction::decode(&raw).unwrap();
-        assert_eq!(tx.encode(), raw, "符号化して戻らない");
+        assert_eq!(tx.encode(), raw, "it does not round-trip when encoded");
         assert_eq!(tx.inputs.len(), 1);
         assert_eq!(tx.txid().to_string(), paid["txid"].as_str().unwrap());
         // **署名が入っていること。** 場所取りのままなら 0 が並ぶ。
@@ -598,7 +607,10 @@ mod tests {
         assert!(now.get("phrase").is_some());
         let opened = ok(r#"{"cmd":"derive","from":0,"count":1}"#);
         assert_eq!(opened["addresses"][0], made["addresses"][0]);
-        assert_eq!(before, 1, "作った直後は 1 個のはず");
+        assert_eq!(
+            before, 1,
+            "there should be exactly one right after creation"
+        );
     }
 
     #[test]
@@ -608,7 +620,7 @@ mod tests {
         let grown = ok(r#"{"cmd":"grow","accounts":5}"#);
         let list = grown["addresses"].as_array().unwrap();
         assert_eq!(list.len(), 5);
-        assert_eq!(list[0], first, "先頭が変わった");
+        assert_eq!(list[0], first, "the first entry changed");
     }
 
     /// 種を入れる前に記録を作らせない。**予測できるソルトを黙って
@@ -620,7 +632,7 @@ mod tests {
         let seeded_already = rng::fill(&mut buffer);
         if !seeded_already {
             let message = err(r#"{"cmd":"create","network":"regtest","pass":"passphrase"}"#);
-            assert!(message.contains("種"), "{message}");
+            assert!(message.contains("seed"), "{message}");
         }
     }
 }

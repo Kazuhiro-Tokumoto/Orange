@@ -44,9 +44,9 @@ pub fn locator_heights(tip: u64) -> Vec<u64> {
 
     // ジェネシスは必ず含める。これが無いと、相手と何も共有していない場合に
     // 分岐点を決められない。
-    if *heights.last().expect("必ず 1 個はある") != 0 {
+    if *heights.last().expect("there is always at least one") != 0 {
         if heights.len() >= MAX_LOCATOR {
-            *heights.last_mut().expect("必ず 1 個はある") = 0;
+            *heights.last_mut().expect("there is always at least one") = 0;
         } else {
             heights.push(0);
         }
@@ -104,11 +104,11 @@ mod tests {
     fn it_starts_at_the_tip_and_ends_at_the_genesis() {
         for tip in [0u64, 1, 5, 10, 100, 10_000, 100_000_000] {
             let heights = locator_heights(tip);
-            assert_eq!(heights[0], tip, "先端が先頭でない (tip={tip})");
+            assert_eq!(heights[0], tip, "the tip is not first (tip={tip})");
             assert_eq!(
                 *heights.last().unwrap(),
                 0,
-                "ジェネシスが末尾でない (tip={tip})"
+                "genesis is not last (tip={tip})"
             );
         }
     }
@@ -118,7 +118,7 @@ mod tests {
         for tip in [1u64, 9, 10, 11, 1_000, 1_000_000] {
             let heights = locator_heights(tip);
             for pair in heights.windows(2) {
-                assert!(pair[0] > pair[1], "単調でない: {pair:?} (tip={tip})");
+                assert!(pair[0] > pair[1], "not monotonic: {pair:?} (tip={tip})");
             }
         }
     }
@@ -127,7 +127,7 @@ mod tests {
     fn the_newest_ten_are_consecutive() {
         let heights = locator_heights(100);
         for (i, height) in heights.iter().take(10).enumerate() {
-            assert_eq!(*height, 100 - i as u64, "{i} 番目が飛んでいる");
+            assert_eq!(*height, 100 - i as u64, "entry {i} skips");
         }
     }
 
@@ -138,12 +138,12 @@ mod tests {
         // 最初の 10 個の間隔は 1。
         assert!(
             gaps[..9].iter().all(|g| *g == 1),
-            "実際には {:?}",
+            "actually {:?}",
             &gaps[..9]
         );
         // その後は倍々になる (末尾のジェネシスへの飛びを除く)。
         for pair in gaps[10..gaps.len() - 1].windows(2) {
-            assert_eq!(pair[1], pair[0] * 2, "間隔が倍になっていない: {gaps:?}");
+            assert_eq!(pair[1], pair[0] * 2, "the gaps do not double: {gaps:?}");
         }
     }
 
@@ -153,13 +153,13 @@ mod tests {
         let heights = locator_heights(100_000_000);
         assert!(
             heights.len() <= MAX_LOCATOR,
-            "{} 個になった (上限 {MAX_LOCATOR})",
+            "it came to {} entries (limit {MAX_LOCATOR})",
             heights.len()
         );
         assert_eq!(heights[0], 100_000_000);
         assert_eq!(*heights.last().unwrap(), 0);
         // 途中が抜け落ちて短くなりすぎていないこと。
-        assert!(heights.len() > 30, "{} 個しかない", heights.len());
+        assert!(heights.len() > 30, "there are only {}", heights.len());
     }
 
     #[test]
@@ -191,7 +191,10 @@ mod tests {
 
         // 実際の共有点 (50) より古い場所から送り始めることになる。
         // 多めに送るだけなので問題にならない。
-        assert!(expected <= 50, "共有していない高さから送ろうとしている");
+        assert!(
+            expected <= 50,
+            "trying to send from a height we do not share"
+        );
     }
 
     #[test]
@@ -203,7 +206,7 @@ mod tests {
             assert_eq!(
                 find_fork_height(&locator, shared),
                 shared_tip,
-                "深さ {} の分岐が厳密に当たらない",
+                "a fork at depth {} is not hit exactly",
                 100 - shared_tip
             );
         }

@@ -39,16 +39,16 @@ pub const CHECKSUM_LEN: usize = 4;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FrameError {
     /// ネットワーク識別子が違う。別のネットワークか、雑音である。
-    #[error("ネットワーク識別子が一致しない: {actual:02x?}")]
+    #[error("the network identifier does not match: {actual:02x?}")]
     BadMagic {
         /// 受け取った値。
         actual: [u8; MAGIC_LEN],
     },
     /// コマンド名が ASCII として解釈できない、または NUL 埋めが不正。
-    #[error("コマンド名が不正")]
+    #[error("the command name is invalid")]
     BadCommand,
     /// 宣言された長さが上限を超えている。
-    #[error("ペイロード長 {actual} が上限 {max} を超えている")]
+    #[error("payload length {actual} exceeds the limit {max}")]
     PayloadTooLarge {
         /// 宣言された長さ。
         actual: usize,
@@ -56,7 +56,7 @@ pub enum FrameError {
         max: usize,
     },
     /// チェックサムが合わない。
-    #[error("チェックサムが一致しない")]
+    #[error("the checksum does not match")]
     BadChecksum,
     /// メッセージの中身が解釈できない。
     #[error(transparent)]
@@ -247,9 +247,14 @@ mod tests {
         for message in every_message() {
             let bytes = encode(MAGIC, &message);
             let (decoded, consumed) = decode(MAGIC, &bytes)
-                .unwrap_or_else(|e| panic!("{} の復号に失敗: {e}", message.command()))
-                .unwrap_or_else(|| panic!("{} が不完全と判定された", message.command()));
-            assert_eq!(decoded, message, "{} が往復しない", message.command());
+                .unwrap_or_else(|e| panic!("failed to decode {}: {e}", message.command()))
+                .unwrap_or_else(|| panic!("{} was judged incomplete", message.command()));
+            assert_eq!(
+                decoded,
+                message,
+                "{} does not round-trip",
+                message.command()
+            );
             assert_eq!(consumed, bytes.len());
         }
     }
@@ -258,7 +263,7 @@ mod tests {
     fn the_header_is_24_bytes() {
         assert_eq!(HEADER_LEN, 24);
         let bytes = encode(MAGIC, &Message::Verack);
-        assert_eq!(bytes.len(), HEADER_LEN, "verack はペイロードを持たない");
+        assert_eq!(bytes.len(), HEADER_LEN, "verack has no payload");
     }
 
     #[test]
@@ -268,7 +273,7 @@ mod tests {
             assert_eq!(
                 decode(MAGIC, &bytes[..cut]),
                 Ok(None),
-                "{cut} バイトで誤りと判定された"
+                "judged an error at {cut} bytes"
             );
         }
         assert!(decode(MAGIC, &bytes).unwrap().is_some());
@@ -348,7 +353,7 @@ mod tests {
         let bytes = encode(MAGIC, &Message::Inv(items));
         assert!(
             bytes.len() - HEADER_LEN <= MAX_PAYLOAD,
-            "上限まで詰めた inv が {} バイトになる",
+            "an inv packed to the limit comes to {} bytes",
             bytes.len()
         );
         assert!(decode(MAGIC, &bytes).unwrap().is_some());
@@ -439,19 +444,19 @@ mod tests {
         // 広めてよい住所。
         assert!(check("1.1.1.1:9444"));
         assert!(check("8.8.8.8:9444"));
-        assert!(check("[2001:db8::1]:9444"), "IPv6 のグローバル住所");
+        assert!(check("[2001:db8::1]:9444"), "a global IPv6 address");
 
         // 広めてはいけない住所。
-        assert!(!check("127.0.0.1:9444"), "ループバック");
-        assert!(!check("[::1]:9444"), "IPv6 のループバック");
-        assert!(!check("10.0.0.1:9444"), "私設網");
-        assert!(!check("192.168.1.1:9444"), "私設網");
-        assert!(!check("172.16.0.1:9444"), "私設網");
-        assert!(!check("169.254.1.1:9444"), "リンクローカル");
-        assert!(!check("0.0.0.0:9444"), "未指定");
+        assert!(!check("127.0.0.1:9444"), "loopback");
+        assert!(!check("[::1]:9444"), "IPv6 loopback");
+        assert!(!check("10.0.0.1:9444"), "private network");
+        assert!(!check("192.168.1.1:9444"), "private network");
+        assert!(!check("172.16.0.1:9444"), "private network");
+        assert!(!check("169.254.1.1:9444"), "link-local");
+        assert!(!check("0.0.0.0:9444"), "unspecified");
         // 203.0.113.0/24 と 198.51.100.0/24 は文書用に予約された範囲であり、
         // 実在のホストを指さない。広めても意味がない。
-        assert!(!check("203.0.113.5:9444"), "文書用の予約範囲");
-        assert!(!check("198.51.100.7:9444"), "文書用の予約範囲");
+        assert!(!check("203.0.113.5:9444"), "documentation range");
+        assert!(!check("198.51.100.7:9444"), "documentation range");
     }
 }

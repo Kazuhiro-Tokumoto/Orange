@@ -28,10 +28,10 @@ pub enum Domain {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HashError {
     /// 32 バイトではない入力。
-    #[error("ハッシュの長さが不正: {0} バイト (32 バイトである必要がある)")]
+    #[error("the hash length is invalid: {0} bytes (must be 32)")]
     BadLength(usize),
     /// 16 進文字列として解釈できない入力。
-    #[error("16 進表記として解釈できない")]
+    #[error("cannot be parsed as hexadecimal")]
     BadHex,
 }
 
@@ -116,10 +116,7 @@ pub fn hash_with_domain(domain: Domain, data: &[u8]) -> Hash {
 /// # Panics
 /// `tag` に NUL バイトが含まれる場合。
 pub fn tagged(tag: &str, data: &[u8]) -> Hash {
-    assert!(
-        !tag.as_bytes().contains(&0),
-        "タグに NUL を含めてはならない"
-    );
+    assert!(!tag.as_bytes().contains(&0), "a tag must not contain NUL");
     let mut hasher = blake3::Hasher::new();
     hasher.update(tag.as_bytes());
     hasher.update(&[0x00]);
@@ -165,7 +162,10 @@ mod tests {
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
-                assert_ne!(all[i], all[j], "ドメインが違えばハッシュも異なるべき");
+                assert_ne!(
+                    all[i], all[j],
+                    "a different domain should give a different hash"
+                );
             }
         }
     }
@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "タグに NUL")]
+    #[should_panic(expected = "must not contain NUL")]
     fn tagged_rejects_nul_in_tag() {
         tagged("a\0b", b"x");
     }

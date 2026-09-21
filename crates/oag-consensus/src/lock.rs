@@ -161,7 +161,7 @@ mod tests {
     fn pay_to_pubkey_round_trip() {
         let lock = Lock::pay_to_pubkey(&pubkey());
         let bytes = lock.encode();
-        assert_eq!(bytes.len(), 34, "版数 1 + 長さ 1 + 公開鍵 32");
+        assert_eq!(bytes.len(), 34, "version 1 + length 1 + public key 32");
         assert_eq!(lock.encoded_len(), bytes.len());
         assert_eq!(Lock::decode(&bytes).unwrap(), lock);
         assert_eq!(lock.to_pubkey(), Some(pubkey()));

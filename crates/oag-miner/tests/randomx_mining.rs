@@ -31,7 +31,7 @@ fn request(difficulty: u64) -> TemplateRequest {
 }
 
 fn verifier() -> RandomXVerifier {
-    RandomXVerifier::new(&hash::block_hash(b"orange genesis"), 0).expect("初期化できる")
+    RandomXVerifier::new(&hash::block_hash(b"orange genesis"), 0).expect("can be initialised")
 }
 
 #[test]
@@ -43,19 +43,21 @@ fn a_block_mined_with_randomx_passes_validation() {
     let verifier = verifier();
 
     let outcome = mine(&template, &verifier, 0, 5_000, &NeverStop).unwrap();
-    let block = outcome.block().expect("難易度 16 なら見つかるはず");
+    let block = outcome
+        .block()
+        .expect("it should be found at difficulty 16");
 
     // 見つけたブロックが本当に難易度を満たしていること。
     let pow = verifier.hash(&block.header.encode()).unwrap();
     assert!(
         meets_difficulty(&pow, difficulty).unwrap(),
-        "難易度を満たしていない"
+        "it does not meet the difficulty"
     );
 
     // 検証器を通すこと。
     assert!(
         verifier.check(&block.header).unwrap(),
-        "RandomXVerifier が自分で掘ったブロックを認めない"
+        "RandomXVerifier rejects a block it mined itself"
     );
 
     // コンセンサスの検証も通ること。
@@ -70,7 +72,8 @@ fn a_block_mined_with_randomx_passes_validation() {
         },
         utxo: &utxo,
     };
-    validate_block(&block, &ctx, &AcceptAnyPow).expect("組み立てたブロックが検証を通らない");
+    validate_block(&block, &ctx, &AcceptAnyPow)
+        .expect("the assembled block does not pass validation");
 }
 
 #[test]

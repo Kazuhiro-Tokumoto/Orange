@@ -49,15 +49,15 @@ fn main() {
     let seed = hash::block_hash(b"Orange hashrate measurement");
 
     println!(
-        "RandomX のフラグ: {:?}",
+        "RandomX flags: {:?}",
         randomx_rs::RandomXFlag::get_recommended_flags()
     );
     println!();
 
     let started = Instant::now();
-    let light = RandomXVerifier::new(&seed, 0).expect("light を作れる");
+    let light = RandomXVerifier::new(&seed, 0).expect("light can be created");
     println!(
-        "light の初期化 (256 MB): {:.1} 秒",
+        "light initialisation (256 MB): {:.1} s",
         started.elapsed().as_secs_f64()
     );
     let light_rate = measure(|h| {
@@ -69,23 +69,23 @@ fn main() {
         None
     } else {
         println!();
-        println!("fast のデータセットを構築する (2 GB、1 分前後かかる)…");
+        println!("building the fast dataset (2 GB, takes about a minute)...");
         let started = Instant::now();
         match RandomXMiner::new(&seed, 0) {
             Ok(fast) => {
                 println!(
-                    "fast の初期化: {:.1} 秒 ({} バイト)",
+                    "fast initialisation: {:.1} s ({} bytes)",
                     started.elapsed().as_secs_f64(),
                     RandomXMiner::dataset_bytes().unwrap_or(0)
                 );
                 let rate = measure(|h| {
                     std::hint::black_box(fast.hash_header(h).unwrap());
                 });
-                println!("fast:  {rate:.0} H/s ({:.1} 倍)", rate / light_rate);
+                println!("fast:  {rate:.0} H/s ({:.1}x)", rate / light_rate);
                 Some(rate)
             }
             Err(e) => {
-                println!("fast を用意できない: {e}");
+                println!("cannot prepare fast: {e}");
                 None
             }
         }
@@ -93,14 +93,17 @@ fn main() {
 
     let rate = fast_rate.unwrap_or(light_rate);
     println!();
-    println!("── 難易度と、この 1 コアでのブロック間隔 ──");
+    println!("-- difficulty, and the block interval on this one core --");
     for difficulty in [1u64, 10, 100, 1_000, 10_000, 100_000] {
         println!(
-            "  難易度 {difficulty:>7}: {:>9.1} 秒",
+            "  difficulty {difficulty:>7}: {:>9.1} s",
             difficulty as f64 / rate
         );
     }
     println!();
-    println!("目標 60 秒に合う難易度 (この 1 コア): {:.0}", rate * 60.0);
-    println!("mainnet のジェネシス難易度は 1,000、testnet は 10 である。");
+    println!(
+        "difficulty matching the 60 s target (on this one core): {:.0}",
+        rate * 60.0
+    );
+    println!("the mainnet genesis difficulty is 1,000 and testnet is 10.");
 }

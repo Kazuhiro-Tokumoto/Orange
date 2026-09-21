@@ -44,10 +44,10 @@ pub enum MessageError {
     #[error(transparent)]
     Codec(#[from] CodecError),
     /// 知らないコマンド。
-    #[error("知らないコマンド: {0}")]
+    #[error("unknown command: {0}")]
     UnknownCommand(String),
     /// 項目数が上限を超えている。
-    #[error("{field} の項目数 {actual} が上限 {max} を超えている")]
+    #[error("the item count {actual} of {field} exceeds the limit {max}")]
     TooManyItems {
         /// フィールド名。
         field: &'static str,
@@ -57,10 +57,10 @@ pub enum MessageError {
         max: usize,
     },
     /// 知らない inv の種別。
-    #[error("知らない inv の種別: {0}")]
+    #[error("unknown inv type: {0}")]
     UnknownInvKind(u8),
     /// ユーザエージェントが不正。
-    #[error("ユーザエージェントが不正")]
+    #[error("the user agent is invalid")]
     BadUserAgent,
 }
 

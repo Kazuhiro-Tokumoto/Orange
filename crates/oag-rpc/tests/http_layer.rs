@@ -30,7 +30,7 @@ async fn start(handler: Handler) -> SocketAddr {
         handler,
     )
     .await
-    .expect("待ち受けられる");
+    .expect("it can listen");
     let addr = server.local_addr().unwrap();
     tokio::spawn(server.serve());
     addr
@@ -49,8 +49,8 @@ async fn raw(addr: SocketAddr, request: &[u8]) -> String {
     let mut out = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut out))
         .await
-        .expect("相手が接続を閉じるはず")
-        .expect("読み取りに失敗した");
+        .expect("the peer should close the connection")
+        .expect("the read failed");
     String::from_utf8_lossy(&out).into_owned()
 }
 
@@ -109,7 +109,7 @@ async fn the_handler_is_not_reached_without_a_credential() {
     raw(addr, &post("{}", None)).await;
     assert!(
         !reached.load(std::sync::atomic::Ordering::SeqCst),
-        "認証を通す前に handler が走っている"
+        "the handler ran before authentication passed"
     );
 }
 
@@ -170,7 +170,7 @@ async fn an_oversized_body_is_refused_before_it_is_read() {
     );
     let reply = tokio::time::timeout(Duration::from_secs(5), raw(addr, request.as_bytes()))
         .await
-        .expect("本文を待たずに断るはず");
+        .expect("it should refuse without waiting for the body");
     assert!(reply.starts_with("HTTP/1.1 413"), "{reply}");
 }
 
@@ -200,12 +200,12 @@ async fn endless_headers_are_refused() {
     let mut out = Vec::new();
     let read = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut out))
         .await
-        .expect("上限で断って閉じるはず");
+        .expect("it should refuse at the limit and close");
     let reply = String::from_utf8_lossy(&out).into_owned();
 
     assert!(
         reply.starts_with("HTTP/1.1 400") || (!wrote_all && read.is_err()),
-        "上限を超えても受け付け続けている: 書き切った={wrote_all}、応答={reply:?}"
+        "still accepting past the limit: wrote_all={wrote_all}, reply={reply:?}"
     );
 }
 
@@ -231,7 +231,7 @@ async fn a_body_split_across_packets_is_reassembled() {
     let mut out = vec![0u8; 512];
     let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut out))
         .await
-        .expect("応答が返る")
+        .expect("a response comes back")
         .unwrap();
     let reply = String::from_utf8_lossy(&out[..read]).into_owned();
     assert!(
@@ -262,7 +262,7 @@ async fn two_requests_share_one_connection() {
         let mut out = vec![0u8; 512];
         let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut out))
             .await
-            .expect("応答が返る")
+            .expect("a response comes back")
             .unwrap();
         let reply = String::from_utf8_lossy(&out[..read]).into_owned();
         assert!(reply.contains(expected), "{reply}");
@@ -284,7 +284,7 @@ async fn a_connection_close_request_closes_the_connection() {
     let mut out = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut out))
         .await
-        .expect("Connection: close を求めたのに閉じない")
+        .expect("Connection: close was requested but it does not close")
         .unwrap();
     let reply = String::from_utf8_lossy(&out).into_owned();
     assert!(reply.starts_with("HTTP/1.1 200 OK"), "{reply}");
@@ -306,7 +306,7 @@ async fn a_keep_alive_request_does_not_close_the_connection() {
     let mut out = vec![0u8; 512];
     let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut out))
         .await
-        .expect("応答が返る")
+        .expect("a response comes back")
         .unwrap();
     let reply = String::from_utf8_lossy(&out[..read]).into_owned();
     assert!(reply.contains("Connection: keep-alive"), "{reply}");
@@ -315,5 +315,5 @@ async fn a_keep_alive_request_does_not_close_the_connection() {
     let mut tail = Vec::new();
     let closed =
         tokio::time::timeout(Duration::from_millis(300), stream.read_to_end(&mut tail)).await;
-    assert!(closed.is_err(), "求めていないのに閉じている");
+    assert!(closed.is_err(), "it closes although that was not requested");
 }

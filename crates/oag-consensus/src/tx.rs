@@ -344,9 +344,13 @@ mod tests {
     fn standard_transaction_is_195_bytes() {
         // SPEC §7.2 の基準トランザクション。
         let tx = standard_tx();
-        assert_eq!(tx.size(), 195, "内訳: 入力 102 + 出力 43×2 + その他 7");
-        assert_eq!(tx.inputs[0].encode().len(), 102, "入力 1 個");
-        assert_eq!(tx.outputs[0].encode().len(), 43, "出力 1 個");
+        assert_eq!(
+            tx.size(),
+            195,
+            "breakdown: inputs 102 + outputs 43x2 + other 7"
+        );
+        assert_eq!(tx.inputs[0].encode().len(), 102, "one input");
+        assert_eq!(tx.outputs[0].encode().len(), 43, "one output");
         // その他 = version 4 + 入力数 1 + 出力数 1 + locktime 1
         assert_eq!(tx.size() - 102 - 43 * 2, 7);
     }
@@ -377,7 +381,7 @@ mod tests {
         assert_eq!(count, 1_025);
         // スループット 17 件/秒 前後
         let per_second = count as f64 / crate::params::TARGET_BLOCK_TIME_SECS as f64;
-        assert!((17.0..17.5).contains(&per_second), "実際には {per_second}");
+        assert!((17.0..17.5).contains(&per_second), "actually {per_second}");
     }
 
     #[test]
@@ -403,7 +407,7 @@ mod tests {
         for cut in 0..bytes.len() {
             assert!(
                 Transaction::decode(&bytes[..cut]).is_err(),
-                "{cut} バイトで切った入力が復号できてしまった"
+                "an input truncated at {cut} bytes still decoded"
             );
         }
         assert!(Transaction::decode(&bytes).is_ok());
@@ -439,7 +443,7 @@ mod tests {
 
         let mut t = base.clone();
         t.inputs[0].signature[0] ^= 0xff;
-        assert_ne!(t.txid(), original, "署名は txid に含まれる");
+        assert_ne!(t.txid(), original, "the signature is part of the txid");
 
         let mut t = base.clone();
         t.outputs[0].amount = Amount::from_oag(4).unwrap();
@@ -447,7 +451,7 @@ mod tests {
 
         let mut t = base;
         t.outputs.swap(0, 1);
-        assert_ne!(t.txid(), original, "出力の順序も txid に含まれる");
+        assert_ne!(t.txid(), original, "output order is part of the txid too");
     }
 
     #[test]
@@ -514,7 +518,11 @@ mod tests {
             ],
             locktime: 0,
         };
-        assert_eq!(tx.total_output(), None, "総発行量を超えたら None");
+        assert_eq!(
+            tx.total_output(),
+            None,
+            "None once the total supply is exceeded"
+        );
     }
 
     #[test]
@@ -529,7 +537,10 @@ mod tests {
     #[test]
     fn relative_locktime_flag() {
         let mut input = TxInput::new(OutPoint::null());
-        assert!(!input.has_relative_locktime(), "SEQUENCE_FINAL では無効");
+        assert!(
+            !input.has_relative_locktime(),
+            "invalid under SEQUENCE_FINAL"
+        );
         input.sequence = 10;
         assert!(input.has_relative_locktime());
     }

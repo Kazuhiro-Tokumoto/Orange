@@ -224,7 +224,11 @@ mod tests {
         let before = header.encode();
         header.nonce = header.nonce.wrapping_add(1);
         let after = header.encode();
-        assert_eq!(before[..92], after[..92], "先頭 92 バイトは不変");
+        assert_eq!(
+            before[..92],
+            after[..92],
+            "the first 92 bytes are unchanged"
+        );
         assert_ne!(before[92..], after[92..]);
     }
 
@@ -313,14 +317,14 @@ mod tests {
         tampered.transactions[1].outputs[0].amount = Amount::from_oag(2).unwrap();
         assert!(
             !tampered.merkle_root_is_valid(),
-            "本体を書き換えたらマークルルートが合わなくなる"
+            "rewriting the body must break the merkle root"
         );
 
         let mut reordered = b;
         reordered.transactions.swap(1, 2);
         assert!(
             !reordered.merkle_root_is_valid(),
-            "順序の入れ替えも検出する"
+            "reordering is detected too"
         );
     }
 
@@ -380,12 +384,9 @@ mod tests {
         }
         assert!(
             filled.size() <= max && filled.size() > max - 200,
-            "実際には {} バイト",
+            "actually {} bytes",
             filled.size()
         );
-        assert!(
-            (1_000..=1_025).contains(&count),
-            "収容できたのは {count} 件"
-        );
+        assert!((1_000..=1_025).contains(&count), "only {count} fit");
     }
 }

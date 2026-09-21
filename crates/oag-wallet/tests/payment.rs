@@ -84,7 +84,7 @@ async fn mine(handle: &NodeHandle, payout: &Address, blocks: u64) {
     };
     tokio::time::timeout(Duration::from_secs(300), wait)
         .await
-        .expect("採掘が終わらない");
+        .expect("mining does not finish");
 }
 
 /// ウォレットの手持ちを RPC で数える。ウォレットの CLI と同じ道を通る。
@@ -99,7 +99,7 @@ async fn coins(client: &Client, store: &Keystore) -> Vec<Coin> {
     assert_eq!(
         result.get("truncated").and_then(Value::as_bool),
         Some(false),
-        "走査が打ち切られた"
+        "the scan was truncated"
     );
 
     let known: Vec<(String, Lock)> = store
@@ -155,8 +155,8 @@ async fn rpc(handle: &NodeHandle, data_dir: &Path) -> Client {
     // ポート 0 で空いているところを取る。試験を並行して走らせても衝突しない。
     let addr = start_rpc(handle.clone(), "127.0.0.1:0".parse().unwrap(), data_dir)
         .await
-        .expect("RPC を起こせる");
-    Client::new(addr, read_cookie(data_dir).expect("合言葉を読める"))
+        .expect("RPC can be started");
+    Client::new(addr, read_cookie(data_dir).expect("the cookie can be read"))
 }
 
 /// 掘った報酬を、ウォレットから別のウォレットへ送れること。
@@ -168,7 +168,7 @@ fn a_mined_coin_can_be_spent_to_another_wallet() {
         .unwrap();
 
     let dir = TempDir::new("send");
-    let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
+    let service = NodeService::start(NETWORK, &dir.0).expect("a node can be started");
     let handle = service.handle();
 
     let (alice, _) = Keystore::create(&dir.0.join("alice.json"), NETWORK, PASS, "").unwrap();
@@ -185,11 +185,11 @@ fn a_mined_coin_can_be_spent_to_another_wallet() {
         let available = spendable(&alice_coins, height + 1);
         assert!(
             available >= "20".parse::<Amount>().unwrap(),
-            "使える残高が足りない: {available}"
+            "the spendable balance is insufficient: {available}"
         );
         assert!(
             coins(&client, &bob).await.is_empty(),
-            "bob はまだ何も持っていないはず"
+            "bob should hold nothing yet"
         );
 
         // ── 組み立てて署名する。秘密鍵はノードに渡らない ──
@@ -201,8 +201,8 @@ fn a_mined_coin_can_be_spent_to_another_wallet() {
             next_height: height + 1,
             fee_rate: params::MIN_RELAY_FEE_RATE_PER_BYTE,
         };
-        let draft = build(&alice_coins, &spend).expect("組み立てられる");
-        let signed = sign(&draft, |lock| alice.key_for(lock)).expect("署名できる");
+        let draft = build(&alice_coins, &spend).expect("it can be built");
+        let signed = sign(&draft, |lock| alice.key_for(lock)).expect("it can be signed");
 
         // 入力の合計 = 出力の合計 + 手数料。
         let inputs = Amount::sum(draft.spent.iter().map(|o| o.amount)).unwrap();
@@ -214,20 +214,20 @@ fn a_mined_coin_can_be_spent_to_another_wallet() {
         let txid = client
             .call("sendrawtransaction", json!([hex]))
             .await
-            .expect("mempool が受け付ける");
+            .expect("the mempool accepts it");
         assert_eq!(txid.as_str().unwrap(), signed.txid().to_string());
 
         let mempool = client.call("getmempool", json!([])).await.unwrap();
         assert_eq!(
             mempool.as_array().unwrap().len(),
             1,
-            "mempool に入っていない"
+            "it is not in the mempool"
         );
 
         // 確定するまでは bob の残高は増えない。
         assert!(
             coins(&client, &bob).await.is_empty(),
-            "未確定なのに bob が受け取っている"
+            "bob received it although it is unconfirmed"
         );
 
         // ── ブロックに取り込ませる ──
@@ -241,25 +241,25 @@ fn a_mined_coin_can_be_spent_to_another_wallet() {
                 .as_array()
                 .unwrap()
                 .is_empty(),
-            "取り込まれたのに mempool に残っている"
+            "still in the mempool although it was included"
         );
 
         // ── bob が受け取っている ──
         let bob_coins = coins(&client, &bob).await;
-        assert_eq!(bob_coins.len(), 1, "bob の UTXO が 1 件でない");
+        assert_eq!(bob_coins.len(), 1, "bob does not have exactly one UTXO");
         assert_eq!(bob_coins[0].output.amount, amount);
-        assert!(!bob_coins[0].is_coinbase, "コインベース扱いになっている");
+        assert!(!bob_coins[0].is_coinbase, "treated as a coinbase");
 
         // ── alice はおつりを受け取り、使った分は消えている ──
         let after = coins(&client, &alice).await;
         assert!(
             after.iter().any(|c| c.output.amount == draft.change),
-            "おつりが見当たらない"
+            "the change is nowhere to be found"
         );
         for spent in &draft.tx.inputs {
             assert!(
                 !after.iter().any(|c| c.outpoint == spent.prev_out),
-                "使ったはずの UTXO が残っている: {:?}",
+                "a UTXO that should have been spent is still there: {:?}",
                 spent.prev_out
             );
         }
@@ -279,7 +279,7 @@ fn a_payment_can_go_through_a_partially_signed_transaction() {
         .unwrap();
 
     let dir = TempDir::new("pst");
-    let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
+    let service = NodeService::start(NETWORK, &dir.0).expect("a node can be started");
     let handle = service.handle();
 
     let (alice, _) = Keystore::create(&dir.0.join("alice.json"), NETWORK, PASS, "").unwrap();
@@ -298,23 +298,30 @@ fn a_payment_can_go_through_a_partially_signed_transaction() {
             next_height: height + 1,
             fee_rate: params::MIN_RELAY_FEE_RATE_PER_BYTE,
         };
-        let draft = build(&coins(&client, &alice).await, &spend).expect("組み立てられる");
+        let draft = build(&coins(&client, &alice).await, &spend).expect("it can be built");
 
         // ── ここまでがノードに繋がる側。以降は鍵を持つ側 ──
         let carried = Pst::from_draft(&draft).encode();
-        let mut offline = Pst::decode(&carried).expect("PST として読める");
-        assert!(!offline.is_complete(), "作った直後に署名が入っている");
-        assert_eq!(offline.fee().unwrap(), draft.fee, "手数料が見えていない");
+        let mut offline = Pst::decode(&carried).expect("it reads as a PST");
+        assert!(
+            !offline.is_complete(),
+            "a signature is present right after creation"
+        );
+        assert_eq!(offline.fee().unwrap(), draft.fee, "the fee is not visible");
 
         let added = offline
             .sign_with(|lock| alice.key_for(lock))
-            .expect("署名できる");
-        assert_eq!(added, draft.spent.len(), "署名の数が入力の数と合わない");
+            .expect("it can be signed");
+        assert_eq!(
+            added,
+            draft.spent.len(),
+            "the signature count does not match the input count"
+        );
         assert!(offline.is_complete());
 
         // ── 署名済みの PST を持ち帰る ──
-        let returned = Pst::decode(&offline.encode()).expect("署名済みでも読める");
-        let signed = returned.finalize().expect("仕上げられる");
+        let returned = Pst::decode(&offline.encode()).expect("it reads even once signed");
+        let signed = returned.finalize().expect("it can be finalized");
 
         // 直に署名したものと、署名以外は同じであること。
         //
@@ -333,24 +340,24 @@ fn a_payment_can_go_through_a_partially_signed_transaction() {
         assert_eq!(
             bare(&signed),
             bare(&direct),
-            "PST を通した結果が、直に署名したものと違う"
+            "the result through a PST differs from signing directly"
         );
         assert_eq!(signed.inputs[0].signature.len(), 64);
         assert_ne!(
             signed.inputs[0].signature, direct.inputs[0].signature,
-            "補助乱数が効いていない"
+            "the auxiliary randomness is not in effect"
         );
 
         let hex: String = signed.encode().iter().map(|b| format!("{b:02x}")).collect();
         let txid = client
             .call("sendrawtransaction", json!([hex]))
             .await
-            .expect("mempool が受け付ける");
+            .expect("the mempool accepts it");
         assert_eq!(txid.as_str().unwrap(), signed.txid().to_string());
 
         mine(&handle, &alice.default_address().unwrap(), 1).await;
         let bob_coins = coins(&client, &bob).await;
-        assert_eq!(bob_coins.len(), 1, "bob の UTXO が 1 件でない");
+        assert_eq!(bob_coins.len(), 1, "bob does not have exactly one UTXO");
         assert_eq!(bob_coins[0].output.amount, amount);
     });
 }
@@ -367,7 +374,7 @@ fn a_transaction_signed_by_the_wrong_key_is_refused() {
         .unwrap();
 
     let dir = TempDir::new("forge");
-    let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
+    let service = NodeService::start(NETWORK, &dir.0).expect("a node can be started");
     let handle = service.handle();
 
     let (alice, _) = Keystore::create(&dir.0.join("alice.json"), NETWORK, PASS, "").unwrap();
@@ -388,14 +395,18 @@ fn a_transaction_signed_by_the_wrong_key_is_refused() {
             next_height: height + 1,
             fee_rate: params::MIN_RELAY_FEE_RATE_PER_BYTE,
         };
-        let draft = build(&alice_coins, &spend).expect("組み立てはできてしまう");
+        let draft = build(&alice_coins, &spend).expect("building does succeed");
 
         // 自分の鍵で署名する。alice の鍵は持っていない。
-        let forged = sign(&draft, |_| Some(mallory_key(&mallory))).expect("署名自体はできる");
+        let forged =
+            sign(&draft, |_| Some(mallory_key(&mallory))).expect("signing itself does work");
         let hex: String = forged.encode().iter().map(|b| format!("{b:02x}")).collect();
 
         let result = client.call("sendrawtransaction", json!([hex])).await;
-        assert!(result.is_err(), "他人の資金を動かせてしまった: {result:?}");
+        assert!(
+            result.is_err(),
+            "someone else's funds could be moved: {result:?}"
+        );
 
         assert!(
             client
@@ -405,7 +416,7 @@ fn a_transaction_signed_by_the_wrong_key_is_refused() {
                 .as_array()
                 .unwrap()
                 .is_empty(),
-            "断ったのに mempool に入っている"
+            "it refused yet the entry is in the mempool"
         );
     });
 }
@@ -414,5 +425,5 @@ fn a_transaction_signed_by_the_wrong_key_is_refused() {
 fn mallory_key(store: &Keystore) -> oag_primitives::SecretKey {
     store
         .key_for(&Lock::from_address(&store.default_address().unwrap()))
-        .expect("自分の鍵は引ける")
+        .expect("our own key can be looked up")
 }

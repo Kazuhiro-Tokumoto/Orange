@@ -103,7 +103,7 @@ mod tests {
             assert_eq!(
                 genesis.header.hash().to_string(),
                 hash,
-                "{network} のジェネシスが変わっている"
+                "the genesis of {network} has changed"
             );
             assert_eq!(genesis.encode().len(), len, "{network}");
         }
@@ -141,7 +141,7 @@ mod tests {
             assert_eq!(
                 coinbase.outputs[0].lock,
                 Lock::unspendable(),
-                "{network} の報酬が焼却先になっていない"
+                "the {network} reward does not go to the burn address"
             );
             // 使えないことは oag-consensus の
             // an_output_locked_to_the_zero_key_cannot_be_spent で確かめている。
@@ -155,7 +155,7 @@ mod tests {
             genesis_for(Network::Regtest).transactions[0]
                 .outputs
                 .is_empty(),
-            "regtest のジェネシスが報酬を受け取っている"
+            "the regtest genesis collects a reward"
         );
     }
 
@@ -173,12 +173,12 @@ mod tests {
         // 未来の値を置くと、その時刻が来るまで 1 つも掘れない。
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("1970 年より後")
+            .expect("later than 1970")
             .as_secs() as i64;
         for network in Network::ALL {
             assert!(
                 genesis_for(network).header.timestamp < now,
-                "{network} のジェネシスが未来にある"
+                "the genesis of {network} is in the future"
             );
         }
     }
@@ -191,6 +191,6 @@ mod tests {
             .collect();
         hashes.sort_unstable();
         hashes.dedup();
-        assert_eq!(hashes.len(), 3, "ネットワーク間でジェネシスが衝突している");
+        assert_eq!(hashes.len(), 3, "genesis blocks collide between networks");
     }
 }

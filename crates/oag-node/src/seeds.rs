@@ -72,9 +72,9 @@ pub async fn resolve(network: Network) -> Vec<SocketAddr> {
                         count += 1;
                     }
                 }
-                crate::log_peer!("シード {host} から {count} 件");
+                crate::log_peer!("{count} from the seed {host}");
             }
-            Err(e) => crate::log_warn!("シード {host} を引けない: {e}"),
+            Err(e) => crate::log_warn!("cannot resolve the seed {host}: {e}"),
         }
     }
     found
@@ -88,7 +88,7 @@ mod tests {
     fn every_public_network_has_a_seed() {
         // 無ければ、新しいノードは人づてに IP を聞くしかない。
         for network in [Network::Mainnet, Network::Testnet] {
-            assert!(!seeds_for(network).is_empty(), "{network} にシードが無い");
+            assert!(!seeds_for(network).is_empty(), "{network} has no seed");
         }
     }
 
@@ -103,7 +103,7 @@ mod tests {
         for main in MAINNET_SEEDS {
             assert!(
                 !TESTNET_SEEDS.contains(main),
-                "{main} が mainnet と testnet の両方にある"
+                "{main} is on both mainnet and testnet"
             );
         }
     }

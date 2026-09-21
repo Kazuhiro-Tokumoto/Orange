@@ -60,10 +60,10 @@ impl Coin {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BuildError {
     /// 送る額が 0。
-    #[error("送る額が 0 である")]
+    #[error("the amount to send is 0")]
     ZeroAmount,
     /// 送る額がダスト閾値を下回る。
-    #[error("送る額 {amount} はダス閾値 {threshold} を下回る")]
+    #[error("the amount to send {amount} is below the dust threshold {threshold}")]
     BelowDust {
         /// 送ろうとした額。
         amount: Amount,
@@ -71,7 +71,7 @@ pub enum BuildError {
         threshold: Amount,
     },
     /// 残高が足りない。
-    #[error("残高が足りない (使える額 {available}、必要な額 {needed} 以上)")]
+    #[error("insufficient balance (available {available}, need at least {needed})")]
     Insufficient {
         /// 使える額の合計。
         available: Amount,
@@ -79,31 +79,31 @@ pub enum BuildError {
         needed: Amount,
     },
     /// 金額の計算が桁あふれした。
-    #[error("金額の計算が桁あふれした")]
+    #[error("the amount arithmetic overflowed")]
     Overflow,
     /// 宛先の支払い条件を、この実装は理解しない。
-    #[error("宛先の版数 {version} をこの実装は知らない。送ると資金を失う")]
+    #[error("this implementation does not know the recipient's version {version}; sending would lose the funds")]
     UnknownLockVersion {
         /// 宛先の版数。
         version: u8,
     },
     /// 署名に使う鍵が見つからない。
-    #[error("{index} 番目の入力に対応する鍵が無い")]
+    #[error("there is no key for input {index}")]
     MissingKey {
         /// 入力の位置。
         index: usize,
     },
     /// sighash を計算できない。
-    #[error("sighash を計算できない: {0}")]
+    #[error("cannot compute the sighash: {0}")]
     Sighash(String),
     /// まとめる相手がいない。
-    #[error("まとめられる UTXO が {usable} 件しかない。2 件以上が要る")]
+    #[error("only {usable} UTXOs can be consolidated; two or more are needed")]
     NothingToConsolidate {
         /// 使える UTXO の数。
         usable: usize,
     },
     /// まとめた結果が手数料に負ける。
-    #[error("集めた {total} では手数料 {fee} を賄えない")]
+    #[error("the {total} collected cannot cover the fee {fee}")]
     FeeExceedsTotal {
         /// 集めた額。
         total: Amount,
@@ -111,7 +111,7 @@ pub enum BuildError {
         fee: Amount,
     },
     /// 出来上がりが大きすぎる。
-    #[error("トランザクションが大きすぎる ({actual} バイト、上限 {max})")]
+    #[error("the transaction is too large ({actual} bytes, limit {max})")]
     TooLarge {
         /// 実際の大きさ。
         actual: usize,
@@ -553,7 +553,7 @@ mod tests {
         coins.push(coinbase_coin("10", &mine, 2, 990)); // まだ
 
         let draft = consolidate(&coins, &consolidate_of(lock_of(&mine), None)).unwrap();
-        assert_eq!(draft.tx.inputs.len(), 2, "成熟していない出力を畳んでいる");
+        assert_eq!(draft.tx.inputs.len(), 2, "folding an immature output");
 
         // 成熟済みが 1 件だけなら、まとめない。
         let young = vec![
@@ -608,15 +608,12 @@ mod tests {
         let size = draft.tx.encode().len();
         let taken = draft.tx.inputs.len();
 
-        assert!(
-            size <= params::MAX_TX_SIZE,
-            "上限を超えている ({size} バイト)"
-        );
-        assert!(taken < coins.len(), "2,000 件が 1 本に入ってしまっている");
+        assert!(size <= params::MAX_TX_SIZE, "over the limit ({size} bytes)");
+        assert!(taken < coins.len(), "two thousand fit into one transaction");
         // 入力 1 個がおよそ 102 バイトなので 900〜1,000 件のはず。
         assert!(
             (900..=1_000).contains(&taken),
-            "畳んだのが {taken} 件で、見込みから外れている"
+            "it folded {taken}, which is outside expectations"
         );
 
         // **もう 1 件足せばはみ出す。** 探索が最大まで詰めている証拠である。
@@ -626,7 +623,7 @@ mod tests {
         let bigger = consolidated_tx(&sorted[..taken + 1], &order);
         assert!(
             bigger.encode().len() > params::MAX_TX_SIZE,
-            "まだ詰められる"
+            "more could still be packed"
         );
     }
 
@@ -688,7 +685,7 @@ mod tests {
         let required = params::min_relay_fee(signed.encode().len()).unwrap();
         assert!(
             draft.fee >= required,
-            "手数料 {} が最低 {} を下回る",
+            "the fee {} is below the minimum {}",
             draft.fee,
             required
         );
@@ -705,7 +702,7 @@ mod tests {
         let spend = spend_of("40", lock_of(&key()), lock_of(&mine));
         let draft = build(&coins, &spend).unwrap();
 
-        assert_eq!(draft.spent.len(), 1, "50 OAG 1 個で足りるはず");
+        assert_eq!(draft.spent.len(), 1, "one 50 OAG output should be enough");
         assert_eq!(draft.spent[0].amount, "50".parse::<Amount>().unwrap());
     }
 
@@ -734,7 +731,7 @@ mod tests {
         let spend = spend_of("3", lock_of(&key()), lock_of(&mine));
         let draft = build(&coins, &spend).unwrap();
 
-        assert_eq!(draft.tx.outputs.len(), 1, "ダストのおつりを作っている");
+        assert_eq!(draft.tx.outputs.len(), 1, "it created dust change");
         assert_eq!(draft.change, Amount::ZERO);
         // 余りは丸ごと手数料になる。金額は依然として釣り合う。
         let inputs = Amount::sum(draft.spent.iter().map(|o| o.amount)).unwrap();
@@ -781,7 +778,7 @@ mod tests {
         let spend = spend_of("3", lock_of(&key()), lock_of(&mine));
         assert!(
             matches!(build(&coins, &spend), Err(BuildError::Insufficient { .. })),
-            "手数料を払えないのに通っている"
+            "it passed although the fee cannot be paid"
         );
     }
 
@@ -860,7 +857,7 @@ mod tests {
             let bytes: [u8; 64] = signed.inputs[index].signature.clone().try_into().unwrap();
             assert!(
                 pubkey.verify(&msg, &oag_primitives::Signature::from_bytes(bytes)),
-                "{index} 番目の署名が検証できない"
+                "the signature at index {index} does not verify"
             );
         }
     }
@@ -877,6 +874,6 @@ mod tests {
 
         let m0 = sighash(&draft.tx, &draft.spent, 0, SighashType::DEFAULT).unwrap();
         let m1 = sighash(&draft.tx, &draft.spent, 1, SighashType::DEFAULT).unwrap();
-        assert_ne!(m0, m1, "入力が違うのに sighash が同じ");
+        assert_ne!(m0, m1, "different inputs give the same sighash");
     }
 }

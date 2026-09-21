@@ -39,12 +39,12 @@ fn header(nonce: u64) -> BlockHeader {
 fn the_two_modes_agree_on_every_hash() {
     // **データセットの構築に 1 分前後かかるため、1 個の試験にまとめてある。**
     // 分けると構築が 2 回走る。
-    let light = RandomXVerifier::new(&seed(), 0).expect("light を作れる");
+    let light = RandomXVerifier::new(&seed(), 0).expect("light can be created");
 
     let started = Instant::now();
-    let fast = RandomXMiner::new(&seed(), 0).expect("fast を作れる (2 GB 要る)");
+    let fast = RandomXMiner::new(&seed(), 0).expect("fast can be created (needs 2 GB)");
     println!(
-        "データセットの構築: {:.1} 秒 ({} バイト)",
+        "building the dataset: {:.1} s ({} bytes)",
         started.elapsed().as_secs_f64(),
         RandomXMiner::dataset_bytes().unwrap_or(0)
     );
@@ -65,7 +65,7 @@ fn the_two_modes_agree_on_every_hash() {
         assert_eq!(
             light.hash(input).unwrap(),
             fast.hash(input).unwrap(),
-            "入力 {input:?} で食い違った"
+            "disagreed on input {input:?}"
         );
     }
 
@@ -75,7 +75,7 @@ fn the_two_modes_agree_on_every_hash() {
         assert_eq!(
             light.hash_header(&h).unwrap(),
             fast.hash_header(&h).unwrap(),
-            "nonce {nonce} で食い違った"
+            "disagreed at nonce {nonce}"
         );
         // 採掘器が触るのは符号化されたバイト列である。そちらも一致すること。
         assert_eq!(

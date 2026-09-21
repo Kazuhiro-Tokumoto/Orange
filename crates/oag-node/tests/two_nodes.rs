@@ -64,7 +64,7 @@ fn payout() -> Lock {
 /// ノードを 1 台起こす。
 fn start(tag: &str) -> (TempDir, NodeService) {
     let dir = TempDir::new(tag);
-    let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
+    let service = NodeService::start(NETWORK, &dir.0).expect("a node can be started");
     (dir, service)
 }
 
@@ -74,7 +74,7 @@ async fn listen(handle: NodeHandle) -> SocketAddr {
     // 走らせても衝突しない。
     let listener = Listener::bind(magic_for(NETWORK), "127.0.0.1:0".parse().unwrap())
         .await
-        .expect("待ち受けられる");
+        .expect("it can listen");
     let addr = listener.local_addr().unwrap();
     tokio::spawn(accept_loop(handle, listener));
     addr
@@ -90,31 +90,31 @@ async fn wait_for_height_within(handle: &NodeHandle, wanted: u64, what: &str, li
     let deadline = Instant::now() + limit;
     let mut last = 0;
     while Instant::now() < deadline {
-        let status = handle.status().await.expect("状態を引ける");
+        let status = handle.status().await.expect("the state can be read");
         last = status.height;
         if status.height >= wanted {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("{what}: 高さ {wanted} に届かなかった (今は {last})");
+    panic!("{what}: did not reach height {wanted} (now {last})");
 }
 
 /// 掘り終えるまで待つ。
 async fn wait_for_mining(handle: &NodeHandle, wanted: u64) {
-    wait_for_height(handle, wanted, "採掘").await;
+    wait_for_height(handle, wanted, "mined").await;
 }
 
 /// 追いついたノードが、追いつかれた側と同じ先端を持つこと。
 async fn assert_same_tip(a: &NodeHandle, b: &NodeHandle) {
     let sa = a.status().await.unwrap();
     let sb = b.status().await.unwrap();
-    assert_eq!(sa.tip, sb.tip, "先端が食い違っている");
-    assert_eq!(sa.height, sb.height, "高さが食い違っている");
-    assert_eq!(sa.utxo_count, sb.utxo_count, "UTXO の数が食い違っている");
+    assert_eq!(sa.tip, sb.tip, "the tips disagree");
+    assert_eq!(sa.height, sb.height, "the heights disagree");
+    assert_eq!(sa.utxo_count, sb.utxo_count, "the UTXO counts disagree");
     assert_eq!(
         sa.cumulative_work, sb.cumulative_work,
-        "累積作業量が食い違っている"
+        "the cumulative work disagrees"
     );
 }
 
@@ -144,20 +144,20 @@ fn a_block_the_peer_does_not_have_goes_back_to_the_queue() {
             .unwrap();
         wait_for_mining(&a, 1).await;
         let tip = a.status().await.unwrap().tip;
-        let block = a.block(tip).await.unwrap().expect("掘ったブロックがある");
+        let block = a.block(tip).await.unwrap().expect("there is a mined block");
         let accepted = b.accept_headers(vec![block.header]).await.unwrap();
-        assert_eq!(accepted.new, 1, "ヘッダが入っていない");
+        assert_eq!(accepted.new, 1, "the header is not present");
 
         // 持っていないピア (7) に割り振られてしまった状況を作る。時刻は
         // 固定してよい。ここで見たいのは時間切れ**ではない**経路である。
         assert_eq!(
             b.assign_downloads(7, 0).await.unwrap(),
             vec![tip],
-            "本体が要るはずのブロックが割り振られない"
+            "a block whose body is needed is not assigned"
         );
         assert!(
             b.assign_downloads(8, 0).await.unwrap().is_empty(),
-            "依頼中のものが二重に配られている"
+            "an in-flight request was handed out twice"
         );
 
         // 7 が「持っていない」と答える。
@@ -166,7 +166,7 @@ fn a_block_the_peer_does_not_have_goes_back_to_the_queue() {
         assert_eq!(
             b.assign_downloads(8, 0).await.unwrap(),
             vec![tip],
-            "断られたのに、時間切れまで他の相手へ回されない"
+            "refused, yet not reassigned to another peer before the timeout"
         );
     });
 }
@@ -190,13 +190,17 @@ fn a_new_node_catches_up_with_an_existing_chain() {
             .await
             .unwrap();
         wait_for_mining(&a, 5).await;
-        assert_eq!(b.status().await.unwrap().height, 0, "B はまだ空のはず");
+        assert_eq!(
+            b.status().await.unwrap().height,
+            0,
+            "B should still be empty"
+        );
 
         // B を A に繋ぐ。
         let addr = listen(a.clone()).await;
         tokio::spawn(dial(b.clone(), addr));
 
-        wait_for_height(&b, 5, "追いつき").await;
+        wait_for_height(&b, 5, "catch-up").await;
         assert_same_tip(&a, &b).await;
     });
 }
@@ -232,7 +236,7 @@ fn a_block_mined_while_connected_reaches_the_peer() {
             .unwrap();
         wait_for_mining(&a, 3).await;
 
-        wait_for_height(&b, 3, "中継").await;
+        wait_for_height(&b, 3, "relay").await;
         assert_same_tip(&a, &b).await;
     });
 }
@@ -262,12 +266,12 @@ fn a_synced_node_rebuilds_the_utxo_set_itself() {
 
         let addr = listen(a.clone()).await;
         tokio::spawn(dial(b.clone(), addr));
-        wait_for_height(&b, 4, "追いつき").await;
+        wait_for_height(&b, 4, "catch-up").await;
 
         let sb = b.status().await.unwrap();
         // ジェネシスは報酬を受け取らないため、高さ 4 なら UTXO は 4 件。
-        assert_eq!(sb.utxo_count, 4, "コインベース 4 件が UTXO になる");
-        assert_eq!(sb.indexed_blocks, 5, "ジェネシスを含めて 5 個");
+        assert_eq!(sb.utxo_count, 4, "four coinbases become UTXOs");
+        assert_eq!(sb.indexed_blocks, 5, "five including genesis");
         assert_same_tip(&a, &b).await;
     });
 }
@@ -276,8 +280,8 @@ fn a_synced_node_rebuilds_the_utxo_set_itself() {
 async fn wait_for_same_tip(a: &NodeHandle, b: &NodeHandle, what: &str) {
     let deadline = Instant::now() + SYNC_TIMEOUT;
     while Instant::now() < deadline {
-        let sa = a.status().await.expect("状態を引ける");
-        let sb = b.status().await.expect("状態を引ける");
+        let sa = a.status().await.expect("the state can be read");
+        let sb = b.status().await.expect("the state can be read");
         if sa.tip == sb.tip {
             return;
         }
@@ -286,7 +290,7 @@ async fn wait_for_same_tip(a: &NodeHandle, b: &NodeHandle, what: &str) {
     let sa = a.status().await.unwrap();
     let sb = b.status().await.unwrap();
     panic!(
-        "{what}: 先端が揃わなかった (A は高さ {} の {}、B は高さ {} の {})",
+        "{what}: the tips did not converge (A is {} at height {}, B is {} at height {})",
         sa.height, sa.tip, sb.height, sb.tip
     );
 }
@@ -327,7 +331,7 @@ fn two_chains_that_disagree_converge_on_the_heavier_one() {
 
         let light = a.status().await.unwrap();
         let heavy = b.status().await.unwrap();
-        assert_ne!(light.tip, heavy.tip, "同じチェーンを掘ってしまっている");
+        assert_ne!(light.tip, heavy.tip, "they ended up mining the same chain");
         assert!(light.cumulative_work < heavy.cumulative_work);
         let abandoned = light.tip;
 
@@ -335,17 +339,17 @@ fn two_chains_that_disagree_converge_on_the_heavier_one() {
         let addr = listen(b.clone()).await;
         tokio::spawn(dial(a.clone(), addr));
 
-        wait_for_height(&a, 6, "リオーグ").await;
-        wait_for_same_tip(&a, &b, "リオーグ").await;
+        wait_for_height(&a, 6, "reorg").await;
+        wait_for_same_tip(&a, &b, "reorg").await;
         assert_same_tip(&a, &b).await;
 
         let after = a.status().await.unwrap();
-        assert_ne!(after.tip, abandoned, "自分の枝を持ったままである");
+        assert_ne!(after.tip, abandoned, "it still holds its own branch");
         // 捨てた枝のコインベースは UTXO から消えていなければならない。
         // 残っていれば、存在しないはずの金が使える。
         assert_eq!(
             after.utxo_count, 6,
-            "取り消した 3 ブロックのコインベースが残っている"
+            "the coinbases of the three undone blocks are still there"
         );
     });
 }
@@ -394,12 +398,12 @@ fn an_even_race_is_settled_by_the_next_block() {
         assert_eq!(
             a.status().await.unwrap().tip,
             before_a.tip,
-            "同点で先端を明け渡している"
+            "it gave up the tip on a tie"
         );
         assert_eq!(
             b.status().await.unwrap().tip,
             before_b.tip,
-            "同点で先端を明け渡している"
+            "it gave up the tip on a tie"
         );
 
         // B が 1 つ積む。これで B の方が重くなる。
@@ -409,13 +413,13 @@ fn an_even_race_is_settled_by_the_next_block() {
         wait_for_mining(&b, 5).await;
 
         // A は 4 ブロックすべてを取り消して B の枝に乗り換える。
-        wait_for_height(&a, 5, "同点の決着").await;
-        wait_for_same_tip(&a, &b, "同点の決着").await;
+        wait_for_height(&a, 5, "settling a tie").await;
+        wait_for_same_tip(&a, &b, "settling a tie").await;
         assert_same_tip(&a, &b).await;
         assert_eq!(
             a.status().await.unwrap().utxo_count,
             5,
-            "取り消した枝のコインベースが残っている"
+            "the coinbase of the undone branch is still there"
         );
     });
 }
@@ -454,19 +458,19 @@ fn a_transaction_reaches_the_peers_mempool() {
         a.start_mining(lock.clone(), Some(mine_to), MiningMode::light())
             .await
             .unwrap();
-        wait_for_height_within(&a, mine_to, "採掘", MATURITY_TIMEOUT).await;
+        wait_for_height_within(&a, mine_to, "mined", MATURITY_TIMEOUT).await;
 
         // B を繋いで追いつかせる。
         let addr = listen(a.clone()).await;
         tokio::spawn(dial(b.clone(), addr));
-        wait_for_height_within(&b, mine_to, "追いつき", MATURITY_TIMEOUT).await;
+        wait_for_height_within(&b, mine_to, "catch-up", MATURITY_TIMEOUT).await;
 
         // 使えるコインベースを 1 つ選ぶ。
         let coins = a.scan_utxos(vec![lock.clone()], 500).await.unwrap();
         let spendable = coins
             .into_iter()
             .find(|c| c.entry.height + params::COINBASE_MATURITY <= mine_to)
-            .expect("成熟したコインベースがあるはず");
+            .expect("there should be a mature coinbase");
 
         // 1 入力 1 出力。差額はそのまま手数料になる。
         let value = spendable.entry.output.amount;
@@ -490,7 +494,7 @@ fn a_transaction_reaches_the_peers_mempool() {
         let txid = tx.txid();
 
         // A に入れる。ここを通った時点で検証は済んでいる。
-        let accepted = a.submit_tx(tx).await.expect("A が受け付ける");
+        let accepted = a.submit_tx(tx).await.expect("A accepts it");
         assert_eq!(accepted, txid);
 
         // B の mempool に届くまで待つ。
@@ -499,7 +503,7 @@ fn a_transaction_reaches_the_peers_mempool() {
             if b.mempool_txids().await.unwrap().contains(&txid) {
                 break;
             }
-            assert!(Instant::now() < deadline, "B の mempool に届かなかった");
+            assert!(Instant::now() < deadline, "it did not reach B's mempool");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
@@ -508,7 +512,7 @@ fn a_transaction_reaches_the_peers_mempool() {
             .mempool_tx(txid)
             .await
             .unwrap()
-            .expect("B が実体を持っている");
+            .expect("B holds the object");
         assert_eq!(got.txid(), txid);
         // A も手放していない。
         assert!(a.mempool_txids().await.unwrap().contains(&txid));
@@ -553,16 +557,16 @@ fn an_unrequested_transaction_is_refused_without_being_verified() {
 
         // ピアから来たことにする。誰もこれを頼んでいない。
         let refused = node.submit_tx_from(tx.clone(), Some(1)).await;
-        assert!(refused.is_err(), "頼んでいないものを受け付けてしまった");
+        assert!(refused.is_err(), "something unrequested was accepted");
 
         // 自分で出したものは、この規則の対象外である。財布からの送金が
         // 塞がれては困る。こちらは中身が駄目なので別の理由で落ちる。
         let own = node.submit_tx(tx).await;
-        assert!(own.is_err(), "この中身は検証に落ちるはず");
+        assert!(own.is_err(), "these contents should fail validation");
         assert_ne!(
             own.unwrap_err(),
             refused.unwrap_err(),
-            "断る理由が同じでは、検証を省いた証拠にならない"
+            "if the reason for refusing is the same, it is no proof that validation was skipped"
         );
     });
 }
@@ -607,7 +611,7 @@ fn a_block_travels_to_a_node_that_is_not_directly_connected() {
             .await
             .unwrap();
         wait_for_mining(&a, 1).await;
-        wait_for_height(&c, 1, "初期同期").await;
+        wait_for_height(&c, 1, "initial sync").await;
 
         // ここから先が中継である。C はすでに繋がっていて揃っており、
         // 取りに行く理由がない。**B が知らせなければ届かない。**
@@ -615,7 +619,7 @@ fn a_block_travels_to_a_node_that_is_not_directly_connected() {
             .await
             .unwrap();
         wait_for_mining(&a, 3).await;
-        wait_for_height(&c, 3, "中継").await;
+        wait_for_height(&c, 3, "relay").await;
 
         assert_same_tip(&a, &c).await;
         assert_same_tip(&b, &c).await;

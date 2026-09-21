@@ -99,7 +99,7 @@ impl GenesisSpec {
     /// 指定した nonce のジェネシスブロックを組み立てる。
     pub fn build(&self, nonce: u64) -> Block {
         let coinbase = self.coinbase();
-        let merkle_root = merkle::merkle_root(&[coinbase.txid()]).expect("1 件はある");
+        let merkle_root = merkle::merkle_root(&[coinbase.txid()]).expect("there is at least one");
         Block {
             header: BlockHeader {
                 version: oag_consensus::block::CURRENT_BLOCK_VERSION,
@@ -181,7 +181,7 @@ mod tests {
             .build(0)
             .header
             .hash();
-        assert_ne!(a, b, "刻んだ内容が違えば別のチェーンになる");
+        assert_ne!(a, b, "different stamped contents make a different chain");
     }
 
     #[test]
@@ -194,7 +194,7 @@ mod tests {
         }
         hashes.sort_unstable();
         hashes.dedup();
-        assert_eq!(hashes.len(), 3, "ネットワークごとに異なるジェネシスになる");
+        assert_eq!(hashes.len(), 3, "each network gets a different genesis");
     }
 
     #[test]
@@ -210,7 +210,7 @@ mod tests {
         let s = spec();
         // 先頭バイトが 0 になるハッシュを探す (確率 1/256)。
         let found =
-            search(&s, 10_000, |b| b.header.hash().as_bytes()[0] == 0).expect("見つかるはず");
+            search(&s, 10_000, |b| b.header.hash().as_bytes()[0] == 0).expect("should be found");
         assert_eq!(found.header.hash().as_bytes()[0], 0);
     }
 }

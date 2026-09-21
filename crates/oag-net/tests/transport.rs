@@ -27,7 +27,7 @@ macro_rules! within {
     ($what:expr) => {
         tokio::time::timeout(LIMIT, $what)
             .await
-            .expect("制限時間を超えた")
+            .expect("the time limit was exceeded")
     };
 }
 
@@ -91,7 +91,7 @@ fn big_block(count: u64) -> Block {
 async fn listener(magic: [u8; MAGIC_LEN]) -> (Listener, SocketAddr) {
     let listener = Listener::bind(magic, "127.0.0.1:0".parse().unwrap())
         .await
-        .expect("待ち受けられる");
+        .expect("it can listen");
     let addr = listener.local_addr().unwrap();
     (listener, addr)
 }
@@ -124,7 +124,7 @@ async fn messages_travel_in_both_directions() {
         conn.handshake(version(2, 0)).await.unwrap();
         // ping が来たら pong を返す。
         let Message::Ping(nonce) = conn.recv().await.unwrap() else {
-            panic!("ping を期待した");
+            panic!("expected a ping");
         };
         conn.send(&Message::Pong(nonce)).await.unwrap();
         conn.recv().await
@@ -147,7 +147,7 @@ async fn a_large_block_survives_fragmentation() {
     // 溜めながら組み立てられることを確かめる。
     let block = big_block(1_000);
     let encoded_len = frame::encode(MAGIC, &Message::Block(Box::new(block.clone()))).len();
-    assert!(encoded_len > 100_000, "実際には {encoded_len} バイト");
+    assert!(encoded_len > 100_000, "actually {encoded_len} bytes");
 
     let (listener, addr) = listener(MAGIC).await;
     let sent = block.clone();
@@ -183,7 +183,7 @@ async fn several_messages_sent_at_once_are_read_one_by_one() {
         assert_eq!(
             within!(client.recv()).unwrap(),
             Message::Ping(i),
-            "{i} 個目"
+            "entry {i}"
         );
     }
     within!(server).unwrap();
@@ -204,7 +204,7 @@ async fn closing_the_connection_is_detected() {
 
     assert!(
         matches!(within!(client.recv()), Err(TransportError::Closed)),
-        "接続が閉じられたことを検出できていない"
+        "the closed connection was not detected"
     );
 }
 
@@ -223,7 +223,7 @@ async fn a_peer_on_another_network_is_rejected() {
     let result = within!(server).unwrap();
     assert!(
         matches!(result, Err(TransportError::Frame(_))),
-        "別のネットワークの相手が受け入れられている: {result:?}"
+        "a peer from another network was accepted: {result:?}"
     );
 }
 
@@ -254,7 +254,7 @@ async fn an_absurd_declared_length_is_rejected() {
             result,
             Err(TransportError::Frame(oag_net::FrameError::PayloadTooLarge { max, .. })) if max == MAX_PAYLOAD
         ),
-        "巨大な長さの宣言が拒否されていない: {result:?}"
+        "an enormous declared length was not rejected: {result:?}"
     );
 }
 
@@ -273,7 +273,7 @@ async fn a_message_before_the_handshake_is_rejected() {
     let result = within!(server).unwrap();
     assert!(
         matches!(result, Err(TransportError::Handshake(_))),
-        "名乗る前の要求が受け入れられている: {result:?}"
+        "a request before identifying was accepted: {result:?}"
     );
 }
 
@@ -292,7 +292,7 @@ async fn connecting_to_oneself_is_detected_over_the_wire() {
 
     assert!(
         client_result.is_err() || server_result.is_err(),
-        "自己接続が検出されていない"
+        "self-connection was not detected"
     );
 }
 

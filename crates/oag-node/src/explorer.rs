@@ -52,17 +52,17 @@ const MAX_UTXOS: usize = 500;
 pub async fn start_explorer(handle: NodeHandle, addr: SocketAddr) -> Result<SocketAddr, String> {
     let listener = TcpListener::bind(addr)
         .await
-        .map_err(|e| format!("{addr} でエクスプローラを待ち受けられない: {e}"))?;
+        .map_err(|e| format!("cannot listen for the explorer on {addr}: {e}"))?;
     let bound = listener
         .local_addr()
-        .map_err(|e| format!("住所を確かめられない: {e}"))?;
+        .map_err(|e| format!("cannot determine the address: {e}"))?;
 
     tokio::spawn(async move {
         loop {
             let (stream, _) = match listener.accept().await {
                 Ok(pair) => pair,
                 Err(e) => {
-                    crate::log_warn!("エクスプローラの接続を受け入れられない: {e}");
+                    crate::log_warn!("cannot accept an explorer connection: {e}");
                     return;
                 }
             };
@@ -89,7 +89,7 @@ async fn serve_connection(mut stream: TcpStream, handle: NodeHandle) -> std::io:
     let target = match read_target(&mut stream, &mut buffer).await {
         Some(target) => target,
         None => {
-            let body = page("400", "<h1>要求を読めない</h1>");
+            let body = page("400", "<h1>cannot read the request</h1>");
             return write_response(
                 &mut stream,
                 &Response {
@@ -171,7 +171,7 @@ async fn route(handle: &NodeHandle, target: &str) -> Response {
         ["tx", rest @ ..] => tx_page(handle, &rest.join("/")).await,
         ["address", rest @ ..] => address_page(handle, &rest.join("/"), query).await,
         ["mempool"] => mempool_page(handle).await,
-        _ => not_found("そのような頁は無い"),
+        _ => not_found("no such page"),
     }
 }
 
@@ -187,37 +187,37 @@ async fn overview(handle: &NodeHandle) -> Response {
     body.push_str(&search_box(""));
 
     body.push_str("<div class=\"grid\">");
-    stat(&mut body, "ネットワーク", &esc(&status.network.to_string()));
-    stat(&mut body, "高さ", &status.height.to_string());
-    stat(&mut body, "次の難易度", &group(status.next_difficulty));
+    stat(&mut body, "network", &esc(&status.network.to_string()));
+    stat(&mut body, "height", &status.height.to_string());
+    stat(&mut body, "next difficulty", &group(status.next_difficulty));
     stat(&mut body, "UTXO", &group(status.utxo_count));
     stat(&mut body, "mempool", &mempool.len().to_string());
     stat(
         &mut body,
-        "索引",
+        "index",
         match indexed {
-            Some(_) => "<span class=\"ok\">あり</span>",
-            None => "<span class=\"warn\">なし</span>",
+            Some(_) => "<span class=\"ok\">yes</span>",
+            None => "<span class=\"warn\">no</span>",
         },
     );
     body.push_str("</div>");
 
     if indexed.is_none() {
         body.push_str(
-            "<p class=\"note\">索引を持っていないので、取引 ID とアドレスでは引けません。\
-             <code>--index</code> を付けて起動すると使えるようになります。</p>",
+            "<p class=\"note\">no index is held, so transaction IDs and addresses cannot be \
+             looked up. Start the node with <code>--index</code> to enable them.</p>",
         );
     }
 
-    body.push_str("<h2>先端</h2>");
+    body.push_str("<h2>tip</h2>");
     body.push_str(&format!(
         "<p class=\"mono break\">{}</p>",
         esc(&status.tip.to_string())
     ));
 
     // 最近のブロック。
-    body.push_str("<h2>最近のブロック</h2><div class=\"wrap\"><table>");
-    body.push_str("<tr><th>高さ</th><th>時刻 (UTC)</th><th>取引</th><th>大きさ</th><th>難易度</th><th>ハッシュ</th></tr>");
+    body.push_str("<h2>recent blocks</h2><div class=\"wrap\"><table>");
+    body.push_str("<tr><th>height</th><th>time (UTC)</th><th>txs</th><th>size</th><th>difficulty</th><th>hash</th></tr>");
     // **本体は引かない。** 高さごとに 2 往復して 25 個のブロックを丸ごと
     // 復号すると、満杯の鎖では 5 MB を読んで 16,000 件あまりの取引を組み
     // 立てることになる。表に出すのは 1 行 5 項目だけである。
@@ -245,19 +245,19 @@ async fn overview(handle: &NodeHandle) -> Response {
 
     if !mempool.is_empty() {
         body.push_str(&format!(
-            "<h2>mempool</h2><p><a href=\"/mempool\">未確定の取引 {} 件</a></p>",
+            "<h2>mempool</h2><p><a href=\"/mempool\">{} unconfirmed transactions</a></p>",
             mempool.len()
         ));
     }
 
-    ok(page("Orange エクスプローラ", &body))
+    ok(page("Orange explorer", &body))
 }
 
 async fn search(handle: &NodeHandle, query: &str) -> Response {
     let q = query_value(query, "q").unwrap_or_default();
     let q = q.trim().to_string();
     if q.is_empty() {
-        return not_found("何も入力されていない");
+        return not_found("nothing was entered");
     }
 
     // 数字だけなら高さ。
@@ -279,50 +279,58 @@ async fn search(handle: &NodeHandle, query: &str) -> Response {
 async fn block_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
     let hash = if key.chars().all(|c| c.is_ascii_digit()) {
         let Ok(height) = key.parse::<u64>() else {
-            return not_found(&format!("{key} は高さとして読めない"));
+            return not_found(&format!("{key} cannot be read as a height"));
         };
         match handle.hash_at_height(height).await {
             Ok(Some(hash)) => hash,
-            Ok(None) => return not_found(&format!("高さ {height} のブロックは無い")),
+            Ok(None) => return not_found(&format!("there is no block at height {height}")),
             Err(e) => return error_page(&e),
         }
     } else {
         match key.parse::<Hash>() {
             Ok(hash) => hash,
-            Err(_) => return not_found(&format!("{key} はブロックハッシュとして読めない")),
+            Err(_) => return not_found(&format!("{key} cannot be read as a block hash")),
         }
     };
 
     let block = match handle.block(hash).await {
         Ok(Some(block)) => block,
-        Ok(None) => return not_found("そのブロックの本体を持っていない"),
+        Ok(None) => return not_found("the body of that block is not held"),
         Err(e) => return error_page(&e),
     };
 
     let mut body = String::new();
     body.push_str(&search_box(""));
-    let _ = write!(body, "<h1>ブロック {}</h1>", block.header.height);
+    let _ = write!(body, "<h1>block {}</h1>", block.header.height);
     body.push_str(&format!(
         "<p class=\"mono break\">{}</p>",
         esc(&hash.to_string())
     ));
 
     body.push_str("<div class=\"wrap\"><table>");
-    row(&mut body, "高さ", &block.header.height.to_string());
-    row(&mut body, "時刻 (UTC)", &utc(block.header.timestamp));
-    row(&mut body, "unix 秒", &block.header.timestamp.to_string());
-    row(&mut body, "難易度", &group(block.header.difficulty));
-    row(&mut body, "ノンス", &group(block.header.nonce));
-    row(&mut body, "版数", &block.header.version.to_string());
+    row(&mut body, "height", &block.header.height.to_string());
+    row(&mut body, "time (UTC)", &utc(block.header.timestamp));
     row(
         &mut body,
-        "大きさ",
+        "unix seconds",
+        &block.header.timestamp.to_string(),
+    );
+    row(&mut body, "difficulty", &group(block.header.difficulty));
+    row(&mut body, "nonce", &group(block.header.nonce));
+    row(&mut body, "version", &block.header.version.to_string());
+    row(
+        &mut body,
+        "size",
         &format!("{} B", group(block.size() as u64)),
     );
-    row(&mut body, "取引数", &block.transactions.len().to_string());
+    row(
+        &mut body,
+        "transactions",
+        &block.transactions.len().to_string(),
+    );
     row_raw(
         &mut body,
-        "マークル根",
+        "merkle root",
         &format!(
             "<span class=\"mono break\">{}</span>",
             esc(&block.header.merkle_root.to_string())
@@ -332,7 +340,7 @@ async fn block_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
     if block.header.height > 0 {
         row_raw(
             &mut body,
-            "親",
+            "parent",
             &format!(
                 "<a class=\"mono break\" href=\"/block/{p}\">{p}</a>",
                 p = esc(&prev.to_string())
@@ -349,11 +357,11 @@ async fn block_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
         .min(block.transactions.len());
     let upto = (from + PAGE).min(block.transactions.len());
 
-    body.push_str("<h2>取引</h2>");
+    body.push_str("<h2>transactions</h2>");
     if block.transactions.len() > PAGE && upto > from {
         let _ = write!(
             body,
-            "<p class=\"note\">{} 件中 {}〜{} 件目</p>",
+            "<p class=\"note\">{} to {} of {}</p>",
             group(block.transactions.len() as u64),
             from + 1,
             upto
@@ -367,23 +375,23 @@ async fn block_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
     if block.header.height > 0 {
         let _ = write!(
             nav,
-            "<a href=\"/block/{}\">← 前</a> ",
+            "<a href=\"/block/{}\">&larr; previous</a> ",
             block.header.height - 1
         );
     }
     let _ = write!(
         nav,
-        "<a href=\"/block/{}\">次 →</a>",
+        "<a href=\"/block/{}\">next &rarr;</a>",
         block.header.height + 1
     );
     let _ = write!(body, "<p class=\"nav\">{nav}</p>");
 
-    ok(page(&format!("ブロック {}", block.header.height), &body))
+    ok(page(&format!("block {}", block.header.height), &body))
 }
 
 async fn tx_page(handle: &NodeHandle, key: &str) -> Response {
     let Ok(txid) = key.parse::<Hash>() else {
-        return not_found(&format!("{key} は取引 ID として読めない"));
+        return not_found(&format!("{key} cannot be read as a transaction ID"));
     };
     let network = handle.network();
 
@@ -396,7 +404,7 @@ async fn tx_page(handle: &NodeHandle, key: &str) -> Response {
 
     let mut body = String::new();
     body.push_str(&search_box(""));
-    body.push_str("<h1>取引</h1>");
+    body.push_str("<h1>transaction</h1>");
     body.push_str(&format!(
         "<p class=\"mono break\">{}</p>",
         esc(&txid.to_string())
@@ -404,20 +412,20 @@ async fn tx_page(handle: &NodeHandle, key: &str) -> Response {
 
     if let Some(record) = record {
         body.push_str(&record_detail(&record, network));
-        return ok(page("取引", &body));
+        return ok(page("transaction", &body));
     }
 
     // 索引に無ければ mempool を見る。
     match handle.mempool_tx(txid).await {
         Ok(Some(tx)) => {
-            body.push_str("<p class=\"warn\">未確定 (mempool にある)</p>");
+            body.push_str("<p class=\"warn\">unconfirmed (in the mempool)</p>");
             body.push_str(&tx_detail(&tx, &[], network));
-            ok(page("取引", &body))
+            ok(page("transaction", &body))
         }
         Ok(None) if !indexed => not_found(
-            "索引が無いので、確定した取引を ID では引けない。--index を付けて起動すること",
+            "without an index, a confirmed transaction cannot be looked up by ID; start the node with --index",
         ),
-        Ok(None) => not_found("そのような取引は無い"),
+        Ok(None) => not_found("there is no such transaction"),
         Err(e) => error_page(&e),
     }
 }
@@ -426,7 +434,7 @@ async fn address_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
     let network = handle.network();
     let address = match Address::decode_on(network, key) {
         Ok(address) => address,
-        Err(e) => return not_found(&format!("{key} はアドレスとして読めない: {e}")),
+        Err(e) => return not_found(&format!("{key} cannot be read as an address: {e}")),
     };
     let lock = Lock::from_address(&address);
     let from: u64 = query_value(query, "from")
@@ -435,7 +443,7 @@ async fn address_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
 
     let mut body = String::new();
     body.push_str(&search_box(key));
-    body.push_str("<h1>アドレス</h1>");
+    body.push_str("<h1>address</h1>");
     body.push_str(&format!("<p class=\"mono break\">{}</p>", esc(key)));
 
     // 残高は索引に頼らない。UTXO セットを丸ごと見て拾う。
@@ -448,17 +456,17 @@ async fn address_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
     body.push_str("<div class=\"grid\">");
     stat(
         &mut body,
-        "残高",
+        "balance",
         &match balance {
             Some(amount) => format!("{} OAG", esc(&amount.to_string())),
-            None => "計算できない".to_string(),
+            None => "cannot be computed".to_string(),
         },
     );
     stat(&mut body, "UTXO", &utxos.len().to_string());
     body.push_str("</div>");
     if utxos.len() >= MAX_UTXOS {
         body.push_str(
-            "<p class=\"warn\">UTXO が上限に達したため、残高は実際より少なく出ています。</p>",
+            "<p class=\"warn\">the UTXO scan hit its limit, so this balance is lower than the real one.</p>",
         );
     }
 
@@ -472,9 +480,9 @@ async fn address_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
             let more = history.len() > PAGE;
             let shown = &history[..history.len().min(PAGE)];
 
-            body.push_str("<h2>履歴 <span class=\"note\">(古い順)</span></h2>");
+            body.push_str("<h2>history <span class=\"note\">(oldest first)</span></h2>");
             if shown.is_empty() {
-                body.push_str("<p class=\"note\">この範囲に取引はありません。</p>");
+                body.push_str("<p class=\"note\">no transactions in this range.</p>");
             } else {
                 body.push_str(&history_table(shown, &lock, network));
             }
@@ -482,7 +490,7 @@ async fn address_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
                 let next = shown.last().map(|r| r.location.height + 1).unwrap_or(from);
                 let _ = write!(
                     body,
-                    "<p class=\"nav\"><a href=\"/address/{}?from={}\">続き →</a></p>",
+                    "<p class=\"nav\"><a href=\"/address/{}?from={}\">more &rarr;</a></p>",
                     esc(key),
                     next
                 );
@@ -490,21 +498,21 @@ async fn address_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
             if from > 0 {
                 let _ = write!(
                     body,
-                    "<p class=\"nav\"><a href=\"/address/{}\">← 先頭へ</a></p>",
+                    "<p class=\"nav\"><a href=\"/address/{}\">&larr; back to start</a></p>",
                     esc(key)
                 );
             }
         }
         _ => body.push_str(
-            "<h2>履歴</h2><p class=\"warn\">索引を持っていないので履歴を出せません。\
-             <code>--index</code> を付けて起動してください。</p>",
+            "<h2>history</h2><p class=\"warn\">no index is held, so history cannot be shown. \
+             Start the node with <code>--index</code>.</p>",
         ),
     }
 
     // 保有中の UTXO。
     if !utxos.is_empty() {
-        body.push_str("<h2>未使用の出力</h2><div class=\"wrap\"><table>");
-        body.push_str("<tr><th>取引</th><th>番号</th><th>金額</th><th>高さ</th><th>種別</th></tr>");
+        body.push_str("<h2>unspent outputs</h2><div class=\"wrap\"><table>");
+        body.push_str("<tr><th>transaction</th><th>index</th><th>amount</th><th>height</th><th>kind</th></tr>");
         for utxo in &utxos {
             let _ = write!(
                 body,
@@ -516,16 +524,16 @@ async fn address_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
                 a = esc(&utxo.entry.output.amount.to_string()),
                 h = utxo.entry.height,
                 c = if utxo.entry.is_coinbase {
-                    "採掘"
+                    "mined"
                 } else {
-                    "通常"
+                    "ordinary"
                 },
             );
         }
         body.push_str("</table></div>");
     }
 
-    ok(page("アドレス", &body))
+    ok(page("address", &body))
 }
 
 async fn mempool_page(handle: &NodeHandle) -> Response {
@@ -535,11 +543,11 @@ async fn mempool_page(handle: &NodeHandle) -> Response {
     };
     let mut body = String::new();
     body.push_str(&search_box(""));
-    let _ = write!(body, "<h1>mempool ({} 件)</h1>", txids.len());
+    let _ = write!(body, "<h1>mempool ({} entries)</h1>", txids.len());
     if txids.is_empty() {
-        body.push_str("<p class=\"note\">未確定の取引はありません。</p>");
+        body.push_str("<p class=\"note\">there are no unconfirmed transactions.</p>");
     } else {
-        body.push_str("<div class=\"wrap\"><table><tr><th>取引 ID</th></tr>");
+        body.push_str("<div class=\"wrap\"><table><tr><th>transaction ID</th></tr>");
         for txid in &txids {
             let _ = write!(
                 body,
@@ -567,7 +575,7 @@ fn tx_pager(hash: &Hash, from: usize, upto: usize, total: usize) -> String {
     if from > 0 {
         let _ = write!(
             pager,
-            "<a href=\"/block/{here}?from={f}\">← 前の {p} 件</a> ",
+            "<a href=\"/block/{here}?from={f}\">&larr; previous {p}</a> ",
             f = from.saturating_sub(PAGE),
             p = PAGE
         );
@@ -575,7 +583,7 @@ fn tx_pager(hash: &Hash, from: usize, upto: usize, total: usize) -> String {
     if upto < total {
         let _ = write!(
             pager,
-            "<a href=\"/block/{here}?from={f}\">次の {p} 件 →</a>",
+            "<a href=\"/block/{here}?from={f}\">next {p} &rarr;</a>",
             f = upto,
             p = PAGE
         );
@@ -592,7 +600,7 @@ fn tx_pager(hash: &Hash, from: usize, upto: usize, total: usize) -> String {
 /// 0 は必ずコインベースである。
 fn tx_table(block: &Block, network: Network, from: usize, upto: usize) -> String {
     let mut out = String::from("<div class=\"wrap\"><table>");
-    out.push_str("<tr><th>#</th><th>取引 ID</th><th>入力</th><th>出力</th><th>合計</th></tr>");
+    out.push_str("<tr><th>#</th><th>transaction ID</th><th>in</th><th>out</th><th>total</th></tr>");
     for (position, tx) in block.transactions[from..upto].iter().enumerate() {
         let position = from + position;
         let total = Amount::sum(tx.outputs.iter().map(|o| o.amount));
@@ -602,7 +610,7 @@ fn tx_table(block: &Block, network: Network, from: usize, upto: usize) -> String
              <td>{i}</td><td>{o}</td><td class=\"num\">{t} OAG</td></tr>",
             p = position,
             cb = if tx.is_coinbase() {
-                " <span class=\"tag\">採掘</span>"
+                " <span class=\"tag\">mined</span>"
             } else {
                 ""
             },
@@ -622,7 +630,7 @@ fn tx_table(block: &Block, network: Network, from: usize, upto: usize) -> String
 
 fn history_table(records: &[TxRecord], lock: &Lock, network: Network) -> String {
     let mut out = String::from("<div class=\"wrap\"><table>");
-    out.push_str("<tr><th>高さ</th><th>取引 ID</th><th>増減</th></tr>");
+    out.push_str("<tr><th>height</th><th>transaction ID</th><th>change</th></tr>");
     for record in records {
         // このアドレスから見た増減を出す。受け取った出力の合計から、
         // 使った入力の合計を引く。
@@ -663,15 +671,15 @@ fn history_table(records: &[TxRecord], lock: &Lock, network: Network) -> String 
 fn record_detail(record: &TxRecord, network: Network) -> String {
     let mut out = String::new();
     out.push_str("<div class=\"wrap\"><table>");
-    row_raw(&mut out, "状態", "<span class=\"ok\">確定済み</span>");
+    row_raw(&mut out, "status", "<span class=\"ok\">confirmed</span>");
     row_raw(
         &mut out,
-        "ブロック",
+        "block",
         &format!("<a href=\"/block/{h}\">{h}</a>", h = record.location.height),
     );
     row_raw(
         &mut out,
-        "ブロックハッシュ",
+        "block hash",
         &format!(
             "<a class=\"mono break\" href=\"/block/{b}\">{b}</a>",
             b = esc(&record.location.block.to_string())
@@ -679,7 +687,7 @@ fn record_detail(record: &TxRecord, network: Network) -> String {
     );
     row(
         &mut out,
-        "ブロック内の位置",
+        "index within the block",
         &record.location.position.to_string(),
     );
     out.push_str("</table></div>");
@@ -695,20 +703,16 @@ fn tx_detail(
     let mut out = String::new();
 
     out.push_str("<div class=\"wrap\"><table>");
-    row(&mut out, "版数", &tx.version.to_string());
-    row(
-        &mut out,
-        "大きさ",
-        &format!("{} B", group(tx.size() as u64)),
-    );
+    row(&mut out, "version", &tx.version.to_string());
+    row(&mut out, "size", &format!("{} B", group(tx.size() as u64)));
     row(&mut out, "locktime", &tx.locktime.to_string());
     row(
         &mut out,
-        "種別",
+        "kind",
         if tx.is_coinbase() {
-            "採掘 (コインベース)"
+            "mined (coinbase)"
         } else {
-            "通常"
+            "ordinary"
         },
     );
 
@@ -721,25 +725,27 @@ fn tx_detail(
         let in_total: u128 = spent.iter().flatten().map(|o| o.amount.to_atomic()).sum();
         row(
             &mut out,
-            "手数料",
+            "fee",
             &format!("{} OAG", atomic_to_oag(in_total.saturating_sub(out_total))),
         );
     }
     row(
         &mut out,
-        "出力の合計",
+        "total out",
         &format!("{} OAG", atomic_to_oag(out_total)),
     );
     out.push_str("</table></div>");
 
     // 入力。
-    out.push_str("<h2>入力</h2><div class=\"wrap\"><table>");
+    out.push_str("<h2>inputs</h2><div class=\"wrap\"><table>");
     if tx.is_coinbase() {
         out.push_str(
-            "<tr><td class=\"note\">採掘による新規発行。使用した出力はありません。</td></tr>",
+            "<tr><td class=\"note\">newly issued by mining. no outputs were spent.</td></tr>",
         );
     } else {
-        out.push_str("<tr><th>元の取引</th><th>番号</th><th>アドレス</th><th>金額</th></tr>");
+        out.push_str(
+            "<tr><th>source transaction</th><th>index</th><th>address</th><th>amount</th></tr>",
+        );
         for (n, input) in tx.inputs.iter().enumerate() {
             let prev = spent.get(n).and_then(|s| s.as_ref());
             let (addr, amount) = match prev {
@@ -748,11 +754,11 @@ fn tx_detail(
                         .to_address(network)
                         .ok()
                         .map(|a| a.to_string())
-                        .unwrap_or_else(|| format!("版数 {}", prev.lock.version())),
+                        .unwrap_or_else(|| format!("version {}", prev.lock.version())),
                     format!("{} OAG", prev.amount),
                 ),
                 // 索引が無い、あるいは未確定の取引では引けない。
-                None => ("不明".to_string(), "不明".to_string()),
+                None => ("unknown".to_string(), "unknown".to_string()),
             };
             let _ = write!(
                 out,
@@ -771,15 +777,15 @@ fn tx_detail(
     out.push_str("</table></div>");
 
     // 出力。
-    out.push_str("<h2>出力</h2><div class=\"wrap\"><table>");
-    out.push_str("<tr><th>#</th><th>アドレス</th><th>金額</th></tr>");
+    out.push_str("<h2>outputs</h2><div class=\"wrap\"><table>");
+    out.push_str("<tr><th>#</th><th>address</th><th>amount</th></tr>");
     for (n, output) in tx.outputs.iter().enumerate() {
         let addr = output
             .lock
             .to_address(network)
             .ok()
             .map(|a| a.to_string())
-            .unwrap_or_else(|| format!("版数 {} (未知)", output.lock.version()));
+            .unwrap_or_else(|| format!("version {} (unknown)", output.lock.version()));
         let _ = write!(
             out,
             "<tr><td>{n}</td><td class=\"mono trunc\"><a href=\"/address/{a}\">{a_short}</a></td>\
@@ -797,9 +803,9 @@ fn tx_detail(
 fn search_box(value: &str) -> String {
     format!(
         "<form class=\"search\" action=\"/search\" method=\"get\">\
-         <input name=\"q\" value=\"{}\" placeholder=\"高さ・ブロック・取引 ID・アドレス\" \
+         <input name=\"q\" value=\"{}\" placeholder=\"height, block, transaction ID or address\" \
          autocapitalize=\"off\" autocomplete=\"off\" spellcheck=\"false\">\
-         <button type=\"submit\">探す</button></form>",
+         <button type=\"submit\">search</button></form>",
         esc(value)
     )
 }
@@ -837,9 +843,9 @@ fn not_found(message: &str) -> Response {
     Response {
         status: "404 Not Found",
         body: page(
-            "見つからない",
+            "not found",
             &format!(
-                "{}<h1>見つからない</h1><p>{}</p>",
+                "{}<h1>not found</h1><p>{}</p>",
                 search_box(""),
                 esc(message)
             ),
@@ -851,8 +857,8 @@ fn error_page(message: &str) -> Response {
     Response {
         status: "500 Internal Server Error",
         body: page(
-            "誤り",
-            &format!("{}<h1>誤り</h1><p>{}</p>", search_box(""), esc(message)),
+            "error",
+            &format!("{}<h1>error</h1><p>{}</p>", search_box(""), esc(message)),
         ),
     }
 }
@@ -864,9 +870,9 @@ fn page(title: &str, body: &str) -> String {
          <meta name=\"robots\" content=\"noindex, nofollow\">\
          <title>{title} · Orange</title><style>{css}</style></head>\
          <body><header><a class=\"brand\" href=\"/\">Orange <span>OAG</span></a>\
-         <nav><a href=\"/\">概要</a> <a href=\"/mempool\">mempool</a></nav></header>\
+         <nav><a href=\"/\">overview</a> <a href=\"/mempool\">mempool</a></nav></header>\
          <main>{body}</main>\
-         <footer>読むだけの局所エクスプローラ。送金も設定変更もできません。</footer>\
+         <footer>A local, read-only explorer. It cannot send coins or change settings.</footer>\
          </body></html>",
         title = esc(title),
         css = CSS,
@@ -1057,7 +1063,7 @@ mod tests {
         assert_eq!(esc("\"><svg"), "&quot;&gt;&lt;svg");
         assert_eq!(esc("it's"), "it&#39;s");
         // 日本語はそのまま通る。
-        assert_eq!(esc("高さ"), "高さ");
+        assert_eq!(esc("height"), "height");
     }
 
     #[test]
@@ -1141,20 +1147,32 @@ mod tests {
         let block = block_of(5);
         let table = tx_table(&block, Network::Mainnet, 2, 5);
 
-        assert!(table.contains("<td>2</td>"), "2 番目から始まっていない");
-        assert!(table.contains("<td>4</td>"), "最後の 4 番目が無い");
-        assert!(!table.contains("<td>0</td>"), "頁の外の 0 番目が出ている");
-        assert!(!table.contains("<td>5</td>"), "存在しない 5 番目が出ている");
+        assert!(
+            table.contains("<td>2</td>"),
+            "it does not start from the second"
+        );
+        assert!(
+            table.contains("<td>4</td>"),
+            "the last, fourth one is missing"
+        );
+        assert!(
+            !table.contains("<td>0</td>"),
+            "the zeroth, outside the page, is shown"
+        );
+        assert!(
+            !table.contains("<td>5</td>"),
+            "a fifth that does not exist is shown"
+        );
 
         // 採掘の印は 0 番目だけのもの。2 件目以降の頁には出ない。
         assert!(
-            !table.contains("採掘"),
-            "コインベースでないのに採掘と出ている"
+            !table.contains("mined"),
+            "shown as mined although it is not a coinbase"
         );
 
         // 先頭の頁には出る。
         let first = tx_table(&block, Network::Mainnet, 0, 2);
-        assert!(first.contains("採掘"));
+        assert!(first.contains("mined"));
     }
 
     #[test]
@@ -1174,13 +1192,13 @@ mod tests {
 
         // 先頭の頁に「前」は無い。
         let first = tx_pager(&hash, 0, PAGE, PAGE * 2);
-        assert!(!first.contains("前の"));
-        assert!(first.contains("次の"));
+        assert!(!first.contains("previous "));
+        assert!(first.contains("next "));
 
         // 末尾の頁に「次」は無い。
         let last = tx_pager(&hash, PAGE, PAGE * 2, PAGE * 2);
-        assert!(last.contains("前の"));
-        assert!(!last.contains("次の"));
+        assert!(last.contains("previous "));
+        assert!(!last.contains("next "));
 
         // 区切る必要が無ければ何も出さない。
         assert_eq!(tx_pager(&hash, 0, 3, 3), "");

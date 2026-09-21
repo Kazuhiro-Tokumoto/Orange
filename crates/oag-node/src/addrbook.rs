@@ -501,14 +501,14 @@ impl AddressBook {
             }
             Ok(stored) => {
                 crate::log_warn!(
-                    "{} は版数 {} / {} のもので、いまの {network} と合わない。空から始める。",
+                    "{} is from version {} / {} and does not match the current {network}. Starting empty.",
                     path.display(),
                     stored.version,
                     stored.network
                 );
             }
             Err(e) => {
-                crate::log_warn!("{} を読めない ({e})。空から始める。", path.display());
+                crate::log_warn!("{} cannot be read ({e}). Starting empty.", path.display());
             }
         }
         book
@@ -595,7 +595,11 @@ impl AddressBook {
             data.extend_from_slice(part);
         }
         let digest = hash::tagged(tag, &data);
-        u64::from_le_bytes(digest.as_bytes()[..8].try_into().expect("32 バイトある"))
+        u64::from_le_bytes(
+            digest.as_bytes()[..8]
+                .try_into()
+                .expect("there are 32 bytes"),
+        )
     }
 
     /// `new` 表のどのバケットに入るか。
@@ -1015,8 +1019,9 @@ impl AddressBook {
                 })
                 .collect(),
         };
-        let text = serde_json::to_string(&stored)
-            .map_err(|e| std::io::Error::other(format!("住所帳を書き出せない: {e}")))?;
+        let text = serde_json::to_string(&stored).map_err(|e| {
+            std::io::Error::other(format!("cannot write out the address book: {e}"))
+        })?;
 
         let temp = path.with_extension(format!("tmp{}", std::process::id()));
         let result = (|| -> std::io::Result<()> {
@@ -1113,13 +1118,13 @@ mod tests {
         let touched = new_buckets(&b);
         assert!(
             touched.len() <= NEW_BUCKETS_PER_SOURCE_GROUP,
-            "1 つの出どころが {} 個のバケットに届いている (上限 {})",
+            "one source reached {} buckets (limit {})",
             touched.len(),
             NEW_BUCKETS_PER_SOURCE_GROUP
         );
         assert!(
             b.len() <= NEW_BUCKETS_PER_SOURCE_GROUP * BUCKET_SIZE,
-            "1 つの出どころが {} 件を占めている",
+            "one source occupies {} entries",
             b.len()
         );
         // new 表の 6 % ほどしか触れていない。残りは他の出どころのもの。
@@ -1145,7 +1150,7 @@ mod tests {
         // **8 割が通れば、埋め尽くしは効いていない。**
         assert!(
             accepted * 4 >= 201 * 3,
-            "埋め尽くしで正直な住所が入らなくなった ({accepted}/201)"
+            "flooding kept honest addresses out ({accepted}/201)"
         );
     }
 
@@ -1167,7 +1172,7 @@ mod tests {
             .collect();
         assert!(
             buckets.len() <= TRIED_BUCKETS_PER_GROUP,
-            "同じ /16 が {} 個の tried バケットに届いている (上限 {})",
+            "the same /16 reached {} tried buckets (limit {})",
             buckets.len(),
             TRIED_BUCKETS_PER_GROUP
         );
@@ -1190,7 +1195,10 @@ mod tests {
             .filter(|(_, info)| info.in_tried)
             .map(|(addr, _)| *addr)
             .collect();
-        assert!(before.len() < 2_048, "衝突が起きておらず、試験の意味がない");
+        assert!(
+            before.len() < 2_048,
+            "no collision occurred, so the test is meaningless"
+        );
 
         for lo in 0..=255u8 {
             for x in 9..=16u8 {
@@ -1207,7 +1215,7 @@ mod tests {
             .collect();
         assert!(
             before.is_subset(&after),
-            "元気な tried の住所が新参に追い出された"
+            "a healthy address in tried was evicted by a newcomer"
         );
     }
 
@@ -1229,7 +1237,10 @@ mod tests {
         // 試している最中とみなされる幅を過ぎてから。
         let later = NOW + IN_FLIGHT_SECS + 1;
         let taken = flood(&mut b, source, 91, 170, later);
-        assert!(taken > 0, "見込みの尽きた住所が枠を譲らない");
+        assert!(
+            taken > 0,
+            "an address with no prospects will not yield its slot"
+        );
         assert!(b.len() <= NEW_BUCKETS_PER_SOURCE_GROUP * BUCKET_SIZE);
     }
 
@@ -1242,7 +1253,7 @@ mod tests {
             b.add_from(a, Some(addr(10 * i, 0, 0, 1)), NOW, NOW);
         }
         let slots = b.entries[&a].new_slots.len();
-        assert!((2..=4).contains(&slots), "枠が {slots} 個しかない");
+        assert!((2..=4).contains(&slots), "there are only {slots} slots");
 
         // 同じ出どころからもう一度聞いても増えない。
         b.add_from(a, Some(addr(10, 0, 0, 1)), NOW, NOW);
@@ -1275,15 +1286,18 @@ mod tests {
         b.new_table.set(bucket, slot, blocker);
 
         // 前提: この状態では new に入れない。
-        assert!(!b.add(honest, NOW, NOW), "枠が空いている。試験の前提が違う");
+        assert!(
+            !b.add(honest, NOW, NOW),
+            "a slot is free; the test's premise differs"
+        );
         assert!(b.get(&honest).is_none());
 
         // それでも、実際に繋がったのなら tried に載る。
         b.mark_success(&honest, NOW);
-        assert_eq!(b.tried_len(), 1, "繋がったのに tried に入っていない");
+        assert_eq!(b.tried_len(), 1, "connected but not in tried");
         assert!(
             b.get(&honest).is_some_and(|e| e.is_proven()),
-            "成功が記録されていない"
+            "the success was not recorded"
         );
         // 塞いでいた住所は追い出していない。
         assert!(b.get(&blocker).is_some());
@@ -1308,12 +1322,18 @@ mod tests {
         let nb = b.new_bucket(&honest, &group_of(&honest));
         let ns = b.slot(false, nb, &honest);
         b.new_table.set(nb, ns, occupant);
-        assert!(!b.add(honest, NOW, NOW), "枠が空いている。試験の前提が違う");
+        assert!(
+            !b.add(honest, NOW, NOW),
+            "a slot is free; the test's premise differs"
+        );
 
         b.mark_success(&honest, NOW);
 
         // 迎えなかった。**そしてどちらの表にも居ない項目を残していない。**
-        assert!(b.get(&honest).is_none(), "行き場の無い項目が残っている");
+        assert!(
+            b.get(&honest).is_none(),
+            "an entry belonging nowhere is left behind"
+        );
         assert!(b.get(&occupant).is_some_and(|e| e.is_proven()));
     }
 
@@ -1334,7 +1354,7 @@ mod tests {
             .count();
         assert!(
             (rounds / 4..=rounds * 3 / 4).contains(&hits),
-            "tried からの割合が {hits}/{rounds} で半々から外れている"
+            "the share from tried is {hits}/{rounds}, which is not half and half"
         );
     }
 
@@ -1350,7 +1370,7 @@ mod tests {
         assert_eq!(
             picked.len(),
             2,
-            "同じ /16 から 2 件以上選んでいる: {picked:?}"
+            "picked two or more from the same /16: {picked:?}"
         );
     }
 
@@ -1365,7 +1385,7 @@ mod tests {
         let later = NOW + BACKOFF_MAX_SECS;
         assert!(
             b.candidates(later, 10, &[]).is_empty(),
-            "見限った住所を繋ぎ先に出している"
+            "an address we gave up on is being offered as a destination"
         );
     }
 
@@ -1389,7 +1409,7 @@ mod tests {
             "1.2.3.4:0",
         ] {
             let a: SocketAddr = text.parse().unwrap();
-            assert!(!b.add(a, NOW, NOW), "{text} を覚えてしまった");
+            assert!(!b.add(a, NOW, NOW), "{text} was remembered");
         }
         assert!(b.is_empty());
     }
@@ -1469,7 +1489,7 @@ mod tests {
 
         assert!(
             b.candidates(NOW, 10, &[]).is_empty(),
-            "すぐに再試行している"
+            "retrying immediately"
         );
         assert!(b.candidates(NOW + backoff(1) - 1, 10, &[]).is_empty());
         assert_eq!(b.candidates(NOW + backoff(1), 10, &[]).len(), 1);
@@ -1480,7 +1500,11 @@ mod tests {
         assert_eq!(backoff(0), 0);
         assert_eq!(backoff(1), BACKOFF_BASE_SECS * 2);
         assert!(backoff(2) > backoff(1));
-        assert_eq!(backoff(64), BACKOFF_MAX_SECS, "上限で頭打ちにならない");
+        assert_eq!(
+            backoff(64),
+            BACKOFF_MAX_SECS,
+            "it does not cap at the limit"
+        );
         // あふれて負や 0 にならないこと。
         for f in 0..64 {
             assert!((0..=BACKOFF_MAX_SECS).contains(&backoff(f)), "failures={f}");
@@ -1527,7 +1551,10 @@ mod tests {
         let mut b = book();
         b.add(addr(104, 16, 1, 1), NOW, NOW);
         b.add(addr(93, 184, 216, 1), NOW, NOW);
-        assert!(b.to_share(NOW, 10).is_empty(), "実績の無い住所を配っている");
+        assert!(
+            b.to_share(NOW, 10).is_empty(),
+            "handing out addresses with no track record"
+        );
 
         b.mark_success(&addr(93, 184, 216, 1), NOW);
         let shared = b.to_share(NOW, 10);
@@ -1544,7 +1571,7 @@ mod tests {
         assert_eq!(b.to_share(NOW, 10).len(), 1);
         assert!(
             b.to_share(NOW + STALE_SECS + 1, 10).is_empty(),
-            "とうに消えた住所を配っている"
+            "handing out addresses that vanished long ago"
         );
     }
 
@@ -1571,7 +1598,7 @@ mod tests {
         assert!(restored.get(&addr(93, 184, 216, 1)).unwrap().is_proven());
         assert!(!restored.get(&addr(104, 16, 1, 1)).unwrap().is_proven());
         // **鍵が変わると、全住所が別のバケットへ散る。**
-        assert_eq!(restored.key, b.key, "バケットの鍵が保たれていない");
+        assert_eq!(restored.key, b.key, "the bucket key was not preserved");
         assert!(!restored.is_dirty());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1589,7 +1616,7 @@ mod tests {
         reg.save().unwrap();
 
         let main = AddressBook::open(Network::Mainnet, &path);
-        assert!(main.is_empty(), "別のネットワークの住所帳を読み込んでいる");
+        assert!(main.is_empty(), "loading another network's address book");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1655,11 +1682,12 @@ mod table_accounting {
             // filled が指す枠は、すべて埋まっていて自分を指し返すこと。
             for (index, (bucket, slot)) in table.filled.iter().enumerate() {
                 let cell = table.slots[*bucket as usize][*slot as usize];
-                let (addr, back) = cell.unwrap_or_else(|| panic!("{name}: 空の枠を指している"));
-                assert_eq!(back as usize, index, "{name}: 索引が食い違っている");
+                let (addr, back) =
+                    cell.unwrap_or_else(|| panic!("{name}: points at an empty slot"));
+                assert_eq!(back as usize, index, "{name}: the index disagrees");
                 assert!(
                     b.entries.contains_key(&addr),
-                    "{name}: 消えた住所が残っている"
+                    "{name}: a removed address is still there"
                 );
             }
             // 埋まっている枠は、すべて filled に載っていること。
@@ -1669,25 +1697,26 @@ mod table_accounting {
                 .flatten()
                 .filter(|cell| cell.is_some())
                 .count();
-            assert_eq!(occupied, table.filled.len(), "{name}: 枠の数が合わない");
+            assert_eq!(
+                occupied,
+                table.filled.len(),
+                "{name}: the slot count does not add up"
+            );
         }
 
         // 住所が持つ枠の記録と、表の中身が一致すること。
         let mut from_entries = 0;
         for (addr, info) in &b.entries {
             if info.in_tried {
-                assert!(
-                    info.new_slots.is_empty(),
-                    "tried なのに new の枠を持っている"
-                );
+                assert!(info.new_slots.is_empty(), "in tried yet holding a new slot");
                 continue;
             }
-            assert!(!info.new_slots.is_empty(), "new なのに枠を持っていない");
+            assert!(!info.new_slots.is_empty(), "in new yet holding no slot");
             for (bucket, slot) in &info.new_slots {
                 assert_eq!(
                     b.new_table.get(*bucket as usize, *slot as usize),
                     Some(*addr),
-                    "住所が持つ枠に別のものが入っている"
+                    "another entry occupies the slot this address holds"
                 );
                 from_entries += 1;
             }

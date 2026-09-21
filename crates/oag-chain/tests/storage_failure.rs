@@ -54,7 +54,7 @@ impl UtxoView for FlakyView {
     fn get(&self, outpoint: &OutPoint) -> Result<Option<UtxoEntry>, UtxoError> {
         if self.failing {
             // 「無い」ではなく「読めない」。この違いが本件の全部である。
-            return Err(UtxoError::Backend("ディスクを読めない".to_string()));
+            return Err(UtxoError::Backend("the disk cannot be read".to_string()));
         }
         self.inner.get(outpoint)
     }
@@ -166,22 +166,22 @@ fn a_storage_failure_does_not_mark_the_block_invalid() {
     chain.store().set_failing(true);
     let err = chain
         .accept_block(block, &AcceptAnyPow, NOW)
-        .expect_err("読み取りが失敗した以上、接続は通らない");
+        .expect_err("since the read failed, connecting must not succeed");
 
     match &err {
         ChainError::Validation(e) => assert!(
             e.is_storage_failure(),
-            "記憶装置の失敗として返っていない: {e}"
+            "not returned as a storage failure: {e}"
         ),
-        other => panic!("想定しない誤り: {other}"),
+        other => panic!("unexpected error: {other}"),
     }
 
     assert_ne!(
         entry_of(&chain, &hash).status,
         BlockStatus::Invalid,
-        "読めなかっただけのブロックに無効の印が付いている"
+        "a block that merely could not be read is marked invalid"
     );
-    assert_eq!(chain.tip().unwrap().hash, genesis, "先端が動いている");
+    assert_eq!(chain.tip().unwrap().hash, genesis, "the tip has moved");
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn the_verdict_is_only_deferred_not_lost() {
     assert_eq!(
         entry_of(&chain, &hash).status,
         BlockStatus::Invalid,
-        "読めるようになっても判定が下りていない"
+        "no verdict was reached even once it became readable"
     );
     assert_eq!(chain.tip().unwrap().hash, genesis);
 }
@@ -224,7 +224,7 @@ fn a_readable_disk_still_marks_a_bad_block_invalid() {
     assert_eq!(
         entry_of(&chain, &hash).status,
         BlockStatus::Invalid,
-        "不正なブロックに印が付いていない"
+        "the malformed block is not marked"
     );
     assert_eq!(chain.tip().unwrap().hash, genesis);
 }

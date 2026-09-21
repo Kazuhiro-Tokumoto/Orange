@@ -64,7 +64,7 @@ pub async fn handle(handle: NodeHandle, body: String) -> String {
         // 応答を JSON にできないのは組み立て側の誤りである。せめて
         // 形の整った誤りを返す。
         format!(
-            r#"{{"jsonrpc":"{VERSION}","error":{{"code":{INTERNAL_ERROR},"message":"応答を組み立てられない: {e}"}},"id":null}}"#
+            r#"{{"jsonrpc":"{VERSION}","error":{{"code":{INTERNAL_ERROR},"message":"cannot assemble the response: {e}"}},"id":null}}"#
         )
     })
 }
@@ -72,15 +72,17 @@ pub async fn handle(handle: NodeHandle, body: String) -> String {
 async fn dispatch(handle: &NodeHandle, body: &str) -> Response {
     let request: Request = match serde_json::from_str(body) {
         Ok(request) => request,
-        Err(e) => return Response::err(None, RpcError::new(PARSE_ERROR, format!("読めない: {e}"))),
+        Err(e) => {
+            return Response::err(
+                None,
+                RpcError::new(PARSE_ERROR, format!("cannot read: {e}")),
+            )
+        }
     };
     if request.jsonrpc != VERSION {
         return Response::err(
             Some(request.id),
-            RpcError::new(
-                INVALID_REQUEST,
-                format!("jsonrpc は \"{VERSION}\" であること"),
-            ),
+            RpcError::new(INVALID_REQUEST, format!("jsonrpc must be \"{VERSION}\"")),
         );
     }
 
@@ -96,30 +98,30 @@ fn arg(params: &Value, index: usize, name: &str) -> Result<Value, RpcError> {
     params
         .get(index)
         .cloned()
-        .ok_or_else(|| RpcError::invalid_params(format!("引数 {name} が要る")))
+        .ok_or_else(|| RpcError::invalid_params(format!("the argument {name} is required")))
 }
 
 fn as_str(value: &Value, name: &str) -> Result<String, RpcError> {
     value
         .as_str()
         .map(str::to_string)
-        .ok_or_else(|| RpcError::invalid_params(format!("{name} は文字列であること")))
+        .ok_or_else(|| RpcError::invalid_params(format!("{name} must be a string")))
 }
 
 fn as_hash(value: &Value, name: &str) -> Result<Hash, RpcError> {
     let text = as_str(value, name)?;
     text.parse()
-        .map_err(|_| RpcError::invalid_params(format!("{name} は 64 桁の 16 進であること")))
+        .map_err(|_| RpcError::invalid_params(format!("{name} must be 64 hex digits")))
 }
 
 fn as_u64(value: &Value, name: &str) -> Result<u64, RpcError> {
     value
         .as_u64()
-        .ok_or_else(|| RpcError::invalid_params(format!("{name} は 0 以上の整数であること")))
+        .ok_or_else(|| RpcError::invalid_params(format!("{name} must be an integer of 0 or more")))
 }
 
 fn from_hex(text: &str, name: &str) -> Result<Vec<u8>, RpcError> {
-    hex_decode(text).ok_or_else(|| RpcError::invalid_params(format!("{name} が 16 進として不正")))
+    hex_decode(text).ok_or_else(|| RpcError::invalid_params(format!("{name} is not valid hex")))
 }
 
 fn hex_decode(text: &str) -> Option<Vec<u8>> {
@@ -156,7 +158,7 @@ async fn call(handle: &NodeHandle, method: &str, params: Value) -> Result<Value,
             let height = as_u64(&arg(&params, 0, "height")?, "height")?;
             let hash = handle.hash_at_height(height).await.map_err(node_error)?;
             hash.map(|h| json!(h.to_string()))
-                .ok_or_else(|| RpcError::not_found(format!("高さ {height} のブロックは無い")))
+                .ok_or_else(|| RpcError::not_found(format!("there is no block at height {height}")))
         }
         "getblockheader" => {
             let hash = as_hash(&arg(&params, 0, "hash")?, "hash")?;
@@ -164,7 +166,7 @@ async fn call(handle: &NodeHandle, method: &str, params: Value) -> Result<Value,
                 .entry(hash)
                 .await
                 .map_err(node_error)?
-                .ok_or_else(|| RpcError::not_found(format!("ブロック {hash} を知らない")))?;
+                .ok_or_else(|| RpcError::not_found(format!("block {hash} is unknown")))?;
             Ok(json!({
                 "hash": entry.hash.to_string(),
                 "header": header_json(&entry.header),
@@ -219,7 +221,7 @@ async fn get_block(handle: &NodeHandle, params: &Value) -> Result<Value, RpcErro
         .block(hash)
         .await
         .map_err(node_error)?
-        .ok_or_else(|| RpcError::not_found(format!("ブロック {hash} の本体を持っていない")))?;
+        .ok_or_else(|| RpcError::not_found(format!("the body of block {hash} is not held")))?;
 
     if !verbose {
         return Ok(json!(to_hex(&block.encode())));
@@ -231,7 +233,7 @@ async fn send_raw_transaction(handle: &NodeHandle, params: &Value) -> Result<Val
     let text = as_str(&arg(params, 0, "hex")?, "hex")?;
     let bytes = from_hex(&text, "hex")?;
     let tx = Transaction::decode(&bytes)
-        .map_err(|e| RpcError::invalid_params(format!("取引として読めない: {e}")))?;
+        .map_err(|e| RpcError::invalid_params(format!("cannot be read as a transaction: {e}")))?;
 
     let txid = handle
         .submit_tx(tx)
@@ -277,18 +279,20 @@ async fn get_raw_transaction(handle: &NodeHandle, params: &Value) -> Result<Valu
     // 呼び出し側が、確定済みの取引を存在しないものとして扱う。
     if handle.index_from().await.map_err(node_error)?.is_none() {
         return Err(RpcError::not_found(format!(
-            "{txid} は mempool に無い。確定した取引を txid で引くには索引が要る (--index を付けて起動する)。\
-             索引を持たないまま探すなら、入っているブロックを getblock で取ってその中から探すこと"
+            "{txid} is not in the mempool. Looking up a confirmed transaction by txid needs the index (start with --index).\
+             Without one, fetch the block that contains it with getblock and search inside it"
         )));
     }
-    Err(RpcError::not_found(format!("{txid} という取引は無い")))
+    Err(RpcError::not_found(format!(
+        "there is no transaction {txid}"
+    )))
 }
 
 async fn get_address_history(handle: &NodeHandle, params: &Value) -> Result<Value, RpcError> {
     let text = as_str(&arg(params, 0, "address")?, "address")?;
     let network = handle.network();
     let address = Address::decode_on(network, &text)
-        .map_err(|e| RpcError::invalid_params(format!("アドレス {text} が不正: {e}")))?;
+        .map_err(|e| RpcError::invalid_params(format!("the address {text} is invalid: {e}")))?;
     let lock = Lock::from_address(&address);
 
     let from = match params.get(1) {
@@ -303,7 +307,8 @@ async fn get_address_history(handle: &NodeHandle, params: &Value) -> Result<Valu
 
     if handle.index_from().await.map_err(node_error)?.is_none() {
         return Err(node_error(
-            "索引を持っていないので履歴を引けない (--index を付けて起動すること)".to_string(),
+            "no index is held, so history cannot be looked up (start the node with --index)"
+                .to_string(),
         ));
     }
 
@@ -331,7 +336,7 @@ async fn scan_utxos(handle: &NodeHandle, params: &Value) -> Result<Value, RpcErr
     let list = arg(params, 0, "addresses")?;
     let entries = list
         .as_array()
-        .ok_or_else(|| RpcError::invalid_params("addresses はアドレスの配列であること"))?;
+        .ok_or_else(|| RpcError::invalid_params("addresses must be an array of addresses"))?;
 
     let network = handle.network();
     let mut locks = Vec::with_capacity(entries.len());
@@ -339,7 +344,7 @@ async fn scan_utxos(handle: &NodeHandle, params: &Value) -> Result<Value, RpcErr
     for entry in entries {
         let text = as_str(entry, "address")?;
         let address = Address::decode_on(network, &text)
-            .map_err(|e| RpcError::invalid_params(format!("アドレス {text} が不正: {e}")))?;
+            .map_err(|e| RpcError::invalid_params(format!("the address {text} is invalid: {e}")))?;
         locks.push(Lock::from_address(&address));
         texts.push(text);
     }
@@ -350,7 +355,7 @@ async fn scan_utxos(handle: &NodeHandle, params: &Value) -> Result<Value, RpcErr
         .map_err(node_error)?;
 
     let total = Amount::sum(found.iter().map(|r| r.entry.output.amount))
-        .ok_or_else(|| RpcError::new(NODE_ERROR, "合計が桁あふれした"))?;
+        .ok_or_else(|| RpcError::new(NODE_ERROR, "the total overflowed"))?;
 
     Ok(json!({
         "total": total.to_atomic().to_string(),

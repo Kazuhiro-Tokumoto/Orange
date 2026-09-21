@@ -34,10 +34,10 @@ const MAX_BUFFERED: usize = HEADER_LEN + MAX_PAYLOAD + READ_CHUNK;
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     /// 入出力の誤り。
-    #[error("入出力に失敗した: {0}")]
+    #[error("I/O failed: {0}")]
     Io(#[from] std::io::Error),
     /// 相手が接続を閉じた。
-    #[error("相手が接続を閉じた")]
+    #[error("the peer closed the connection")]
     Closed,
     /// 受け取ったバイト列が枠組みとして不正。
     #[error(transparent)]
@@ -46,7 +46,7 @@ pub enum TransportError {
     #[error(transparent)]
     Handshake(#[from] HandshakeError),
     /// 溜め込む量が上限を超えた。
-    #[error("受信バッファが上限 {max} を超えた")]
+    #[error("the receive buffer exceeded the limit {max}")]
     BufferOverflow {
         /// 上限。
         max: usize,
@@ -137,7 +137,7 @@ impl Connection {
         Ok(state
             .peer_version()
             .cloned()
-            .expect("完了しているなら相手の version はある"))
+            .expect("if complete, the peer's version is present"))
     }
 
     /// 読む側と書く側に分ける。

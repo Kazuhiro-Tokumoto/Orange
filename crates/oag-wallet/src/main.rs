@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Parser)]
-#[command(name = "oag-wallet", about = "Orange (OAG) のウォレット", version)]
+#[command(name = "oag-wallet", about = "the Orange (OAG) wallet", version)]
 struct Cli {
     #[command(flatten)]
     common: Common,
@@ -36,49 +36,49 @@ struct Cli {
 
 #[derive(clap::Args)]
 struct Common {
-    /// 対象ネットワーク。
+    /// The target network.
     #[arg(long, global = true, default_value = "regtest")]
     network: String,
-    /// ウォレットファイル。
+    /// The wallet file.
     #[arg(long, global = true, default_value = "./wallet.json")]
     wallet: PathBuf,
-    /// ノードのデータディレクトリ。RPC の合言葉をここから読む。
+    /// The node's data directory. The RPC cookie is read from here.
     #[arg(long, global = true, default_value = "./oag-data")]
     datadir: PathBuf,
-    /// ノードの RPC の住所。既定はループバックの RPC ポート。
+    /// The node's RPC address. Defaults to the loopback RPC port.
     #[arg(long, global = true)]
     rpc: Option<SocketAddr>,
-    /// パスフレーズを収めたファイル。
+    /// A file holding the passphrase.
     ///
-    /// 省略すると端末で尋ねる。**コマンドラインには渡せない。**
-    /// 引数はプロセス一覧から他の利用者に見えるためである。
-    #[arg(long, global = true, value_name = "パス")]
+    /// Without it, you are asked in the terminal. **It cannot be passed on the
+    /// command line**, because arguments are visible to other users via the process list.
+    #[arg(long, global = true, value_name = "path")]
     passphrase_file: Option<PathBuf>,
 }
 
-/// BIP39 の追加パスフレーズの受け取り方。
+/// How to obtain the BIP39 optional passphrase.
 ///
-/// **既定は空文字列である。** 使わないのが普通であり、使うと決めた者だけが
-/// 明示する。
+/// **The default is the empty string.** Not using one is normal; only
+/// those who decide to use one state it.
 #[derive(clap::Args)]
 struct MnemonicPassphrase {
-    /// BIP39 の追加パスフレーズを端末で尋ねる。
+    /// Ask for the BIP39 optional passphrase in the terminal.
     #[arg(long)]
     mnemonic_passphrase: bool,
-    /// BIP39 の追加パスフレーズを収めたファイル。
-    #[arg(long, value_name = "パス", conflicts_with = "mnemonic_passphrase")]
+    /// A file holding the BIP39 optional passphrase.
+    #[arg(long, value_name = "path", conflicts_with = "mnemonic_passphrase")]
     mnemonic_passphrase_file: Option<PathBuf>,
 }
 
 impl MnemonicPassphrase {
-    /// 追加パスフレーズを得る。
+    /// Obtain the optional passphrase.
     ///
-    /// `confirm` が真なら 2 度尋ねて突き合わせる。**打ち間違えても失敗
-    /// として現れない**ため、作るときは必ず確かめる。
+    /// With `confirm` true it asks twice and compares. **A typo does not surface
+    /// as a failure**, so it is always confirmed when creating.
     fn get(&self, confirm: bool) -> Result<Zeroizing<String>, String> {
         if let Some(path) = &self.mnemonic_passphrase_file {
             let mut text = std::fs::read_to_string(path)
-                .map_err(|e| format!("{} を読めない: {e}", path.display()))?;
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             let value = Zeroizing::new(text.trim_end_matches(['\n', '\r']).to_string());
             text.zeroize();
             return Ok(value);
@@ -87,11 +87,11 @@ impl MnemonicPassphrase {
             return Ok(Zeroizing::new(String::new()));
         }
         let first =
-            Zeroizing::new(read_secret("BIP39 の追加パスフレーズ: ").map_err(|e| e.to_string())?);
+            Zeroizing::new(read_secret("BIP39 optional passphrase: ").map_err(|e| e.to_string())?);
         if confirm {
-            let second = Zeroizing::new(read_secret("もう一度: ").map_err(|e| e.to_string())?);
+            let second = Zeroizing::new(read_secret("again: ").map_err(|e| e.to_string())?);
             if *first != *second {
-                return Err("追加パスフレーズが一致しない".to_string());
+                return Err("the optional passphrases do not match".to_string());
             }
         }
         Ok(first)
@@ -100,118 +100,118 @@ impl MnemonicPassphrase {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 新しいウォレットを作る。
+    /// Create a new wallet.
     New {
         #[command(flatten)]
         mnemonic_passphrase: MnemonicPassphrase,
     },
-    /// 控えの語からウォレットを復元する。
+    /// Restore a wallet from a recovery phrase.
     Restore {
-        /// 控えの語を収めたファイル。省略すると尋ねる。
-        #[arg(long, value_name = "パス")]
+        /// A file holding the recovery phrase. Without it, you are asked.
+        #[arg(long, value_name = "path")]
         mnemonic_file: Option<PathBuf>,
         #[command(flatten)]
         mnemonic_passphrase: MnemonicPassphrase,
     },
-    /// 控えの語を表示する。
+    /// Show the recovery phrase.
     Seed,
-    /// 受取先アドレスを表示する。
+    /// Show the receiving address.
     Address {
-        /// 新しいアドレスを 1 つ増やして表示する。
+        /// Add one new address and show it.
         #[arg(long)]
         new: bool,
-        /// すべてのアドレスを表示する。
+        /// Show every address.
         #[arg(long)]
         all: bool,
     },
-    /// 残高を表示する。
+    /// Show the balance.
     Balance {
-        /// UTXO を 1 件ずつ表示する。
+        /// Show the UTXOs one by one.
         #[arg(long)]
         verbose: bool,
     },
-    /// 送金する。
+    /// Send coins.
     Send {
-        /// 宛先アドレス。
+        /// The destination address.
         to: String,
-        /// 送る額 (OAG)。
+        /// The amount to send (OAG).
         amount: String,
-        /// 組み立てるだけで送らない。
+        /// Build it but do not send.
         #[arg(long)]
         dry_run: bool,
     },
-    /// 細かい UTXO を 1 つにまとめる。
+    /// Fold small UTXOs into one.
     ///
-    /// 掘り続けると 1 ブロックにつき 1 つ UTXO が増える。増えすぎると
-    /// `scanutxos` の上限に当たり、**残高も送金も引けなくなる**。
-    /// その手前で畳んでおくためのもの。
+    /// Mining adds one UTXO per block. Too many, and you hit the `scanutxos`
+    /// bound, at which point **neither balance nor send works**. This folds
+    /// them up before that.
     ///
-    /// 1 本の取引に入る入力は `MAX_TX_SIZE` が抑えるので、多いときは
-    /// 何度か呼ぶ。あと何周要るかは実行のたびに表示する。
+    /// `MAX_TX_SIZE` bounds how many inputs fit in one transaction, so when
+    /// there are many, call it repeatedly. Each run says how many are left.
     Consolidate {
-        /// まとめた先。省略すると既定の受取先。
+        /// Where to fold into. Defaults to the usual receiving address.
         #[arg(long)]
         to: Option<String>,
-        /// 1 本に入れる入力の上限。省略すると大きさが許す限り。
+        /// The maximum inputs in one transaction. Without it, as many as fit.
         #[arg(long)]
         max_inputs: Option<usize>,
-        /// 組み立てるだけで送らない。
+        /// Build it but do not send.
         #[arg(long)]
         dry_run: bool,
     },
-    /// 部分署名トランザクション (PSBT 相当) を扱う。
+    /// Work with partially signed transactions (the PSBT equivalent).
     ///
-    /// 鍵を持つ機械と、ノードに繋がる機械を分けたいときに使う。
-    /// 複数の持ち主が順に署名する場合にも使う。
+    /// Use it when the machine holding the keys should be separate from the one
+    /// talking to a node, or when several owners sign in turn.
     Pst {
         #[command(subcommand)]
         action: PstCommand,
     },
-    /// ノードの状態を表示する。
+    /// Show the node's state.
     Info,
 }
 
 #[derive(Subcommand)]
 enum PstCommand {
-    /// 送金を組み立てて PST を書き出す。**署名はしない。**
+    /// Build a payment and write out a PST. **It does not sign.**
     Create {
-        /// 宛先アドレス。
+        /// The destination address.
         to: String,
-        /// 送る額 (OAG)。
+        /// The amount to send (OAG).
         amount: String,
-        /// 書き出し先。省略すると標準出力へ。
-        #[arg(long, value_name = "パス")]
+        /// Where to write it. Without it, to standard output.
+        #[arg(long, value_name = "path")]
         out: Option<PathBuf>,
     },
-    /// PST に自分の持ち分の署名を入れる。
+    /// Add our own share's signature to a PST.
     ///
-    /// **ノードに繋がなくてよい。** 署名に要るものは PST が運んでいる。
+    /// **No node connection is needed.** Everything signing requires is carried in the PST.
     Sign {
-        /// 読み込む PST。
+        /// The PST to read.
         file: PathBuf,
-        /// 書き出し先。省略すると元のファイルに書き戻す。
-        #[arg(long, value_name = "パス")]
+        /// Where to write it. Without it, back to the original file.
+        #[arg(long, value_name = "path")]
         out: Option<PathBuf>,
     },
-    /// 別々に署名された PST を 1 つに束ねる。
+    /// Combine separately signed PSTs into one.
     Combine {
-        /// 束ねる PST。2 つ以上。
+        /// The PSTs to combine. Two or more.
         #[arg(required = true, num_args = 2..)]
         files: Vec<PathBuf>,
-        /// 書き出し先。省略すると標準出力へ。
-        #[arg(long, value_name = "パス")]
+        /// Where to write it. Without it, to standard output.
+        #[arg(long, value_name = "path")]
         out: Option<PathBuf>,
     },
-    /// PST の中身を表示する。
+    /// Show the contents of a PST.
     Show {
-        /// 読み込む PST。
+        /// The PST to read.
         file: PathBuf,
     },
-    /// PST を仕上げて送る。
+    /// Finalize a PST and send it.
     Send {
-        /// 読み込む PST。
+        /// The PST to read.
         file: PathBuf,
-        /// 仕上げるだけで送らない。
+        /// Finalize it but do not send.
         #[arg(long)]
         dry_run: bool,
     },
@@ -224,24 +224,24 @@ fn main() {
     {
         Ok(runtime) => runtime,
         Err(e) => {
-            eprintln!("エラー: tokio を起こせない: {e}");
+            eprintln!("error: cannot start tokio: {e}");
             std::process::exit(1);
         }
     };
     if let Err(message) = runtime.block_on(run()) {
-        eprintln!("エラー: {message}");
+        eprintln!("error: {message}");
         std::process::exit(1);
     }
 }
 
-/// パスフレーズを得る。
+/// Obtain the passphrase.
 ///
-/// ファイルが指定されていればそこから読み、なければ端末で尋ねる。
-/// **コマンドラインの引数からは受け取らない。** 引数はプロセス一覧から
-/// 同じ機械の他の利用者に見えるうえ、シェルの履歴にも残る。
-/// パスフレーズ。落ちるときに消す。
+/// Reads from the file if one is given, otherwise asks in the terminal.
+/// **It is never taken from a command-line argument.** Arguments are visible
+/// to other users on the machine via the process list and persist in shell history.
+/// A passphrase. Zeroed on drop.
 ///
-/// 生の `Vec<u8>` のまま持ち回すと、使い終わったあともメモリに残る。
+/// Carried around as a raw `Vec<u8>` it would stay in memory after use.
 struct Secret(Vec<u8>);
 
 impl Drop for Secret {
@@ -261,7 +261,7 @@ impl std::ops::Deref for Secret {
 fn passphrase(file: &Option<PathBuf>, prompt: &str) -> Result<Secret, String> {
     if let Some(path) = file {
         let mut text = std::fs::read_to_string(path)
-            .map_err(|e| format!("{} を読めない: {e}", path.display()))?;
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         // 末尾の改行は入力の一部ではない。
         let secret = Secret(text.trim_end_matches(['\n', '\r']).as_bytes().to_vec());
         use zeroize::Zeroize;
@@ -270,33 +270,33 @@ fn passphrase(file: &Option<PathBuf>, prompt: &str) -> Result<Secret, String> {
     }
     Ok(Secret(
         read_secret(prompt)
-            .map_err(|e| format!("パスフレーズを読めない: {e}"))?
+            .map_err(|e| format!("cannot read the passphrase: {e}"))?
             .into_bytes(),
     ))
 }
 
-/// 秘密を 1 行読む。
+/// Read one line of secret.
 ///
-/// 端末なら伏せ字で尋ねる。端末でなければ標準入力から 1 行読む。
-/// **後者が要るのは、手で試すためだけでなく、自動で試験するためでもある。**
-/// 端末がないと動かないものは、試験されないまま腐る。
+/// On a terminal it asks with echo off. Otherwise it reads one line from stdin.
+/// **The latter is needed not only for trying things by hand but for automated
+/// testing.** Anything that needs a terminal rots untested.
 ///
-/// # 促しを自分で書く理由
+/// # Why the prompt is written by hand
 ///
-/// `rpassword::prompt_password` を使わない。あれは促しを端末の装置
-/// (Windows なら `CONOUT$`、Unix なら `/dev/tty`) へ**生のバイト列のまま**
-/// 書き出す。Windows のコンソールは書き込まれたバイト列を現在の出力
-/// コードページ (日本語環境の既定は CP932) として解釈するので、UTF-8 の
-/// 日本語がそのまま届くと化ける。「パスフレーズ:」が
-/// 「繝代せ繝輔Ξ繝ｼ繧ｺ:」になるのはこれである。
+/// `rpassword::prompt_password` is not used. It writes the prompt to the
+/// terminal device (`CONOUT$` on Windows, `/dev/tty` on Unix) **as raw bytes**.
+/// A Windows console interprets what is written as the current output code
+/// page (CP932 by default in a Japanese environment), so UTF-8 Japanese
+/// arriving as-is comes out garbled. That is why a prompt reading
+/// "パスフレーズ:" turns into "繝代せ繝輔Ξ繝ｼ繧ｺ:".
 ///
-/// 標準エラー出力なら Rust の標準ライブラリが噛む。Windows では相手が
-/// コンソールかどうかを見て、コンソールなら UTF-16 に直して
-/// `WriteConsoleW` で書くため、コードページに関わらず化けない。
-/// **だから促しは標準エラー出力へ書き、読むところだけ rpassword に任せる。**
+/// Standard error goes through Rust's standard library. On Windows it checks
+/// whether the destination is a console and, if so, converts to UTF-16 and
+/// writes with `WriteConsoleW`, so the code page does not garble it.
+/// **Hence the prompt goes to stderr and only the reading is left to rpassword.**
 ///
-/// 標準出力ではなく標準エラー出力なのは、促しが出力の一部ではないからだ。
-/// `oag-wallet ... | something` としたときに促しが混ざってはいけない。
+/// stderr rather than stdout, because the prompt is not part of the output.
+/// It must not mix in when you write `oag-wallet ... | something`.
 fn read_secret(prompt: &str) -> std::io::Result<String> {
     use std::io::{BufRead, IsTerminal, Write};
     use zeroize::Zeroize;
@@ -317,29 +317,29 @@ fn read_secret(prompt: &str) -> std::io::Result<String> {
     rpassword::read_password()
 }
 
-/// 新しく決めるパスフレーズを、確認付きで尋ねる。
+/// Ask for a new passphrase, with confirmation.
 fn new_passphrase(file: &Option<PathBuf>) -> Result<Secret, String> {
     if file.is_some() {
         return passphrase(file, "");
     }
-    let first = passphrase(&None, "パスフレーズ: ")?;
-    let second = passphrase(&None, "もう一度: ")?;
+    let first = passphrase(&None, "passphrase: ")?;
+    let second = passphrase(&None, "again: ")?;
     if *first != *second {
-        return Err("パスフレーズが一致しない".to_string());
+        return Err("the passphrases do not match".to_string());
     }
     if first.len() < MIN_PASSPHRASE_LEN {
         return Err(format!(
-            "パスフレーズは {MIN_PASSPHRASE_LEN} 文字以上であること"
+            "the passphrase must be at least {MIN_PASSPHRASE_LEN} characters"
         ));
     }
     Ok(first)
 }
 
-/// 控えの取り方を伝える。
+/// Explain how to keep the backup.
 fn print_backup(mnemonic: &Mnemonic, used_passphrase: bool) {
     let words = mnemonic.words();
     println!();
-    println!("控えの語 (これだけですべてのアドレスを復元できる):");
+    println!("recovery phrase (this alone restores every address):");
     println!();
     // 番号を付けて 4 語ずつ並べる。書き写す先の紙でも順序を保てる。
     for (row, line) in words.chunks(4).enumerate() {
@@ -351,14 +351,16 @@ fn print_backup(mnemonic: &Mnemonic, used_passphrase: bool) {
         println!("    {}", cells.join(" "));
     }
     println!();
-    println!("**紙に書き写して安全な場所に保管すること。**");
-    println!("この語を知る者は資金を動かせる。失えば資金は取り戻せない。");
-    println!("アドレスをあとから増やしても、この控えのままでよい。");
+    println!("**Copy it onto paper and keep it somewhere safe.**");
+    println!("Anyone who knows these words can move the funds. Lose them and the funds are gone.");
+    println!("However many addresses you add later, this same phrase is enough.");
     if used_passphrase {
         println!();
-        println!("**追加パスフレーズも要る。** 語だけでは復元できない。");
-        println!("そして打ち間違えても失敗としては現れない。別のパスフレーズは");
-        println!("残高 0 の別のウォレットを作るだけで、どこにも誤りは出ない。");
+        println!("**The optional passphrase is needed too.** The words alone will not restore it.");
+        println!("And a typo does not surface as a failure. A different passphrase");
+        println!(
+            "simply creates another wallet with a zero balance, and nothing reports an error."
+        );
     }
 }
 
@@ -366,13 +368,13 @@ impl Common {
     fn network(&self) -> Result<Network, String> {
         self.network
             .parse()
-            .map_err(|_| format!("知らないネットワーク: {}", self.network))
+            .map_err(|_| format!("unknown network: {}", self.network))
     }
 
-    /// ノードへの呼び出し口。合言葉はデータディレクトリから読む。
+    /// The call interface to the node. The cookie is read from the data directory.
     fn client(&self, network: Network) -> Result<Client, String> {
         let credential = read_cookie(&self.datadir).map_err(|e| {
-            format!("{e}\nノードが動いていて、--datadir が合っているか確かめること")
+            format!("{e}\nCheck that the node is running and that --datadir is correct")
         })?;
         let addr = self
             .rpc
@@ -393,9 +395,9 @@ async fn run() -> Result<(), String> {
             let pass = new_passphrase(&cli.common.passphrase_file)?;
             let (store, mnemonic) = Keystore::create(&cli.common.wallet, network, &pass, &extra)
                 .map_err(|e| e.to_string())?;
-            println!("{} に新しいウォレットを作った", cli.common.wallet.display());
+            println!("created a new wallet at {}", cli.common.wallet.display());
             println!(
-                "受取先: {}",
+                "receiving address: {}",
                 store.default_address().map_err(|e| e.to_string())?
             );
             print_backup(&mnemonic, !extra.is_empty());
@@ -408,9 +410,9 @@ async fn run() -> Result<(), String> {
         } => {
             let mut text = match &mnemonic_file {
                 Some(path) => std::fs::read_to_string(path)
-                    .map_err(|e| format!("{} を読めない: {e}", path.display()))?,
-                None => read_secret("控えの語 (空白区切り): ")
-                    .map_err(|e| format!("控えの語を読めない: {e}"))?,
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?,
+                None => read_secret("recovery phrase (space separated): ")
+                    .map_err(|e| format!("cannot read the recovery phrase: {e}"))?,
             };
             let mnemonic = Mnemonic::parse(&text);
             text.zeroize();
@@ -420,19 +422,19 @@ async fn run() -> Result<(), String> {
 
             let store = Keystore::restore(&cli.common.wallet, network, &pass, &mnemonic, &extra)
                 .map_err(|e| e.to_string())?;
-            println!("{} に復元した", cli.common.wallet.display());
+            println!("restored to {}", cli.common.wallet.display());
             println!(
-                "受取先: {}",
+                "receiving address: {}",
                 store.default_address().map_err(|e| e.to_string())?
             );
             println!();
-            println!("アドレスを 2 個以上使っていた場合は、`address --new` を");
-            println!("その数だけ繰り返すと同じものが出る。");
+            println!("If two or more addresses were in use, running `address --new`");
+            println!("that many times brings back the same ones.");
             Ok(())
         }
 
         Command::Seed => {
-            let pass = passphrase(&cli.common.passphrase_file, "パスフレーズ: ")?;
+            let pass = passphrase(&cli.common.passphrase_file, "passphrase: ")?;
             let store =
                 Keystore::open(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
             print_backup(store.mnemonic(), false);
@@ -440,7 +442,7 @@ async fn run() -> Result<(), String> {
         }
 
         Command::Address { new, all } => {
-            let pass = passphrase(&cli.common.passphrase_file, "パスフレーズ: ")?;
+            let pass = passphrase(&cli.common.passphrase_file, "passphrase: ")?;
             let mut store =
                 Keystore::open(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
             if new {
@@ -457,7 +459,7 @@ async fn run() -> Result<(), String> {
         }
 
         Command::Balance { verbose } => {
-            let pass = passphrase(&cli.common.passphrase_file, "パスフレーズ: ")?;
+            let pass = passphrase(&cli.common.passphrase_file, "passphrase: ")?;
             let store =
                 Keystore::open(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
             let client = cli.common.client(network)?;
@@ -473,31 +475,31 @@ async fn run() -> Result<(), String> {
                 if coin.is_spendable_at(height + 1) {
                     spendable = spendable
                         .checked_add(coin.output.amount)
-                        .ok_or("桁あふれ")?;
+                        .ok_or("overflow")?;
                     if confirmations(coin.height, height) < params::RECOMMENDED_CONFIRMATIONS {
-                        shallow = shallow.checked_add(coin.output.amount).ok_or("桁あふれ")?;
+                        shallow = shallow.checked_add(coin.output.amount).ok_or("overflow")?;
                     }
                 } else {
-                    immature = immature.checked_add(coin.output.amount).ok_or("桁あふれ")?;
+                    immature = immature.checked_add(coin.output.amount).ok_or("overflow")?;
                 }
             }
 
-            println!("  使える残高    {spendable} OAG");
+            println!("  spendable      {spendable} OAG");
             if shallow.to_atomic() > 0 {
                 println!(
-                    "  うち浅い      {shallow} OAG (確認数が目安の {} に届いていない)",
+                    "  of which shallow {shallow} OAG (below the guideline of {} confirmations)",
                     params::RECOMMENDED_CONFIRMATIONS
                 );
             }
             if immature.to_atomic() > 0 {
                 println!(
-                    "  未成熟        {immature} OAG (コインベースは {} ブロック後に使える)",
+                    "  immature       {immature} OAG (a coinbase is spendable after {} blocks)",
                     params::COINBASE_MATURITY
                 );
             }
-            println!("  UTXO          {} 件", scan.len());
-            println!("  アドレス      {} 個", store.len());
-            println!("  ノードの高さ  {height}");
+            println!("  UTXOs          {}", scan.len());
+            println!("  addresses      {}", store.len());
+            println!("  node height    {height}");
 
             if verbose {
                 println!();
@@ -511,7 +513,7 @@ async fn run() -> Result<(), String> {
                         " "
                     };
                     println!(
-                        "  {mark} {} OAG  高さ {}  承認 {}  {}:{}",
+                        "  {mark} {} OAG  height {}  confirmations {}  {}:{}",
                         coin.output.amount,
                         coin.height,
                         confirmations,
@@ -520,11 +522,11 @@ async fn run() -> Result<(), String> {
                     );
                 }
                 if immature.to_atomic() > 0 {
-                    println!("  (* は未成熟)");
+                    println!("  (* is immature)");
                 }
                 if shallow.to_atomic() > 0 {
                     println!(
-                        "  (! は確認数 {} 未満。支払いとして受け取るなら待つこと)",
+                        "  (! is below {} confirmations; wait before accepting it as payment)",
                         params::RECOMMENDED_CONFIRMATIONS
                     );
                 }
@@ -537,14 +539,14 @@ async fn run() -> Result<(), String> {
             amount,
             dry_run,
         } => {
-            let pass = passphrase(&cli.common.passphrase_file, "パスフレーズ: ")?;
+            let pass = passphrase(&cli.common.passphrase_file, "passphrase: ")?;
             let store =
                 Keystore::open(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
-            let to_address =
-                Address::decode_on(network, &to).map_err(|e| format!("宛先アドレスが不正: {e}"))?;
+            let to_address = Address::decode_on(network, &to)
+                .map_err(|e| format!("the destination address is invalid: {e}"))?;
             let amount = amount
                 .parse::<Amount>()
-                .map_err(|e| format!("額が不正: {e}"))?;
+                .map_err(|e| format!("the amount is invalid: {e}"))?;
 
             let client = cli.common.client(network)?;
             let height = block_count(&client).await?;
@@ -563,17 +565,17 @@ async fn run() -> Result<(), String> {
             let signed = sign(&draft, |lock| store.key_for(lock)).map_err(|e| e.to_string())?;
             let raw = signed.encode();
 
-            println!("  宛先          {to_address}");
-            println!("  送る額        {amount} OAG");
-            println!("  手数料        {} OAG", draft.fee);
-            println!("  おつり        {} OAG", draft.change);
-            println!("  入力          {} 件", draft.spent.len());
-            println!("  大きさ        {} バイト", raw.len());
+            println!("  to             {to_address}");
+            println!("  amount         {amount} OAG");
+            println!("  fee            {} OAG", draft.fee);
+            println!("  change         {} OAG", draft.change);
+            println!("  inputs         {}", draft.spent.len());
+            println!("  size           {} bytes", raw.len());
             println!("  txid          {}", signed.txid());
 
             if dry_run {
                 println!();
-                println!("--dry-run のため送らない。生の取引:");
+                println!("--dry-run, so nothing is sent. Raw transaction:");
                 println!("{}", to_hex(&raw));
                 return Ok(());
             }
@@ -581,9 +583,9 @@ async fn run() -> Result<(), String> {
             let txid = client
                 .call("sendrawtransaction", json!([to_hex(&raw)]))
                 .await
-                .map_err(|e| format!("送信を断られた: {e}"))?;
+                .map_err(|e| format!("the send was refused: {e}"))?;
             println!();
-            println!("送信した: {}", as_str(&txid, "txid")?);
+            println!("sent: {}", as_str(&txid, "txid")?);
             Ok(())
         }
 
@@ -592,13 +594,13 @@ async fn run() -> Result<(), String> {
             max_inputs,
             dry_run,
         } => {
-            let pass = passphrase(&cli.common.passphrase_file, "パスフレーズ: ")?;
+            let pass = passphrase(&cli.common.passphrase_file, "passphrase: ")?;
             let store =
                 Keystore::open(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
 
             let target = match &to {
                 Some(text) => Address::decode_on(network, text)
-                    .map_err(|e| format!("まとめ先のアドレスが不正: {e}"))?,
+                    .map_err(|e| format!("the consolidation target address is invalid: {e}"))?,
                 None => store.default_address().map_err(|e| e.to_string())?,
             };
             // **まとめ先が自分のものか確かめる。**
@@ -618,7 +620,9 @@ async fn run() -> Result<(), String> {
             let (mut coins, truncated) = scan_partial(&client, &store).await?;
             let next_height = height + 1;
             if truncated {
-                println!("  走査は上限で打ち切られた。手持ちは下の数より多い。");
+                println!(
+                    "  the scan was truncated at its limit; holdings exceed the numbers below."
+                );
             }
 
             // **mempool で使用中の出力を外す。**
@@ -633,25 +637,28 @@ async fn run() -> Result<(), String> {
             coins.retain(|c| !pending.contains(&(c.outpoint.txid.to_string(), c.outpoint.index)));
             let held = coins.len();
             if before != held {
-                println!("  未確定で使用中 {} 件 (除いた)", before - held);
+                println!(
+                    "  {} in use by unconfirmed transactions (excluded)",
+                    before - held
+                );
             }
             let usable = coins
                 .iter()
                 .filter(|c| c.is_spendable_at(next_height))
                 .count();
-            println!("  手持ちの UTXO  {held} 件");
-            println!("  今まとめられる {usable} 件 (残りはコインベースの成熟待ち)");
+            println!("  UTXOs held     {held}");
+            println!("  foldable now   {usable} (the rest are waiting for coinbase maturity)");
 
             // **1 件以下なら何もしない。** 二度押しでも手数料は減らない。
             if usable < 2 {
                 println!();
-                println!("まとめるものがない。何もしなかった。");
+                println!("nothing to consolidate. Nothing was done.");
                 if truncated {
                     // 打ち切られた 50 件がたまたま全部成熟待ちだった場合が
                     // ある。**並びは決まっているので、すぐ引き直しても同じ
                     // 顔ぶれが返る。** 待つしかない。
-                    println!("ただし走査は打ち切られている。返ってきた範囲がすべて成熟待ちの");
-                    println!("ときはこうなる。何ブロックか進めてからもう一度試すこと。");
+                    println!("The scan was truncated, though. This is what happens when everything that came");
+                    println!("back is waiting to mature. Advance a few blocks and try again.");
                 }
                 return Ok(());
             }
@@ -676,41 +683,43 @@ async fn run() -> Result<(), String> {
             let immature = held - usable;
 
             println!();
-            println!("  まとめ先      {target}");
+            println!("  target         {target}");
             if !to_myself {
                 println!();
-                println!("**まとめ先はこのウォレットのアドレスではない。**");
-                println!("実行すると {out} OAG を手放すことになる。意図した宛先か確かめること。");
+                println!("**The target is not an address of this wallet.**");
+                println!(
+                    "Running this gives away {out} OAG. Make sure that is the intended recipient."
+                );
             }
-            println!("  畳む入力      {taken} 件");
-            println!("  出来高        {out} OAG");
-            println!("  手数料        {} OAG", draft.fee);
-            println!("  大きさ        {} バイト", raw.len());
+            println!("  inputs folded  {taken}");
+            println!("  output         {out} OAG");
+            println!("  fee            {} OAG", draft.fee);
+            println!("  size           {} bytes", raw.len());
             println!("  txid          {}", signed.txid());
             if truncated {
-                println!("  この後の UTXO {after} 件以上");
+                println!("  UTXOs after    {after} or more");
             } else {
-                println!("  この後の UTXO {after} 件");
+                println!("  UTXOs after    {after}");
             }
             println!();
             if truncated {
                 // 走査が打ち切られている以上、「全部畳んだ」とは言えない。
                 // 見えていない手持ちがまだある。
-                println!("走査が打ち切られているので、これで終わりではない。");
-                println!("確定したらもう一度実行すること。上限を下回るまで繰り返す。");
+                println!("The scan was truncated, so this is not the end.");
+                println!("Run it again once this confirms. Repeat until you are under the limit.");
             } else if left_over > 0 {
-                println!("1 本に入り切らなかった。残り {left_over} 件は、この取引が");
-                println!("確定してからもう一度実行すると畳める。");
+                println!("They did not all fit in one transaction. The remaining {left_over} can be folded");
+                println!("by running this again once this transaction confirms.");
             } else {
-                println!("使える分はこれで全部畳んだ。");
+                println!("Everything spendable has been folded.");
             }
             if immature > 0 {
-                println!("ほかに {immature} 件がコインベースの成熟待ち。こちらは時間が要る。");
+                println!("Another {immature} are waiting for coinbase maturity. Those need time.");
             }
 
             if dry_run {
                 println!();
-                println!("--dry-run のため送らない。生の取引:");
+                println!("--dry-run, so nothing is sent. Raw transaction:");
                 println!("{}", to_hex(&raw));
                 return Ok(());
             }
@@ -718,9 +727,9 @@ async fn run() -> Result<(), String> {
             let txid = client
                 .call("sendrawtransaction", json!([to_hex(&raw)]))
                 .await
-                .map_err(|e| format!("送信を断られた: {e}"))?;
+                .map_err(|e| format!("the send was refused: {e}"))?;
             println!();
-            println!("送信した: {}", as_str(&txid, "txid")?);
+            println!("sent: {}", as_str(&txid, "txid")?);
             Ok(())
         }
 
@@ -741,11 +750,11 @@ async fn run() -> Result<(), String> {
     }
 }
 
-/// mempool の取引が使っている出力を集める。
+/// Collect the outputs used by transactions in the mempool.
 ///
-/// `scanutxos` は UTXO セットしか見ないので、未確定の取引が使っている
-/// 出力も「まだある」と答える。それを手持ちに数えたまま組むと、自分の
-/// 未確定の取引と衝突する取引ができる。
+/// `scanutxos` looks only at the UTXO set, so outputs used by an unconfirmed
+/// transaction still answer "present". Counting those as holdings produces a
+/// transaction that conflicts with our own unconfirmed one.
 async fn pending_spends(client: &Client) -> Result<HashSet<(String, u32)>, String> {
     let list = client
         .call("getmempool", json!([]))
@@ -777,67 +786,67 @@ async fn pending_spends(client: &Client) -> Result<HashSet<(String, u32)>, Strin
     Ok(spent)
 }
 
-/// PST を読む。16 進のテキストとして持ち運ぶ。
+/// Read a PST. It travels as hexadecimal text.
 fn read_pst(path: &std::path::Path) -> Result<Pst, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("{} を読めない: {e}", path.display()))?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let bytes = from_hex(text.trim())?;
-    Pst::decode(&bytes).map_err(|e| format!("{} を PST として読めない: {e}", path.display()))
+    Pst::decode(&bytes).map_err(|e| format!("cannot read {} as a PST: {e}", path.display()))
 }
 
-/// PST を書く。書き出し先が無ければ標準出力へ。
+/// Write a PST. To standard output when no destination is given.
 fn write_pst(pst: &Pst, out: &Option<PathBuf>) -> Result<(), String> {
     let text = to_hex(&pst.encode());
     match out {
         Some(path) => {
             std::fs::write(path, format!("{text}\n"))
-                .map_err(|e| format!("{} に書けない: {e}", path.display()))?;
-            println!("{} に書き出した", path.display());
+                .map_err(|e| format!("cannot write to {}: {e}", path.display()))?;
+            println!("written to {}", path.display());
         }
         None => println!("{text}"),
     }
     Ok(())
 }
 
-/// PST の中身を表示する。
+/// Show the contents of a PST.
 fn show_pst(pst: &Pst, network: Network) -> Result<(), String> {
     let tx = pst.unsigned();
-    println!("  入力          {} 件", pst.inputs().len());
+    println!("  inputs         {}", pst.inputs().len());
     for (index, input) in pst.inputs().iter().enumerate() {
         let where_ = input
             .utxo
             .lock
             .to_address(network)
             .map(|a| a.to_string())
-            .unwrap_or_else(|_| "(この実装が知らない条件)".to_string());
+            .unwrap_or_else(|_| "(a condition this implementation does not know)".to_string());
         let state = if input.signature.is_some() {
-            "署名済み"
+            "signed"
         } else {
-            "**未署名**"
+            "**unsigned**"
         };
         println!("    [{index}] {} OAG  {where_}  {state}", input.utxo.amount);
     }
-    println!("  出力          {} 件", tx.outputs.len());
+    println!("  outputs        {}", tx.outputs.len());
     for (index, output) in tx.outputs.iter().enumerate() {
         let where_ = output
             .lock
             .to_address(network)
             .map(|a| a.to_string())
-            .unwrap_or_else(|_| "(この実装が知らない条件)".to_string());
+            .unwrap_or_else(|_| "(a condition this implementation does not know)".to_string());
         println!("    [{index}] {} OAG  {where_}", output.amount);
     }
     // **署名する前にこれを見ること。** 出来上がる取引が手放す額である。
     println!(
-        "  手数料        {} OAG",
+        "  fee            {} OAG",
         pst.fee().map_err(|e| e.to_string())?
     );
     println!(
-        "  署名          {}",
+        "  signatures     {}",
         if pst.is_complete() {
-            "揃っている".to_string()
+            "complete".to_string()
         } else {
             format!(
-                "{} / {} 件",
+                "{} / {}",
                 pst.inputs()
                     .iter()
                     .filter(|i| i.signature.is_some())
@@ -852,14 +861,14 @@ fn show_pst(pst: &Pst, network: Network) -> Result<(), String> {
 async fn pst(common: &Common, network: Network, action: PstCommand) -> Result<(), String> {
     match action {
         PstCommand::Create { to, amount, out } => {
-            let pass = passphrase(&common.passphrase_file, "パスフレーズ: ")?;
+            let pass = passphrase(&common.passphrase_file, "passphrase: ")?;
             let store =
                 Keystore::open(&common.wallet, network, &pass).map_err(|e| e.to_string())?;
-            let to_address =
-                Address::decode_on(network, &to).map_err(|e| format!("宛先アドレスが不正: {e}"))?;
+            let to_address = Address::decode_on(network, &to)
+                .map_err(|e| format!("the destination address is invalid: {e}"))?;
             let amount = amount
                 .parse::<Amount>()
-                .map_err(|e| format!("額が不正: {e}"))?;
+                .map_err(|e| format!("the amount is invalid: {e}"))?;
 
             let client = common.client(network)?;
             let height = block_count(&client).await?;
@@ -880,7 +889,7 @@ async fn pst(common: &Common, network: Network, action: PstCommand) -> Result<()
         }
 
         PstCommand::Sign { file, out } => {
-            let pass = passphrase(&common.passphrase_file, "パスフレーズ: ")?;
+            let pass = passphrase(&common.passphrase_file, "passphrase: ")?;
             let store =
                 Keystore::open(&common.wallet, network, &pass).map_err(|e| e.to_string())?;
             let mut pst = read_pst(&file)?;
@@ -892,24 +901,24 @@ async fn pst(common: &Common, network: Network, action: PstCommand) -> Result<()
                 .sign_with(|lock| store.key_for(lock))
                 .map_err(|e| e.to_string())?;
             println!();
-            println!("{added} 件に署名した");
+            println!("signed {added} inputs");
             if !pst.is_complete() {
-                println!("まだ揃っていない。残りの持ち主へ回すこと。");
+                println!("Not complete yet. Pass it to the remaining owners.");
             }
             write_pst(&pst, &Some(out.unwrap_or(file)))
         }
 
         PstCommand::Combine { files, out } => {
             let mut parts = files.iter();
-            let first = parts.next().expect("2 つ以上あることは clap が保証する");
+            let first = parts.next().expect("clap guarantees there are two or more");
             let mut combined = read_pst(first)?;
             let mut taken = 0;
             for path in parts {
                 taken += combined
                     .combine(&read_pst(path)?)
-                    .map_err(|e| format!("{} を束ねられない: {e}", path.display()))?;
+                    .map_err(|e| format!("cannot combine {}: {e}", path.display()))?;
             }
-            println!("{taken} 件の署名を取り込んだ");
+            println!("took in {taken} signatures");
             show_pst(&combined, network)?;
             println!();
             write_pst(&combined, &out)
@@ -923,12 +932,12 @@ async fn pst(common: &Common, network: Network, action: PstCommand) -> Result<()
             // **すべての署名を検証してから取り出す。**
             let tx = pst.finalize().map_err(|e| e.to_string())?;
             let raw = tx.encode();
-            println!("  大きさ        {} バイト", raw.len());
+            println!("  size           {} bytes", raw.len());
             println!("  txid          {}", tx.txid());
 
             if dry_run {
                 println!();
-                println!("--dry-run のため送らない。生の取引:");
+                println!("--dry-run, so nothing is sent. Raw transaction:");
                 println!("{}", to_hex(&raw));
                 return Ok(());
             }
@@ -936,22 +945,22 @@ async fn pst(common: &Common, network: Network, action: PstCommand) -> Result<()
             let txid = client
                 .call("sendrawtransaction", json!([to_hex(&raw)]))
                 .await
-                .map_err(|e| format!("送信を断られた: {e}"))?;
+                .map_err(|e| format!("the send was refused: {e}"))?;
             println!();
-            println!("送信した: {}", as_str(&txid, "txid")?);
+            println!("sent: {}", as_str(&txid, "txid")?);
             Ok(())
         }
     }
 }
 
-/// 16 進のテキストをバイト列にする。
+/// Turn hexadecimal text into bytes.
 fn from_hex(text: &str) -> Result<Vec<u8>, String> {
     if !text.len().is_multiple_of(2) {
-        return Err("16 進の桁数が奇数である".to_string());
+        return Err("the hex has an odd number of digits".to_string());
     }
     (0..text.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).map_err(|e| format!("16 進が不正: {e}")))
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).map_err(|e| format!("invalid hex: {e}")))
         .collect()
 }
 
@@ -962,53 +971,53 @@ async fn block_count(client: &Client) -> Result<u64, String> {
         .map_err(|e| e.to_string())?;
     value
         .as_u64()
-        .ok_or_else(|| "getblockcount が数値を返さない".to_string())
+        .ok_or_else(|| "getblockcount did not return a number".to_string())
 }
 
-/// 高さ `coin` のブロックに入った出力の、先端 `tip` から見た確認数。
+/// Confirmations, seen from tip `tip`, of an output in the block at height `coin`.
 ///
-/// **先端そのものに入った出力は 1 である。** 0 承認とは、まだどのブロック
-/// にも入っていないことを指す。ウォレットはチェーンの UTXO セットしか
-/// 見ないので、ここに現れる出力は必ず 1 以上である
+/// **An output in the tip itself is 1.** Zero confirmations means not yet in
+/// any block. The wallet looks only at the chain's UTXO set, so anything
+/// appearing here is always 1 or more
 /// (`docs/SPEC.md` §10.7)。
 fn confirmations(coin: u64, tip: u64) -> u64 {
     tip.saturating_sub(coin).saturating_add(1)
 }
 
-/// 自分の UTXO をノードに数えてもらう。
+/// Have the node count our UTXOs.
 ///
-/// 支払い条件から UTXO を引く索引が無いため、ノードは UTXO セットを
-/// 丸ごと走査する。応答が打ち切られていたら、残高を過少に見せない
-/// ように断る。
+/// There is no index from spending condition to UTXO, so the node scans the
+/// whole UTXO set. If the response was truncated, it refuses, so as not to
+/// understate the balance.
 ///
-/// 打ち切られても構わない手続きは [`scan_partial`] を使う。
+/// Operations that tolerate truncation use [`scan_partial`].
 async fn scan(client: &Client, store: &Keystore) -> Result<Vec<Coin>, String> {
     let (coins, truncated) = scan_partial(client, store).await?;
     if truncated {
         return Err(
-            "UTXO が多すぎて走査が打ち切られた。このまま続けると残高を実際より\
-             少なく見積もる。`consolidate` でまとめること"
+            "too many UTXOs, so the scan was truncated. Continuing would understate \
+             the balance. Fold them up with `consolidate`"
                 .to_string(),
         );
     }
     Ok(coins)
 }
 
-/// 走査する。打ち切られたかどうかも返し、**打ち切られていても中身を返す**。
+/// Scan. Reports whether it was truncated and **returns the contents either way**.
 ///
-/// # なぜ断らないのか
+/// # Why it does not refuse
 ///
-/// 残高は全部を見ないと出せない。足し損ねた分だけ小さく出るので、
-/// 打ち切られた走査から残高を名乗るのは嘘である。
+/// A balance cannot be stated without seeing everything. It comes out short by
+/// whatever was missed, so claiming a balance from a truncated scan is a lie.
 ///
-/// **まとめは違う。** 畳むのに全部は要らない。手持ちのうち何件かが
-/// 返ってくれば、それを 1 つにできる。むしろ上限に当たっている状態こそ
-/// まとめが要る場面であり、そこで断ると**抜け出す道具が、抜け出すべき
-/// 状態でだけ使えない**ことになる。
+/// **Consolidation is different.** Folding does not need everything. If some of
+/// the holdings come back, they can be made into one. Indeed, hitting the bound
+/// is exactly when folding is needed, and refusing there would make **the tool
+/// for getting out unusable precisely in the state you need to get out of**.
 ///
-/// 返る顔ぶれは「直近の N 件」ではない。UTXO の鍵は `txid ++ 出力番号`
-/// で、txid はハッシュだから、並びは事実上でたらめである。**手持ちから
-/// 適当に N 件**であり、畳む相手としてはそれで足りる。
+/// The set that comes back is not "the most recent N". A UTXO's key is
+/// `txid ++ output index`, and a txid is a hash, so the order is effectively
+/// arbitrary. It is **an arbitrary N of the holdings**, which is enough to fold.
 async fn scan_partial(client: &Client, store: &Keystore) -> Result<(Vec<Coin>, bool), String> {
     let addresses: Vec<String> = store
         .addresses()
@@ -1026,7 +1035,7 @@ async fn scan_partial(client: &Client, store: &Keystore) -> Result<(Vec<Coin>, b
     let utxos = result
         .get("utxos")
         .and_then(Value::as_array)
-        .ok_or("scanutxos の応答に utxos が無い")?;
+        .ok_or("the scanutxos response has no utxos")?;
 
     // 自分の支払い条件だけを引き当てる。引き当てられないものは、
     // 署名できないのだから手持ちに数えない。
@@ -1050,19 +1059,19 @@ async fn scan_partial(client: &Client, store: &Keystore) -> Result<(Vec<Coin>, b
                 index: u32::try_from(
                     utxo.get("index")
                         .and_then(Value::as_u64)
-                        .ok_or("utxo.index が無い")?,
+                        .ok_or("utxo.index is missing")?,
                 )
-                .map_err(|_| "utxo.index が大きすぎる")?,
+                .map_err(|_| "utxo.index is too large")?,
             },
             output: TxOutput::new(amount, lock.clone()),
             height: utxo
                 .get("height")
                 .and_then(Value::as_u64)
-                .ok_or("utxo.height が無い")?,
+                .ok_or("utxo.height is missing")?,
             is_coinbase: utxo
                 .get("coinbase")
                 .and_then(Value::as_bool)
-                .ok_or("utxo.coinbase が無い")?,
+                .ok_or("utxo.coinbase is missing")?,
         });
     }
     Ok((coins, truncated))
@@ -1072,21 +1081,23 @@ fn as_str(value: &Value, name: &str) -> Result<String, String> {
     value
         .as_str()
         .map(str::to_string)
-        .ok_or_else(|| format!("{name} が文字列でない"))
+        .ok_or_else(|| format!("{name} is not a string"))
 }
 
 fn as_hash(value: &Value) -> Result<Hash, String> {
     as_str(value, "txid")?
         .parse()
-        .map_err(|_| "txid が読めない".to_string())
+        .map_err(|_| "the txid cannot be read".to_string())
 }
 
-/// atomic 単位の 10 進文字列を額に直す。
+/// Turn a decimal string in atomic units into an amount.
 ///
-/// JSON の数値では 10^25 を表しきれないため、文字列でやり取りしている。
+/// A JSON number cannot express 10^25, so these travel as strings.
 fn as_atomic(value: &Value) -> Result<Amount, String> {
     let text = as_str(value, "amount")?;
-    let atomic: u128 = text.parse().map_err(|_| format!("額が読めない: {text}"))?;
+    let atomic: u128 = text
+        .parse()
+        .map_err(|_| format!("the amount cannot be read: {text}"))?;
     Amount::from_atomic(atomic).map_err(|e| e.to_string())
 }
 

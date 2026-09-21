@@ -73,10 +73,10 @@ pub const MAX_POSITION: usize = u16::MAX as usize;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyError {
     /// 高さが u32 に収まらない。
-    #[error("高さ {0} は索引の鍵に収まらない")]
+    #[error("height {0} does not fit in the index key")]
     HeightTooLarge(u64),
     /// ブロック内の位置が u16 に収まらない。
-    #[error("ブロック内の位置 {0} は索引の鍵に収まらない")]
+    #[error("the index {0} within the block does not fit in the index key")]
     PositionTooLarge(usize),
 }
 

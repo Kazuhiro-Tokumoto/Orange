@@ -165,7 +165,7 @@ fn round_trips(command: &str, payload: &[u8]) {
         let again = message.encode_payload();
         assert_eq!(
             again, payload,
-            "{command}: 復号できたのに符号化し直すと別のバイト列になる"
+            "{command}: decoded, but re-encoding produces different bytes"
         );
     }
 }

@@ -22,7 +22,7 @@ use oag_primitives::{Amount, Hash};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CodecError {
     /// 入力が途中で終端した。
-    #[error("入力が不足している: {needed} バイト必要だが {remaining} バイトしかない")]
+    #[error("not enough input: {needed} bytes required but only {remaining} remain")]
     UnexpectedEof {
         /// 必要なバイト数。
         needed: usize,
@@ -30,7 +30,7 @@ pub enum CodecError {
         remaining: usize,
     },
     /// 復号後にバイトが残っている。
-    #[error("復号後に {0} バイトが余っている")]
+    #[error("{0} bytes left over after decoding")]
     TrailingBytes(usize),
     /// varint が不正。
     #[error(transparent)]
@@ -39,7 +39,7 @@ pub enum CodecError {
     #[error(transparent)]
     Amount(#[from] AmountError),
     /// 個数フィールドが、残りバイト数に収まらない個数を宣言している。
-    #[error("{field} の個数 {declared} が残り {remaining} バイトに対して大きすぎる")]
+    #[error("the count {declared} for {field} is too large for the remaining {remaining} bytes")]
     CountTooLarge {
         /// フィールド名。
         field: &'static str,
@@ -49,7 +49,7 @@ pub enum CodecError {
         remaining: usize,
     },
     /// 値がフィールドの表現範囲を超えている。
-    #[error("{field} の値 {value} が範囲外")]
+    #[error("the value {value} of {field} is out of range")]
     ValueOutOfRange {
         /// フィールド名。
         field: &'static str,
@@ -57,7 +57,7 @@ pub enum CodecError {
         value: u128,
     },
     /// 可変長フィールドが上限を超えている。
-    #[error("{field} の長さ {actual} が上限 {max} を超えている")]
+    #[error("the length {actual} of {field} exceeds the limit {max}")]
     LengthTooLarge {
         /// フィールド名。
         field: &'static str,
@@ -112,7 +112,10 @@ impl<'a> Reader<'a> {
 
     /// 固定長バイト列を読む。
     pub fn read_array<const N: usize>(&mut self) -> Result<[u8; N], CodecError> {
-        Ok(self.take(N)?.try_into().expect("長さは take が保証する"))
+        Ok(self
+            .take(N)?
+            .try_into()
+            .expect("take guarantees the length"))
     }
 
     /// `n` バイト読む。
@@ -344,7 +347,7 @@ mod tests {
         buf.extend_from_slice(&[0u8; 100]);
 
         let mut r = Reader::new(&buf);
-        assert_eq!(r.read_count_of("items", 10).unwrap(), 10, "10x10 は入る");
+        assert_eq!(r.read_count_of("items", 10).unwrap(), 10, "10x10 fits");
 
         let mut r = Reader::new(&buf);
         assert!(
@@ -352,7 +355,7 @@ mod tests {
                 r.read_count_of("items", 40),
                 Err(CodecError::CountTooLarge { .. })
             ),
-            "1 要素 40 バイトなら 10 個は入らない"
+            "at 40 bytes per element, 10 do not fit"
         );
     }
 

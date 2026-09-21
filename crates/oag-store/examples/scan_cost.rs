@@ -43,8 +43,8 @@ fn a_chain(len: u64) -> (BlockIndex, Vec<BlockIndexEntry>) {
 
 /// 候補探しだけを測る。
 fn candidate_search() {
-    println!("── 候補探しだけを測る (1 ブロックあたり) ──");
-    println!("{:>10}  {:>14}  {:>14}", "ブロック", "全件走査", "索引");
+    println!("-- measuring candidate search alone (per block) --");
+    println!("{:>10}  {:>14}  {:>14}", "block", "full scan", "index");
     for len in [1_000u64, 10_000, 100_000, 400_000] {
         let (index, entries) = a_chain(len);
         let tip_work = entries[entries.len() - 2].cumulative_work;
@@ -80,12 +80,12 @@ fn candidate_search() {
 /// 端から端まで通して測る。
 fn end_to_end() {
     println!();
-    println!("── 記憶域まで通して測る (1 ブロックあたり) ──");
-    println!("{:>10}  {:>14}", "ブロック", "μs/ブロック");
+    println!("-- measuring through to storage (per block) --");
+    println!("{:>10}  {:>14}", "block", "us/block");
     for count in [1_000usize, 4_000, 8_000] {
         let dir = std::env::temp_dir().join(format!("oag-scan-{count}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let store = Store::open(dir.join("chain.redb")).expect("記憶域を開ける");
+        let store = Store::open(dir.join("chain.redb")).expect("storage can be opened");
 
         let mut chain = scenarios::open(store);
         let genesis = chain.tip().unwrap().hash;

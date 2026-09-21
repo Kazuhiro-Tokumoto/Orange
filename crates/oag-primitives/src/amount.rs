@@ -28,16 +28,16 @@ pub const MAX_SUPPLY_ATOMIC: u128 = MAX_SUPPLY_OAG * ATOMIC_PER_OAG;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AmountError {
     /// 総発行量を超える金額。
-    #[error("金額 {0} atomic が総発行量 {MAX_SUPPLY_ATOMIC} atomic を超えている")]
+    #[error("the amount {0} atomic exceeds the total supply {MAX_SUPPLY_ATOMIC} atomic")]
     OutOfRange(u128),
     /// 文字列が金額として解釈できない。
-    #[error("金額として解釈できない: {0}")]
+    #[error("cannot be parsed as an amount: {0}")]
     Malformed(&'static str),
     /// 小数部が {DECIMALS} 桁を超えている。
-    #[error("小数部が {DECIMALS} 桁を超えている")]
+    #[error("the fractional part exceeds {DECIMALS} digits")]
     TooManyDecimals,
     /// varint の復号に失敗した。
-    #[error("金額の復号に失敗した: {0}")]
+    #[error("decoding the amount failed: {0}")]
     VarInt(#[from] VarIntError),
 }
 
@@ -70,7 +70,10 @@ impl Amount {
     /// # Panics
     /// `value` が総発行量を超える場合。const 文脈ではコンパイルエラーとなる。
     pub const fn from_atomic_const(value: u128) -> Amount {
-        assert!(value <= MAX_SUPPLY_ATOMIC, "Amount が総発行量を超えている");
+        assert!(
+            value <= MAX_SUPPLY_ATOMIC,
+            "Amount exceeds the total supply"
+        );
         Amount(value)
     }
 
@@ -166,7 +169,7 @@ impl FromStr for Amount {
     /// 符号、指数表記、桁区切り、空白は受け付けない。
     fn from_str(s: &str) -> Result<Amount, AmountError> {
         if s.is_empty() {
-            return Err(AmountError::Malformed("空文字列"));
+            return Err(AmountError::Malformed("empty string"));
         }
 
         let (whole_str, frac_str) = match s.split_once('.') {
@@ -175,15 +178,17 @@ impl FromStr for Amount {
         };
 
         if whole_str.is_empty() && frac_str.is_empty() {
-            return Err(AmountError::Malformed("数字がない"));
+            return Err(AmountError::Malformed("no digits"));
         }
         if frac_str.contains('.') {
-            return Err(AmountError::Malformed("小数点が複数ある"));
+            return Err(AmountError::Malformed("more than one decimal point"));
         }
         if !whole_str.bytes().all(|b| b.is_ascii_digit())
             || !frac_str.bytes().all(|b| b.is_ascii_digit())
         {
-            return Err(AmountError::Malformed("十進数字以外を含む"));
+            return Err(AmountError::Malformed(
+                "contains something other than a decimal digit",
+            ));
         }
         if frac_str.len() > DECIMALS as usize {
             return Err(AmountError::TooManyDecimals);
@@ -194,18 +199,18 @@ impl FromStr for Amount {
         } else {
             whole_str
                 .parse()
-                .map_err(|_| AmountError::Malformed("整数部が大きすぎる"))?
+                .map_err(|_| AmountError::Malformed("the integer part is too large"))?
         };
 
         let mut frac: u128 = 0;
         if !frac_str.is_empty() {
             frac = frac_str
                 .parse()
-                .map_err(|_| AmountError::Malformed("小数部が解釈できない"))?;
+                .map_err(|_| AmountError::Malformed("the fractional part cannot be parsed"))?;
             let scale = 10u128.pow(DECIMALS - frac_str.len() as u32);
             frac = frac
                 .checked_mul(scale)
-                .ok_or(AmountError::Malformed("小数部が大きすぎる"))?;
+                .ok_or(AmountError::Malformed("the fractional part is too large"))?;
         }
 
         let atomic = whole
@@ -312,7 +317,7 @@ mod tests {
         for s in [
             "", ".", "-1", "+1", "1.2.3", "1e10", "1_000", " 1", "1 ", "abc",
         ] {
-            assert!(s.parse::<Amount>().is_err(), "{s} は拒否されるべき");
+            assert!(s.parse::<Amount>().is_err(), "{s} should be rejected");
         }
         // 17 桁の小数部は受け付けない。
         assert_eq!(

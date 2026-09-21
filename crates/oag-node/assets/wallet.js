@@ -1,27 +1,27 @@
-// Orange (OAG) のウォレット。
+// The Orange (OAG) wallet.
 //
-// ここは**鍵に触らない**。触るのは wasm の中だけで、こちらは
+// This file **never touches keys**. Only the wasm does. All this does is
 //
-//   - 画面の出し入れ
-//   - ノードへの問い合わせ
-//   - 暗号化された記録を localStorage に置くこと
+//   - moving things on and off the screen
+//   - querying the node
+//   - putting the encrypted record in localStorage
 //
-// しかやらない。パスフレーズは wasm へ渡すために一度だけ通るが、
-// 種と秘密鍵がこちら側へ返ることは無い。
+// The passphrase passes through once on its way to the wasm, but
+// neither the seed nor any private key ever comes back to this side.
 "use strict";
 
 const RECORD_KEY = "oag.wallet.record";
-// 語から戻したときに、一度に問い合わせる番号の幅。
+// How many indices are queried at a time when restoring from a phrase.
 const WINDOW = 200;
-// 探索で見る窓の数の上限。**終わらない輪を作らない。**
-// ここに当たるほど配った人は、記録を持ち込んで開く方が速い。
+// The cap on how many windows the search looks at. **Never build an endless loop.**
+// Anyone who handed out this many addresses is better off bringing the record along.
 const WINDOWS = 25;
 
 let wasm = null;
 let chain = null;
 let state = { addresses: [], coins: [], total: "0", truncated: false, count: 0 };
 
-// ━━━━━━━━ wasm ━━━━━━━━
+// ======== wasm ========
 
 function bytes(ptr, len) {
   return new Uint8Array(wasm.memory.buffer, ptr, len);
@@ -31,7 +31,7 @@ function hex(array) {
   return Array.from(array, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// JSON を 1 本渡して 1 本返る。返りは [長さ 4 バイト LE][中身]。
+// One JSON in, one JSON out. The reply is [length, 4 bytes LE][contents].
 function call(request) {
   const body = new TextEncoder().encode(JSON.stringify(request));
   const input = wasm.oag_alloc(body.length);
@@ -40,7 +40,7 @@ function call(request) {
   const output = wasm.oag_call(input, body.length);
   wasm.oag_free(input, body.length);
 
-  // 確保のたびに memory が伸びうる。**毎回見直す。**
+  // Memory can grow on every allocation. **Re-read it every time.**
   const length = new DataView(wasm.memory.buffer).getUint32(output, true);
   const answer = new TextDecoder().decode(bytes(output, length + 4).slice(4));
   wasm.oag_free(output, length + 4);
@@ -50,7 +50,7 @@ function call(request) {
   return parsed.ok;
 }
 
-// ━━━━━━━━ ノード ━━━━━━━━
+// ======== the node ========
 
 async function ask(path, body) {
   const response = await fetch(path, {
@@ -63,7 +63,7 @@ async function ask(path, body) {
   return answer;
 }
 
-// ━━━━━━━━ 画面の道具 ━━━━━━━━
+// ======== screen helpers ========
 
 const $ = (id) => document.getElementById(id);
 
@@ -85,8 +85,8 @@ function tabs(group, chosen) {
   }
 }
 
-// 画面を止めずに、重い処理の前に一度描かせる。
-// Argon2 は数秒かかる。押した手応えが無いと壊れたように見える。
+// Let the page paint once before heavy work, so it does not freeze.
+// Argon2 takes seconds. With no feedback on the press it looks broken.
 function breathe() {
   return new Promise((resolve) => setTimeout(resolve, 30));
 }
@@ -104,14 +104,14 @@ async function working(button, label, task) {
   }
 }
 
-// ━━━━━━━━ 記録 ━━━━━━━━
+// ======== the record ========
 
-// 置き場を使えない browser がある (私的な窓、保存を止めてある設定)。
-// **置けなくても資金は消えない。** 控えの語さえあれば戻せる。だが
-// 「次に開けない」ことは伝わっていなければならない。
+// Some browsers cannot use storage (private windows, storage disabled).
+// **Funds are not lost when it cannot be stored.** The recovery phrase brings
+// them back. But the user must be told that it will not reopen.
 const STORAGE_FAILED =
-  "この機械に記録を置けませんでした。閉じると開き直せません。" +
-  "控えの語を必ず書き留めてください。";
+  "No record could be stored on this machine. Close it and it will not reopen. " +
+  "Be sure to write down the recovery phrase.";
 
 function keepRecord(record) {
   try {
@@ -130,7 +130,7 @@ function storedRecord() {
   }
 }
 
-// ━━━━━━━━ 錠 ━━━━━━━━
+// ======== the lock ========
 
 const GATE = [
   ["tab-open", "pane-open"],
@@ -147,9 +147,9 @@ function gateReady() {
 
 async function doOpen() {
   const record = storedRecord();
-  if (!record) return say("gate-msg", "この機械には記録がありません", true);
+  if (!record) return say("gate-msg", "there is no record on this machine", true);
   const pass = $("open-pass").value;
-  await working($("do-open"), "解いています…", async () => {
+  await working($("do-open"), "unlocking…", async () => {
     try {
       const opened = call({
         cmd: "open",
@@ -168,9 +168,9 @@ async function doOpen() {
 async function doCreate() {
   const pass = $("new-pass").value;
   if (pass !== $("new-pass2").value) {
-    return say("gate-msg", "二度入れたパスフレーズが違います", true);
+    return say("gate-msg", "the two passphrases do not match", true);
   }
-  await working($("do-new"), "作っています…", async () => {
+  await working($("do-new"), "creating…", async () => {
     try {
       const made = call({
         cmd: "create",
@@ -190,7 +190,7 @@ async function doCreate() {
 async function doRestore() {
   const phrase = $("res-phrase").value.trim().replace(/\s+/g, " ");
   const pass = $("res-pass").value;
-  await working($("do-restore"), "戻しています…", async () => {
+  await working($("do-restore"), "restoring…", async () => {
     try {
       const back = call({ cmd: "restore", network: chain.network, pass, phrase });
       $("res-phrase").value = "";
@@ -205,24 +205,24 @@ async function doRestore() {
   });
 }
 
-// 控えの語だけから戻したとき、どこまで使われていたかは記録に無い。
+// Restoring from the phrase alone, nothing records how far it was used.
 //
-// **未使用出力だけを見て決めない。** 受け取って全部使ったアドレスは
-// 未使用出力を持たないので、そこで探索を止めると、その先の資金を
-// 見落とす。使われた形跡は履歴で見る。
+// **Do not decide from unspent outputs alone.** An address that received
+// and then spent everything has no unspent outputs, so stopping there
+// misses the funds beyond it. Evidence of use is found in the history.
 async function discover() {
-  say("gate-msg", "鎖に問い合わせています…", false);
+  say("gate-msg", "querying the chain…", false);
   let highest = -1;
   for (let window = 0; window < WINDOWS; window += 1) {
     const from = window * WINDOW;
     const looked = call({ cmd: "derive", from, count: WINDOW });
     let used = [];
     if (chain.indexed) {
-      // 使われたかどうかだけ分かればいい。**中身は要らない。**
+      // We only need to know whether it was used. **The contents do not matter.**
       used = (await ask("/api/history", { addresses: looked.addresses, max: 1 })).used;
     } else {
-      // 索引が無ければ履歴を引けない。**残っている出力だけで探す。**
-      // 見落としうることは画面に出す。
+      // Without an index there is no history. **Search on remaining outputs alone.**
+      // Say on screen that this can miss things.
       const scanned = await ask("/api/scan", { addresses: looked.addresses });
       used = scanned.utxos.map((u) => ({ address: u.address }));
     }
@@ -230,7 +230,7 @@ async function discover() {
       const at = looked.addresses.indexOf(entry.address);
       if (at >= 0) highest = Math.max(highest, from + at);
     }
-    // この窓に形跡が無ければ、その先にも無いとみなす。
+    // No trace in this window is taken to mean none beyond it either.
     if (used.length === 0) break;
   }
   const grown = call({ cmd: "grow", accounts: Math.max(highest + 1, 1) });
@@ -238,10 +238,10 @@ async function discover() {
   return grown.addresses;
 }
 
-// `kept` が偽なら、記録をこの機械に置けていない。**次に開くものが無い。**
+// When `kept` is false the record is not on this machine. **There is nothing to reopen.**
 //
-// `record` は書き出しに使う。**置き場から読み直さない。** 置けなかった
-// ときに読み直すと空が落ちてきて、一番要る場面で控えが取れない。
+// `record` is used for the download. **Do not re-read it from storage.** Re-reading
+// after a failed store yields an empty file exactly when the backup matters most.
 function showBackup(phrase, addresses, record, kept) {
   show("no-storage", kept === false);
   const words = phrase.split(" ");
@@ -272,7 +272,7 @@ function showBackup(phrase, addresses, record, kept) {
   show("backup", true);
 }
 
-// ━━━━━━━━ 本体 ━━━━━━━━
+// ======== the wallet itself ========
 
 const PANES = [
   ["tab-recv", "pane-recv"],
@@ -309,9 +309,9 @@ function draw() {
   const waiting = state.coins.length - usable.length;
 
   $("bal").textContent = state.total;
-  const parts = [`未使用の出力 ${state.count} 個`];
-  if (waiting > 0) parts.push(`うち ${waiting} 個は成熟待ち`);
-  if (state.truncated) parts.push("上限に達したため、これで全部ではありません");
+  const parts = [`${state.count} unspent outputs`];
+  if (waiting > 0) parts.push(`${waiting} of them waiting to mature`);
+  if (state.truncated) parts.push("the scan hit its limit, so this is not all of them");
   $("bal-sub").textContent = parts.join(" · ");
 
   const list = $("coins");
@@ -325,7 +325,7 @@ function draw() {
     if (!mature(coin)) {
       const pill = document.createElement("span");
       pill.className = "pill";
-      pill.textContent = "成熟待ち";
+      pill.textContent = "maturing";
       who.append(pill);
     }
     const much = document.createElement("div");
@@ -335,8 +335,8 @@ function draw() {
   }
   $("coins-head").textContent =
     state.coins.length > 200
-      ? `${state.count} 個のうち 200 個を表示しています`
-      : `${state.count} 個`;
+      ? `showing 200 of ${state.count}`
+      : `${state.count}`;
   show("do-sweep", usable.length >= 2);
 }
 
@@ -348,7 +348,7 @@ async function doSend() {
   const to = $("send-to").value.trim();
   const amount = $("send-amount").value.trim();
   say("send-msg", "", false);
-  await working($("do-send"), "署名しています…", async () => {
+  await working($("do-send"), "signing…", async () => {
     try {
       const signed = call({
         cmd: "pay",
@@ -361,7 +361,7 @@ async function doSend() {
       });
       const sent = await ask("/api/send", { hex: signed.hex });
       $("send-to").value = $("send-amount").value = "";
-      say("send-msg", `送りました。${sent.txid} (手数料 ${signed.fee} OAG)`, false);
+      say("send-msg", `sent. ${sent.txid} (fee ${signed.fee} OAG)`, false);
       await refresh();
     } catch (e) {
       say("send-msg", e.message, true);
@@ -371,7 +371,7 @@ async function doSend() {
 
 async function doSweep() {
   say("sweep-msg", "", false);
-  await working($("do-sweep"), "まとめています…", async () => {
+  await working($("do-sweep"), "consolidating…", async () => {
     try {
       const signed = call({
         cmd: "sweep",
@@ -383,8 +383,8 @@ async function doSweep() {
       const sent = await ask("/api/send", { hex: signed.hex });
       say(
         "sweep-msg",
-        `${signed.inputs} 個を 1 個にまとめました。${sent.txid} ` +
-          `(${signed.size} バイト、手数料 ${signed.fee} OAG)`,
+        `folded ${signed.inputs} into one. ${sent.txid} ` +
+          `(${signed.size} bytes, fee ${signed.fee} OAG)`,
         false,
       );
       await refresh();
@@ -395,7 +395,7 @@ async function doSweep() {
 }
 
 async function doNewAddress() {
-  await working($("do-newaddr"), "作っています…", async () => {
+  await working($("do-newaddr"), "creating…", async () => {
     try {
       const grown = call({ cmd: "grow", accounts: state.addresses.length + 1 });
       keepRecord(grown.record);
@@ -417,25 +417,25 @@ function doLock() {
   gateReady();
 }
 
-// ━━━━━━━━ 起動 ━━━━━━━━
+// ======== startup ========
 
 async function boot() {
-  // 平文で届いた頁は、差し替えられていても見分けが付かない。
-  // **手元から開いた場合を除いて警告する。**
+  // A page delivered in plaintext gives no sign that it was swapped out.
+  // **Warn unless it was opened locally.**
   const local = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(location.hostname);
   show("insecure", location.protocol !== "https:" && !local);
 
   const module = await fetch("/wallet.wasm").then((r) => r.arrayBuffer());
   wasm = (await WebAssembly.instantiate(module, {})).instance.exports;
 
-  // wasm には乱数源が無い。**こちらから種を渡す。**
+  // The wasm has no source of randomness. **We hand it a seed.**
   const seed = new Uint8Array(32);
   crypto.getRandomValues(seed);
   call({ cmd: "seed", bytes: hex(seed) });
   seed.fill(0);
 
   chain = await ask("/api/info", {});
-  $("chain").textContent = `${chain.network} · 高さ ${chain.height}`;
+  $("chain").textContent = `${chain.network} · height ${chain.height}`;
 
   show("boot", false);
   gateReady();
@@ -459,17 +459,17 @@ document.addEventListener("DOMContentLoaded", () => {
     showBackup(seen.phrase, state.addresses, storedRecord() || "", true);
   };
   $("do-forget").onclick = () => {
-    if (!confirm("この機械から記録を消します。控えの語が無いと戻せません。")) return;
+    if (!confirm("This deletes the record from this machine. Without the recovery phrase it cannot be restored.")) return;
     try {
       localStorage.removeItem(RECORD_KEY);
     } catch (e) {
-      /* 消せなくても進む */
+      /* carry on even if it cannot be deleted */
     }
     gateReady();
   };
 
   boot().catch((e) => {
-    $("boot").textContent = `起動できません: ${e.message}`;
+    $("boot").textContent = `cannot start: ${e.message}`;
     $("boot").className = "bad";
   });
 });

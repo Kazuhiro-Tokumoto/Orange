@@ -29,7 +29,7 @@ fn extend_headers(
         assert_eq!(
             chain
                 .accept_header(&block.header, &AcceptAnyPow, NOW)
-                .expect("有効なヘッダ"),
+                .expect("a valid header"),
             HeaderOutcome::New
         );
         hashes.push(parent);
@@ -119,7 +119,7 @@ fn a_connected_chain_gives_the_same_answer_as_the_active_index() {
         assert_eq!(
             chain.ancestor_hash_at(&blocks[29], height).unwrap(),
             chain.hash_at_height(height).unwrap(),
-            "高さ {height}"
+            "height {height}"
         );
     }
 }

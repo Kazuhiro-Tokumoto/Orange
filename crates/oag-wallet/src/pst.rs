@@ -62,13 +62,13 @@ pub enum PstError {
     #[error(transparent)]
     Codec(#[from] CodecError),
     /// 目印が合わない。
-    #[error("PST の目印が合わない")]
+    #[error("the PST magic does not match")]
     BadMagic,
     /// 知らない版数。
-    #[error("PST の版数 {0} をこの実装は知らない")]
+    #[error("this implementation does not know PST version {0}")]
     UnknownVersion(u8),
     /// 入力・出力の数が本体と食い違う。
-    #[error("{field} の数が {declared} だが、取引の側は {actual} である")]
+    #[error("the count of {field} is {declared} but the transaction has {actual}")]
     CountMismatch {
         /// 食い違った箇所。
         field: &'static str,
@@ -78,13 +78,13 @@ pub enum PstError {
         actual: usize,
     },
     /// 「未署名の取引」に署名が入っている。
-    #[error("未署名のはずの取引の入力 {index} に署名が入っている")]
+    #[error("input {index} of a transaction that should be unsigned carries a signature")]
     NotUnsigned {
         /// その入力の位置。
         index: usize,
     },
     /// 署名の長さが合わない。
-    #[error("入力 {index} の署名が {actual} バイトである ({expected} バイトであること)")]
+    #[error("the signature of input {index} is {actual} bytes (must be {expected})")]
     BadSignatureLength {
         /// その入力の位置。
         index: usize,
@@ -94,13 +94,13 @@ pub enum PstError {
         expected: usize,
     },
     /// 署名が検証を通らない。
-    #[error("入力 {index} の署名が通らない")]
+    #[error("the signature of input {index} does not verify")]
     BadSignature {
         /// その入力の位置。
         index: usize,
     },
     /// 別の取引のものを束ねようとした。
-    #[error("束ねようとした PST は別の取引のものである ({ours} と {theirs})")]
+    #[error("the PST being combined belongs to a different transaction ({ours} and {theirs})")]
     NotTheSameTransaction {
         /// こちらの txid。
         ours: Hash,
@@ -108,19 +108,19 @@ pub enum PstError {
         theirs: Hash,
     },
     /// 添えられた UTXO が食い違う。
-    #[error("入力 {index} に添えられた出力が食い違っている")]
+    #[error("the output attached to input {index} disagrees")]
     ConflictingUtxo {
         /// その入力の位置。
         index: usize,
     },
     /// まだ署名が揃っていない。
-    #[error("入力 {index} の署名がまだ無い")]
+    #[error("input {index} has no signature yet")]
     Incomplete {
         /// 欠けている入力の位置。
         index: usize,
     },
     /// 出力の合計が入力を超えている。
-    #[error("出力の合計 {out} が入力の合計 {in_} を超えている")]
+    #[error("total outputs {out} exceed total inputs {in_}")]
     NegativeFee {
         /// 入力の合計。
         in_: Amount,
@@ -128,13 +128,13 @@ pub enum PstError {
         out: Amount,
     },
     /// 金額の計算が桁あふれした。
-    #[error("金額の計算が桁あふれした")]
+    #[error("the amount arithmetic overflowed")]
     Overflow,
     /// sighash を計算できない。
-    #[error("sighash を計算できない: {0}")]
+    #[error("cannot compute the sighash: {0}")]
     Sighash(String),
     /// 出来上がりが大きすぎる。
-    #[error("取引が大きすぎる ({actual} バイト、上限 {max})")]
+    #[error("the transaction is too large ({actual} bytes, limit {max})")]
     TooLarge {
         /// 実際の大きさ。
         actual: usize,
@@ -647,7 +647,7 @@ mod tests {
             fee_rate: FEE_RATE.parse().unwrap(),
         };
         let draft = build(&coins, &spend).unwrap();
-        assert_eq!(draft.spent.len(), 2, "2 件とも使う組み立てになっていない");
+        assert_eq!(draft.spent.len(), 2, "the build does not spend both");
         (Pst::from_draft(&draft), alice, bob)
     }
 
@@ -685,7 +685,7 @@ mod tests {
         assert!(!pst.is_complete());
         assert!(
             pst.unsigned().inputs.iter().all(|i| i.signature.is_empty()),
-            "未署名のはずの取引に署名が残っている"
+            "a signature remains on a transaction that should be unsigned"
         );
         // 下書きは大きさを測るために 64 バイトの場所取りを入れている。
         // **それを消さずに運ぶと、署名の入った取引を未署名だと偽ることに
@@ -698,7 +698,7 @@ mod tests {
         let (mut pst, alice, bob) = shared();
 
         let added = pst.sign_with(keyring(&[&alice])).unwrap();
-        assert_eq!(added, 1, "自分の持ち分だけを署名していない");
+        assert_eq!(added, 1, "it did not sign only its own share");
         assert!(!pst.is_complete());
 
         let added = pst.sign_with(keyring(&[&bob])).unwrap();
@@ -723,7 +723,11 @@ mod tests {
         pst.sign_with(keyring(&[&alice])).unwrap();
         let first = pst.inputs()[0].signature.clone();
         assert_eq!(pst.sign_with(keyring(&[&alice])).unwrap(), 0);
-        assert_eq!(pst.inputs()[0].signature, first, "他人の署名を上書きした");
+        assert_eq!(
+            pst.inputs()[0].signature,
+            first,
+            "it overwrote someone else's signature"
+        );
     }
 
     #[test]
@@ -792,7 +796,7 @@ mod tests {
             mine.combine(&theirs),
             Err(PstError::ConflictingUtxo { index: 1 })
         );
-        assert!(!mine.is_complete(), "食い違う署名を取り込んでいる");
+        assert!(!mine.is_complete(), "it took in a conflicting signature");
     }
 
     #[test]
@@ -959,7 +963,7 @@ mod tests {
                 bytes[at] ^= (state >> 32) as u8;
             }
             if let Ok(decoded) = Pst::decode(&bytes) {
-                assert_eq!(decoded.encode(), bytes, "復号できたのに元に戻らない");
+                assert_eq!(decoded.encode(), bytes, "decoded, but does not round-trip");
             }
         }
     }

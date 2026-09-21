@@ -475,7 +475,7 @@ mod tests {
         let (index, chain) = a_chain(100);
         let tip_work = chain[chain.len() - 2].cumulative_work;
         let visited: Vec<_> = index.candidates_above(tip_work).collect();
-        assert_eq!(visited.len(), 1, "先端 1 件を超えて走査している");
+        assert_eq!(visited.len(), 1, "scanned beyond the single tip");
         assert_eq!(visited[0], chain.last().unwrap().hash);
 
         // 先端に並んだら 1 件も返らない。
@@ -506,7 +506,10 @@ mod tests {
         index.record(&light);
 
         let order: Vec<Hash> = index.candidates_above(parent.cumulative_work).collect();
-        assert_eq!(order[0], heavy.hash, "作業量の多いほうが先に来ていない");
+        assert_eq!(
+            order[0], heavy.hash,
+            "the one with more work did not come first"
+        );
         assert!(order.contains(&light.hash));
     }
 
@@ -527,7 +530,7 @@ mod tests {
             .next()
             .unwrap();
         let expected = if a.hash < b.hash { a.hash } else { b.hash };
-        assert_eq!(first, expected, "同点でハッシュの小さいほうを選んでいない");
+        assert_eq!(first, expected, "on a tie, the smaller hash was not chosen");
         assert_eq!(index.best_header().unwrap(), expected);
     }
 
@@ -547,12 +550,12 @@ mod tests {
         assert_eq!(
             index.best_header().unwrap(),
             pending.hash,
-            "本体が無くても最良ヘッダにはなる"
+            "it can be the best header even without a body"
         );
         assert_eq!(
             index.candidates_above(parent.cumulative_work).count(),
             0,
-            "本体が無いのに先端の候補になっている"
+            "it is a tip candidate although it has no body"
         );
     }
 
@@ -589,12 +592,12 @@ mod tests {
         assert_eq!(
             index.candidates_above(before).count(),
             0,
-            "無効なのに候補に残っている"
+            "it is still a candidate although it is invalid"
         );
         assert_eq!(
             index.best_header().unwrap(),
             chain[chain.len() - 2].hash,
-            "最良ヘッダが 1 つ前に戻っていない"
+            "the best header did not fall back by one"
         );
     }
 
@@ -606,7 +609,7 @@ mod tests {
         let (_, chain) = a_chain(100);
         for entry in &chain {
             cache.put(entry.clone());
-            assert!(cache.len() <= 8, "上限を超えて抱えている");
+            assert!(cache.len() <= 8, "holding more than the limit");
         }
         assert_eq!(cache.len(), 8);
 

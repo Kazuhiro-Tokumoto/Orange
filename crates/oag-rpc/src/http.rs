@@ -48,10 +48,10 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
     /// 入出力の誤り。
-    #[error("入出力に失敗した: {0}")]
+    #[error("I/O failed: {0}")]
     Io(#[from] std::io::Error),
     /// 相手が接続を閉じた。
-    #[error("相手が接続を閉じた")]
+    #[error("the peer closed the connection")]
     Closed,
 }
 
@@ -134,7 +134,7 @@ impl Server {
             let (stream, _) = match self.listener.accept().await {
                 Ok(pair) => pair,
                 Err(e) => {
-                    eprintln!("RPC の接続を受け入れられない: {e}");
+                    eprintln!("cannot accept an RPC connection: {e}");
                     return;
                 }
             };
@@ -144,7 +144,7 @@ impl Server {
                 if let Err(e) = serve_connection(stream, &credential, handler).await {
                     // 相手が黙って切るのは日常であり、報せる価値がない。
                     if !matches!(e, HttpError::Closed) {
-                        eprintln!("RPC の接続を打ち切った: {e}");
+                        eprintln!("dropped the RPC connection: {e}");
                     }
                 }
             });
@@ -377,7 +377,10 @@ mod tests {
         // 前方一致で通ってしまうと、1 文字ずつ延ばして当てられる。
         let secret = "Basic dXNlcjpodW50ZXIy";
         for n in 0..secret.len() {
-            assert!(!matches(Some(&secret[..n]), secret), "{n} 文字で通った");
+            assert!(
+                !matches(Some(&secret[..n]), secret),
+                "it passed at {n} characters"
+            );
         }
         assert!(matches(Some(secret), secret));
     }

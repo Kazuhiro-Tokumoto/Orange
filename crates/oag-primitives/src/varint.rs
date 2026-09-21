@@ -13,13 +13,13 @@ pub const MAX_LEN_U128: usize = 19;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VarIntError {
     /// 継続ビットが立ったまま入力が終端した。
-    #[error("varint が途中で終端した")]
+    #[error("the varint ended early")]
     UnexpectedEof,
     /// 値が 128 ビットに収まらない。
-    #[error("varint が 128 ビットに収まらない")]
+    #[error("the varint does not fit in 128 bits")]
     Overflow,
     /// 最短形ではない符号化 (末尾に不要な 0 バイトが付いている)。
-    #[error("varint が最短形ではない (非正準符号化)")]
+    #[error("the varint is not in its shortest form (non-canonical encoding)")]
     NonCanonical,
 }
 
@@ -93,7 +93,7 @@ mod tests {
             u128::MAX,
         ] {
             let bytes = encode(v);
-            let (decoded, len) = decode(&bytes).expect("復号できる");
+            let (decoded, len) = decode(&bytes).expect("it decodes");
             assert_eq!(decoded, v);
             assert_eq!(len, bytes.len());
         }
@@ -139,7 +139,7 @@ mod tests {
     fn decode_stops_at_boundary() {
         let mut bytes = encode(300);
         bytes.extend_from_slice(b"trailing");
-        let (v, len) = decode(&bytes).expect("復号できる");
+        let (v, len) = decode(&bytes).expect("it decodes");
         assert_eq!(v, 300);
         assert_eq!(len, 2);
     }

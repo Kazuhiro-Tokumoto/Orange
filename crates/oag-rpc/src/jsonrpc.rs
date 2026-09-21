@@ -140,7 +140,7 @@ impl RpcError {
 
     /// 知らない手続き。
     pub fn method_not_found(method: &str) -> RpcError {
-        RpcError::new(METHOD_NOT_FOUND, format!("知らない手続き: {method}"))
+        RpcError::new(METHOD_NOT_FOUND, format!("unknown method: {method}"))
     }
 
     /// 引数が不正。
@@ -166,7 +166,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Request>(&text).unwrap(),
             request,
-            "往復して同じにならない"
+            "it does not round-trip"
         );
     }
 
@@ -175,22 +175,28 @@ mod tests {
         let text = r#"{"jsonrpc":"2.0","method":"getinfo","id":"abc"}"#;
         let request: Request = serde_json::from_str(text).unwrap();
         assert_eq!(request.id, Id::Text("abc".to_string()));
-        assert_eq!(request.params, None, "引数は省略できる");
+        assert_eq!(request.params, None, "the arguments may be omitted");
     }
 
     #[test]
     fn a_successful_response_carries_no_error_field() {
         let text = serde_json::to_string(&Response::ok(Some(Id::Number(7)), json!(42))).unwrap();
         assert!(text.contains("\"result\":42"));
-        assert!(!text.contains("error"), "成功なのに error がある: {text}");
+        assert!(
+            !text.contains("error"),
+            "success yet there is an error: {text}"
+        );
     }
 
     #[test]
     fn a_failed_response_carries_no_result_field() {
-        let error = RpcError::not_found("そんなブロックは無い");
+        let error = RpcError::not_found("there is no such block");
         let text = serde_json::to_string(&Response::err(Some(Id::Number(7)), error)).unwrap();
         assert!(text.contains("\"code\":-32001"));
-        assert!(!text.contains("result"), "失敗なのに result がある: {text}");
+        assert!(
+            !text.contains("result"),
+            "failure yet there is a result: {text}"
+        );
     }
 
     #[test]
@@ -198,7 +204,7 @@ mod tests {
         // 読めなかったのだから識別子も分からない。仕様は null を求める。
         let text = serde_json::to_string(&Response::err(
             None,
-            RpcError::new(PARSE_ERROR, "JSON として読めない"),
+            RpcError::new(PARSE_ERROR, "cannot be read as JSON"),
         ))
         .unwrap();
         assert!(text.contains("\"id\":null"), "{text}");

@@ -50,7 +50,7 @@ pub fn bytes(n: usize) -> String {
 /// ヘッダと本体がどこまで来たか。**中身が正しいかはここでは言わない。**
 #[macro_export]
 macro_rules! log_sync {
-    ($($arg:tt)*) => { println!("[同期] {}", format_args!($($arg)*)) };
+    ($($arg:tt)*) => { println!("[sync] {}", format_args!($($arg)*)) };
 }
 
 /// 検証 — 運んできたものを自分で確かめた話。
@@ -58,31 +58,31 @@ macro_rules! log_sync {
 /// 接続できた、リオーグした。**自分が納得したことだけをここに出す。**
 #[macro_export]
 macro_rules! log_verify {
-    ($($arg:tt)*) => { println!("[検証] {}", format_args!($($arg)*)) };
+    ($($arg:tt)*) => { println!("[check] {}", format_args!($($arg)*)) };
 }
 
 /// 取引 — mempool の出入り。
 #[macro_export]
 macro_rules! log_tx {
-    ($($arg:tt)*) => { println!("[取引] {}", format_args!($($arg)*)) };
+    ($($arg:tt)*) => { println!("[tx] {}", format_args!($($arg)*)) };
 }
 
 /// ピア — 接続の出入り。
 #[macro_export]
 macro_rules! log_peer {
-    ($($arg:tt)*) => { println!("[ピア] {}", format_args!($($arg)*)) };
+    ($($arg:tt)*) => { println!("[peer] {}", format_args!($($arg)*)) };
 }
 
 /// 採掘。
 #[macro_export]
 macro_rules! log_mine {
-    ($($arg:tt)*) => { println!("[採掘] {}", format_args!($($arg)*)) };
+    ($($arg:tt)*) => { println!("[mining] {}", format_args!($($arg)*)) };
 }
 
 /// 警告。標準エラーへ出す。
 #[macro_export]
 macro_rules! log_warn {
-    ($($arg:tt)*) => { eprintln!("[警告] {}", format_args!($($arg)*)) };
+    ($($arg:tt)*) => { eprintln!("[warn] {}", format_args!($($arg)*)) };
 }
 
 #[cfg(test)]

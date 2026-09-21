@@ -19,7 +19,7 @@ pub enum Network {
 
 /// 既知のネットワーク名に一致しなかったことを表す。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("ネットワーク名として解釈できない: {0}")]
+#[error("cannot be parsed as a network name: {0}")]
 pub struct UnknownNetwork(
     /// 与えられた名前。
     pub String,
@@ -200,7 +200,10 @@ mod tests {
                 network.rpc_port(),
                 network.mining_port(),
             ] {
-                assert!(!taken.contains(&port), "{port} は既存チェーンと衝突する");
+                assert!(
+                    !taken.contains(&port),
+                    "{port} collides with an existing chain"
+                );
             }
         }
     }
@@ -210,15 +213,15 @@ mod tests {
         for network in Network::ALL {
             assert!(
                 network.rpc_bind_default().is_loopback(),
-                "RPC は既定でループバックのみ"
+                "RPC is loopback-only by default"
             );
             assert!(
                 network.mining_bind_default().is_loopback(),
-                "マイニング用は既定でループバックのみ"
+                "the mining interface is loopback-only by default"
             );
             assert!(
                 !network.p2p_bind_default().is_loopback(),
-                "P2P は外部接続を受け入れる"
+                "P2P accepts external connections"
             );
         }
     }

@@ -69,7 +69,7 @@ pub fn fill(dest: &mut [u8]) -> bool {
 pub fn bytes<const N: usize>() -> Result<[u8; N], String> {
     let mut out = [0u8; N];
     if !fill(&mut out) {
-        return Err("乱数の種がまだ入っていない".to_string());
+        return Err("the random seed has not been supplied yet".to_string());
     }
     Ok(out)
 }

@@ -58,7 +58,7 @@ fn payout() -> Lock {
 
 fn start(tag: &str) -> (TempDir, NodeService) {
     let dir = TempDir::new(tag);
-    let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
+    let service = NodeService::start(NETWORK, &dir.0).expect("a node can be started");
     (dir, service)
 }
 
@@ -66,14 +66,14 @@ async fn wait_for_height(handle: &NodeHandle, wanted: u64) {
     let deadline = Instant::now() + MINING_TIMEOUT;
     let mut last = 0;
     while Instant::now() < deadline {
-        let status = handle.status().await.expect("状態を引ける");
+        let status = handle.status().await.expect("the state can be read");
         last = status.height;
         if status.height >= wanted {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("高さ {wanted} に届かなかった (今は {last})");
+    panic!("did not reach height {wanted} (now {last})");
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -105,7 +105,7 @@ fn several_threads_mine_a_chain() {
         // 積もうとしていたらここで増える。**
         assert_eq!(
             status.indexed_blocks, 4,
-            "ジェネシスと 3 個のはずが {} 個ある",
+            "there should be genesis plus 3 but there are {}",
             status.indexed_blocks
         );
     });
@@ -135,7 +135,7 @@ fn mining_stops_while_the_threads_are_running() {
         assert_eq!(
             handle.status().await.unwrap().height,
             settled,
-            "止めたのに掘り続けている"
+            "still mining after being stopped"
         );
 
         // もう一度始められること。

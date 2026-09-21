@@ -26,7 +26,7 @@ fn a_straight_chain_keeps_exactly_one_candidate() {
         assert_eq!(
             chain.tip_candidates(),
             2,
-            "高さ {expected_height} で候補が増えている"
+            "candidates grew at height {expected_height}"
         );
     }
 }
@@ -44,7 +44,10 @@ fn the_count_does_not_follow_the_height() {
     let at_510 = chain.tip_candidates();
 
     assert_eq!(chain.height().unwrap(), 510);
-    assert_eq!(at_10, at_510, "51 倍の高さで候補の数が変わっている");
+    assert_eq!(
+        at_10, at_510,
+        "the number of candidates changed at 51 times the height"
+    );
 }
 
 // ━━━━━━━━ 落としても判断が変わらないこと ━━━━━━━━
@@ -61,11 +64,11 @@ fn a_losing_branch_can_still_overtake_later() {
     // B を 3 個積む。作業量で負けるので先端は動かない。
     // **この 3 個は先端を下回るので、候補の集合から落ちる。**
     let b = extend(&mut chain, fork, 3, 2);
-    assert_eq!(chain.tip().unwrap().hash, a[4], "まだ A が先端");
+    assert_eq!(chain.tip().unwrap().hash, a[4], "A is still the tip");
 
     // B をさらに伸ばして追い越させる。落としたあとでも追い越せること。
     let b = extend(&mut chain, b[2], 4, 3);
-    assert_eq!(chain.tip().unwrap().hash, b[3], "B に切り替わる");
+    assert_eq!(chain.tip().unwrap().hash, b[3], "it switches to B");
     assert_eq!(chain.height().unwrap(), 7);
 }
 
@@ -90,8 +93,16 @@ fn the_best_header_is_unchanged_by_pruning() {
         );
     }
 
-    assert_eq!(chain.tip().unwrap().height(), 50, "本体の先端は 50");
-    assert_eq!(chain.best_header().unwrap().height(), 70, "ヘッダは 70");
+    assert_eq!(
+        chain.tip().unwrap().height(),
+        50,
+        "the tip with bodies is 50"
+    );
+    assert_eq!(
+        chain.best_header().unwrap().height(),
+        70,
+        "headers are at 70"
+    );
     assert_eq!(chain.best_header().unwrap().hash, header_tip);
 }
 
@@ -108,5 +119,9 @@ fn reopening_does_not_bring_the_dropped_keys_back() {
     let chain = open(store);
 
     assert_eq!(chain.height().unwrap(), height);
-    assert_eq!(chain.tip_candidates(), before, "開き直すと抱え込んでいる");
+    assert_eq!(
+        chain.tip_candidates(),
+        before,
+        "it hoards them when reopened"
+    );
 }

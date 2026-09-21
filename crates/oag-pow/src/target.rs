@@ -13,7 +13,7 @@ pub const MAX_TARGET: [u8; 32] = [0xff; 32];
 
 /// 難易度が不正。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("難易度は 1 以上でなければならない")]
+#[error("difficulty must be 1 or more")]
 pub struct ZeroDifficulty;
 
 /// 難易度からターゲットを求める。
@@ -85,7 +85,7 @@ mod tests {
     fn target_halves_when_difficulty_doubles() {
         let a = to_u256(&target_from_difficulty(1_000).unwrap());
         let b = to_u256(&target_from_difficulty(2_000).unwrap());
-        assert!((a / b - 2.0).abs() < 1e-9, "比が {} になっている", a / b);
+        assert!((a / b - 2.0).abs() < 1e-9, "the ratio came to {}", a / b);
     }
 
     #[test]
@@ -95,7 +95,7 @@ mod tests {
             let target = target_from_difficulty(difficulty).unwrap();
             assert!(
                 target <= previous,
-                "難易度 {difficulty} でターゲットが増えた"
+                "the target grew at difficulty {difficulty}"
             );
             previous = target;
         }
@@ -145,7 +145,7 @@ mod tests {
             let expected = 1.0 / difficulty as f64;
             assert!(
                 (observed / expected - 1.0).abs() < 0.15,
-                "難易度 {difficulty}: 期待 {expected:.5} に対し実測 {observed:.5}"
+                "difficulty {difficulty}: expected {expected:.5}, observed {observed:.5}"
             );
         }
     }

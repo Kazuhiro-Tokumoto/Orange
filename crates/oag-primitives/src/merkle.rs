@@ -72,7 +72,7 @@ mod tests {
         for n in 1..=64 {
             assert!(
                 seen.insert(merkle_root(&leaves(n)).unwrap()),
-                "{n} 枚のルートが他と衝突した"
+                "the root of {n} leaves collided with another"
             );
         }
     }

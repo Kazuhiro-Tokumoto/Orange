@@ -34,15 +34,15 @@ pub fn genesis() -> Block {
 /// 止めてしまうと調整まわりを試験できなくなる。止めた場合の振る舞いは
 /// [`the_difficulty_never_moves_without_retargeting`] で別に確かめる。
 pub fn open<S: ChainStore>(store: S) -> Chain<S> {
-    Chain::open(store, genesis(), DIFFICULTY, Retarget::Enabled).expect("ジェネシスは有効")
+    Chain::open(store, genesis(), DIFFICULTY, Retarget::Enabled).expect("genesis is valid")
 }
 
 /// インデックスの 1 件を引く。**知っていることを前提にする。**
 pub fn entry_of<S: ChainStore>(chain: &Chain<S>, hash: &Hash) -> crate::index::BlockIndexEntry {
     chain
         .entry(hash)
-        .expect("記憶域を読める")
-        .expect("そのブロックを知っている")
+        .expect("storage is readable")
+        .expect("that block is known")
 }
 
 /// `parent` の上に載る有効なブロックを組み立てる。
@@ -73,7 +73,7 @@ pub fn build_on<S: ChainStore>(chain: &Chain<S>, parent: Hash, salt: u64) -> Blo
             timestamp: GENESIS_TIME + height as i64 * 60,
             difficulty: chain
                 .expected_difficulty_for_child_of(&parent)
-                .expect("難易度を計算できる"),
+                .expect("difficulty can be computed"),
             height,
             nonce: salt,
         },
@@ -94,7 +94,7 @@ pub fn extend<S: ChainStore>(
         parent = block.header.hash();
         chain
             .accept_block(block, &AcceptAnyPow, NOW)
-            .expect("有効なブロック");
+            .expect("a valid block");
         hashes.push(parent);
     }
     hashes
@@ -107,13 +107,13 @@ fn has_coinbase_output<S: ChainStore>(chain: &Chain<S>, block_hash: &Hash) -> bo
         .block(block_hash)
         .ok()
         .flatten()
-        .expect("本体がある");
+        .expect("the body is present");
     let outpoint = OutPoint::new(block.transactions[0].txid(), 0);
     chain
         .utxo_view()
-        .expect("ビューを取れる")
+        .expect("a view can be taken")
         .get(&outpoint)
-        .expect("読める")
+        .expect("readable")
         .is_some()
 }
 
@@ -132,35 +132,42 @@ pub fn children_come_from_the_store<S: ChainStore>(store: S) {
     // 高さ 1 の上に、もう 1 本生やす。
     let fork = build_on(&chain, main[0], 777);
     let fork_hash = fork.header.hash();
-    chain.accept_block(fork, &AcceptAnyPow, NOW).expect("有効");
+    chain.accept_block(fork, &AcceptAnyPow, NOW).expect("valid");
 
-    let mut children = chain.store().children_of(&main[0]).expect("引ける");
+    let mut children = chain
+        .store()
+        .children_of(&main[0])
+        .expect("can be looked up");
     children.sort_unstable();
     let mut expected = vec![main[1], fork_hash];
     expected.sort_unstable();
-    assert_eq!(children, expected, "子が 2 つとも引けていない");
+    assert_eq!(children, expected, "not both children could be looked up");
 
     // ジェネシスは親を持たないので、0 のハッシュに子を登録しない。
     assert!(chain
         .store()
         .children_of(&Hash::ZERO)
-        .expect("引ける")
+        .expect("can be looked up")
         .is_empty());
     // 先端には子がいない。
     assert!(chain
         .store()
         .children_of(&main[2])
-        .expect("引ける")
+        .expect("can be looked up")
         .is_empty());
 
     // 同じブロックの状態が何度書き直されても、子は二重にならない。
     let entry = entry_of(&chain, &main[1]);
-    chain.store().put_index_entry(&entry).expect("書ける");
-    chain.store().put_index_entry(&entry).expect("書ける");
+    chain.store().put_index_entry(&entry).expect("writable");
+    chain.store().put_index_entry(&entry).expect("writable");
     assert_eq!(
-        chain.store().children_of(&main[0]).expect("引ける").len(),
+        chain
+            .store()
+            .children_of(&main[0])
+            .expect("can be looked up")
+            .len(),
         2,
-        "子が二重に登録されている"
+        "a child is registered twice"
     );
 }
 
@@ -174,7 +181,7 @@ pub fn starts_at_genesis<S: ChainStore>(store: S) {
     assert_eq!(
         chain.store().utxo_count().unwrap(),
         0,
-        "ジェネシスは報酬を放棄している"
+        "genesis forgoes the reward"
     );
 }
 
@@ -238,7 +245,7 @@ pub fn shorter_branch_stays_a_side_chain<S: ChainStore>(store: S) {
     assert_eq!(
         chain.indexed_blocks().unwrap(),
         5,
-        "サイドチェーンも記録される"
+        "side chains are recorded too"
     );
 }
 
@@ -257,14 +264,14 @@ pub fn a_heavier_branch_triggers_a_reorg<S: ChainStore>(store: S) {
         side.push(parent);
         let outcome = chain.accept_block(block, &AcceptAnyPow, NOW).unwrap();
         if i < 3 {
-            assert_eq!(outcome, AcceptOutcome::SideChain, "{i} 本目で切り替わった");
+            assert_eq!(outcome, AcceptOutcome::SideChain, "switched at branch {i}");
         } else {
             match outcome {
                 AcceptOutcome::Reorganized(reorg) => {
-                    assert_eq!(reorg.depth(), 3, "3 ブロック取り消すはず");
+                    assert_eq!(reorg.depth(), 3, "three blocks should be undone");
                     assert_eq!(reorg.connected.len(), 4);
                 }
-                other => panic!("リオーグしなかった: {other:?}"),
+                other => panic!("it did not reorg: {other:?}"),
             }
         }
     }
@@ -279,7 +286,7 @@ pub fn a_heavier_branch_triggers_a_reorg<S: ChainStore>(store: S) {
     for hash in &main {
         assert!(
             !has_coinbase_output(&chain, hash),
-            "取り消した枝の出力が残っている"
+            "outputs from the undone branch are still present"
         );
     }
     for hash in &side {
@@ -316,7 +323,7 @@ pub fn a_reorg_matches_a_direct_build<S: ChainStore>(forked_store: S, direct_sto
     assert_eq!(
         forked.store().utxo_count().unwrap(),
         direct.store().utxo_count().unwrap(),
-        "リオーグ後の UTXO 件数が直接構築したものと一致しない"
+        "the post-reorg UTXO count does not match a directly built one"
     );
 
     let forked_view = forked.utxo_view().unwrap();
@@ -326,7 +333,7 @@ pub fn a_reorg_matches_a_direct_build<S: ChainStore>(forked_store: S, direct_sto
         assert_eq!(
             forked_view.get(&outpoint).unwrap(),
             direct_view.get(&outpoint).unwrap(),
-            "高さ {} の出力が食い違った",
+            "the outputs at height {} disagreed",
             block.header.height
         );
     }
@@ -359,18 +366,18 @@ pub fn an_invalid_block_in_a_heavier_branch_is_contained<S: ChainStore>(store: S
     assert_eq!(
         chain.tip().unwrap().hash,
         good_tip,
-        "元の先端に戻っていない"
+        "it did not return to the original tip"
     );
     assert_eq!(chain.height().unwrap(), 2);
     assert_eq!(
         chain.store().utxo_count().unwrap(),
         good_count,
-        "UTXO が元に戻っていない"
+        "the UTXO set did not return to its original state"
     );
     for hash in &main {
         assert!(
             has_coinbase_output(&chain, hash),
-            "元の枝の出力が復元されていない"
+            "outputs of the original branch were not restored"
         );
     }
 
@@ -378,7 +385,7 @@ pub fn an_invalid_block_in_a_heavier_branch_is_contained<S: ChainStore>(store: S
     assert_eq!(
         entry_of(&chain, &b1_hash).status,
         BlockStatus::FullyValid,
-        "巻き添えで無効にされている"
+        "invalidated as collateral damage"
     );
     assert_eq!(entry_of(&chain, &b2_hash).status, BlockStatus::Invalid);
     assert_eq!(entry_of(&chain, &b3_hash).status, BlockStatus::Invalid);
@@ -434,7 +441,7 @@ pub fn a_deep_reorg_stays_consistent<S: ChainStore>(forked_store: S, direct_stor
     assert_eq!(
         chain.store().utxo_count().unwrap(),
         31,
-        "勝ち枝のコインベースのみ"
+        "only the winning branch's coinbase"
     );
 
     let mut direct = open(direct_store);
@@ -467,7 +474,7 @@ pub fn the_difficulty_is_fixed_until_the_window_is_full<S: ChainStore>(store: S)
     assert_eq!(
         chain.expected_difficulty_for_child_of(&tip).unwrap(),
         DIFFICULTY,
-        "等間隔なら難易度は変わらない"
+        "at even intervals the difficulty does not change"
     );
 }
 
@@ -514,9 +521,17 @@ pub fn headers_alone_do_not_move_the_tip<S: ChainStore>(store: S) {
         headers.push(block);
     }
 
-    assert_eq!(chain.tip().unwrap().hash, genesis, "先端は動かないはず");
+    assert_eq!(
+        chain.tip().unwrap().hash,
+        genesis,
+        "the tip should not move"
+    );
     assert_eq!(chain.height().unwrap(), 0);
-    assert_eq!(chain.best_header().unwrap().height(), 5, "ヘッダは先行する");
+    assert_eq!(
+        chain.best_header().unwrap().height(),
+        5,
+        "headers run ahead"
+    );
     assert_eq!(chain.indexed_blocks().unwrap(), 6);
 
     for header in &headers {
@@ -603,7 +618,7 @@ pub fn bodies_arriving_out_of_order_wait_for_their_parents<S: ChainStore>(store:
     assert_eq!(
         chain.accept_block(fourth, &AcceptAnyPow, NOW).unwrap(),
         AcceptOutcome::SideChain,
-        "親の本体が無いうちは切り替えない"
+        "do not switch while the parent's body is missing"
     );
     assert_eq!(chain.height().unwrap(), 0);
     assert_eq!(
@@ -625,7 +640,7 @@ pub fn bodies_arriving_out_of_order_wait_for_their_parents<S: ChainStore>(store:
     let outcome = chain.accept_block(first, &AcceptAnyPow, NOW).unwrap();
     assert!(
         matches!(outcome, AcceptOutcome::Reorganized(_)),
-        "4 つまとめて繋がる: {outcome:?}"
+        "all four connect at once: {outcome:?}"
     );
     assert_eq!(chain.height().unwrap(), 4);
     assert!(chain.missing_bodies(100).unwrap().is_empty());
@@ -651,7 +666,7 @@ pub fn missing_bodies_are_listed_oldest_first<S: ChainStore>(store: S) {
     assert_eq!(
         chain.missing_bodies(2).unwrap(),
         expected[..2].to_vec(),
-        "上限は古い側から効く"
+        "the bound takes effect from the older end"
     );
     assert!(chain.missing_bodies(0).unwrap().is_empty());
 }
@@ -712,7 +727,7 @@ pub fn a_header_for_an_invalid_block_is_refused<S: ChainStore>(store: S) {
     assert_eq!(
         chain.accept_block(bad, &AcceptAnyPow, NOW).unwrap(),
         AcceptOutcome::SideChain,
-        "接続に失敗するので先端にはならない"
+        "connecting fails, so it does not become the tip"
     );
     assert_eq!(entry_of(&chain, &bad_hash).status, BlockStatus::Invalid);
     assert_eq!(chain.tip().unwrap().hash, genesis);
@@ -732,7 +747,7 @@ pub fn a_header_for_an_invalid_block_is_refused<S: ChainStore>(store: S) {
 /// かかる。試験用のネットワークとして使い物にならない。
 pub fn the_difficulty_never_moves_without_retargeting<S: ChainStore>(store: S) {
     let mut chain =
-        Chain::open(store, genesis(), DIFFICULTY, Retarget::Disabled).expect("ジェネシスは有効");
+        Chain::open(store, genesis(), DIFFICULTY, Retarget::Disabled).expect("genesis is valid");
     let tip = chain.tip().unwrap().hash;
 
     // 窓幅を大きく超えて積む。調整が効いていれば必ず動く長さである。
@@ -744,7 +759,7 @@ pub fn the_difficulty_never_moves_without_retargeting<S: ChainStore>(store: S) {
         assert_eq!(
             entry_of(&chain, hash).header.difficulty,
             DIFFICULTY,
-            "難易度が動いている"
+            "difficulty is moving"
         );
     }
     assert_eq!(
@@ -771,6 +786,6 @@ pub fn the_difficulty_rises_when_blocks_come_too_fast<S: ChainStore>(store: S) {
             .expected_difficulty_for_child_of(steady.last().unwrap())
             .unwrap(),
         DIFFICULTY,
-        "目標どおりの間隔で難易度が動いている"
+        "difficulty moves as the target interval intends"
     );
 }

@@ -37,7 +37,7 @@ mod tests {
             SEED_EPOCH_BLOCKS,
             SEED_EPOCH_BLOCKS + SEED_LAG - 1,
         ] {
-            assert_eq!(seed_height(height), 0, "高さ {height}");
+            assert_eq!(seed_height(height), 0, "height {height}");
         }
     }
 
@@ -69,7 +69,11 @@ mod tests {
     fn the_seed_height_is_always_an_epoch_boundary() {
         for height in (0..20_000).step_by(37) {
             let seed = seed_height(height);
-            assert_eq!(seed % SEED_EPOCH_BLOCKS, 0, "高さ {height} → シード {seed}");
+            assert_eq!(
+                seed % SEED_EPOCH_BLOCKS,
+                0,
+                "height {height} to seed {seed}"
+            );
             assert!(seed + SEED_LAG <= height || seed == 0);
         }
     }

@@ -62,7 +62,7 @@ pub struct Seed([u8; SEED_LEN]);
 
 impl std::fmt::Debug for Seed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Seed(<伏せ字>)")
+        f.write_str("Seed(<redacted>)")
     }
 }
 
@@ -70,7 +70,7 @@ impl std::fmt::Debug for Seed {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SeedError {
     /// 鍵を導出できなかった。
-    #[error("{index} 番目の鍵を導出できない")]
+    #[error("cannot derive key {index}")]
     Underivable {
         /// 導出しようとした番号。
         index: u32,
@@ -199,7 +199,7 @@ mod tests {
         let many = seed.derive_many(Network::Testnet, 4).unwrap();
         for (i, key) in many.iter().enumerate() {
             let one = seed.derive(Network::Testnet, i as u32).unwrap();
-            assert_eq!(key.to_bytes(), one.to_bytes(), "{i} 番目");
+            assert_eq!(key.to_bytes(), one.to_bytes(), "entry {i}");
         }
     }
 
@@ -236,7 +236,7 @@ mod tests {
         for (i, a) in keys.iter().enumerate() {
             for (j, b) in keys.iter().enumerate() {
                 if i != j {
-                    assert_ne!(a, b, "{i} 番と {j} 番が同じ");
+                    assert_ne!(a, b, "{i} and {j} are the same");
                 }
             }
         }
@@ -255,6 +255,6 @@ mod tests {
 
     #[test]
     fn the_seed_is_not_printed() {
-        assert_eq!(format!("{:?}", seed()), "Seed(<伏せ字>)");
+        assert_eq!(format!("{:?}", seed()), "Seed(<redacted>)");
     }
 }

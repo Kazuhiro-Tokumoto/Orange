@@ -83,7 +83,7 @@ pub fn apply_block_to(
         for (index, output) in tx.outputs.iter().enumerate() {
             // 出力番号が u32 に収まることは MAX_TX_SIZE が保証する
             // (validate::register_outputs と同じ理由)。
-            let index = u32::try_from(index).expect("出力数は MAX_TX_SIZE が抑えている");
+            let index = u32::try_from(index).expect("MAX_TX_SIZE bounds the output count");
             let outpoint = OutPoint::new(txid, index);
             utxo.insert(
                 outpoint,
@@ -157,18 +157,18 @@ impl UndoBlock {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UtxoError {
     /// 存在しない UTXO を消費しようとした。
-    #[error("存在しない UTXO を消費しようとした: {0:?}")]
+    #[error("tried to spend a UTXO that does not exist: {0:?}")]
     MissingUtxo(OutPoint),
     /// すでに存在する UTXO を生成しようとした。
-    #[error("すでに存在する UTXO を生成しようとした: {0:?}")]
+    #[error("tried to create a UTXO that already exists: {0:?}")]
     DuplicateUtxo(OutPoint),
     /// 巻き戻しで復元しようとした UTXO がすでに存在する。
-    #[error("巻き戻しの整合性が取れない: {0:?}")]
+    #[error("the undo data is inconsistent: {0:?}")]
     UndoMismatch(OutPoint),
     /// 記憶装置の読み書きに失敗した。
     ///
     /// UTXO が存在しないこととは区別される。
-    #[error("記憶装置の操作に失敗した: {0}")]
+    #[error("a storage operation failed: {0}")]
     Backend(String),
 }
 
@@ -343,16 +343,13 @@ mod tests {
         assert_eq!(
             set.len(),
             2,
-            "コインベース 2 件目 + 送金先。元の 1 件は消費された"
+            "the second coinbase + the payee; the original one was spent"
         );
         assert!(!set.contains(&cb_out).unwrap());
 
         set.undo_block(&undo2).unwrap();
         assert_eq!(set.len(), after_first.len());
-        assert!(
-            set.contains(&cb_out).unwrap(),
-            "消費された UTXO が復元される"
-        );
+        assert!(set.contains(&cb_out).unwrap(), "spent UTXOs are restored");
         assert_eq!(set.get(&cb_out), after_first.get(&cb_out));
 
         set.undo_block(&undo1).unwrap();
@@ -397,7 +394,7 @@ mod tests {
             set.apply_block(&[spend(ghost, Amount::ONE_OAG)], 1),
             Err(UtxoError::MissingUtxo(ghost))
         );
-        assert_eq!(set.len(), before, "失敗時にセットは変更されない");
+        assert_eq!(set.len(), before, "the set is left unchanged on failure");
     }
 
     #[test]
@@ -443,12 +440,15 @@ mod tests {
         );
         assert!(
             overlay.contains(&fresh).unwrap(),
-            "同一ブロック内の出力が見える"
+            "outputs within the same block are visible"
         );
 
         assert!(overlay.mark_spent(fresh));
-        assert!(!overlay.contains(&fresh).unwrap(), "使用済みは見えなくなる");
-        assert!(!overlay.mark_spent(fresh), "二重使用は検出される");
+        assert!(
+            !overlay.contains(&fresh).unwrap(),
+            "spent ones stop being visible"
+        );
+        assert!(!overlay.mark_spent(fresh), "double spends are detected");
 
         // 基底のセットは変更されない。
         assert!(set.contains(&base_out).unwrap());

@@ -34,13 +34,13 @@ const MASTER_KEY: &[u8] = b"Bitcoin seed";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Bip32Error {
     /// 種の長さが 16〜64 バイトの範囲外。
-    #[error("種は 16〜64 バイトであること (受け取った長さ: {found})")]
+    #[error("the seed must be 16 to 64 bytes (received length: {found})")]
     BadSeedLength {
         /// 受け取った長さ。
         found: usize,
     },
     /// 導出結果が秘密鍵として無効だった。
-    #[error("{index} 番の子鍵を導出できない")]
+    #[error("cannot derive child key {index}")]
     Underivable {
         /// 導出しようとした番号。
         index: u32,
@@ -56,7 +56,7 @@ pub struct ExtendedKey {
 
 impl std::fmt::Debug for ExtendedKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ExtendedKey(<伏せ字>)")
+        f.write_str("ExtendedKey(<redacted>)")
     }
 }
 
@@ -136,7 +136,7 @@ impl ExtendedKey {
 
 /// HMAC-SHA512。断片を順に食わせる。
 fn hmac512(key: &[u8], parts: &[&[u8]]) -> Zeroizing<[u8; 64]> {
-    let mut mac = Hmac::<Sha512>::new_from_slice(key).expect("HMAC は任意長の鍵を受け付ける");
+    let mut mac = Hmac::<Sha512>::new_from_slice(key).expect("HMAC accepts a key of any length");
     for part in parts {
         mac.update(part);
     }
@@ -217,7 +217,7 @@ mod tests {
             let mut carry = ALPHABET
                 .iter()
                 .position(|&a| a == c)
-                .expect("base58 の文字") as u32;
+                .expect("base58 characters") as u32;
             for byte in num.iter_mut().rev() {
                 let x = u32::from(*byte) * 58 + carry;
                 *byte = (x & 0xff) as u8;
@@ -235,7 +235,7 @@ mod tests {
 
         let (body, check) = out.split_at(out.len() - 4);
         let digest = Sha256::digest(Sha256::digest(body));
-        assert_eq!(&digest[..4], check, "base58check の検査符号");
+        assert_eq!(&digest[..4], check, "the base58check checksum");
         body.to_vec()
     }
 
@@ -245,8 +245,8 @@ mod tests {
     /// チェーンコード 32 ‖ 0x00 ‖ 鍵 32。
     fn parts_of(xprv: &str) -> ([u8; 32], [u8; 32]) {
         let raw = base58check(xprv);
-        assert_eq!(raw.len(), 78, "拡張鍵は 78 バイト");
-        assert_eq!(raw[45], 0, "秘密鍵の前には 0x00 が入る");
+        assert_eq!(raw.len(), 78, "an extended key is 78 bytes");
+        assert_eq!(raw[45], 0, "a private key is preceded by 0x00");
         let mut chain_code = [0u8; 32];
         let mut key = [0u8; 32];
         chain_code.copy_from_slice(&raw[13..45]);
@@ -263,8 +263,12 @@ mod tests {
             for (label, path, xprv) in *steps {
                 let node = master.derive_path(path).unwrap();
                 let (chain_code, key) = parts_of(xprv);
-                assert_eq!(node.chain_code(), &chain_code, "{label} のチェーンコード");
-                assert_eq!(node.secret_key().to_bytes(), key, "{label} の秘密鍵");
+                assert_eq!(node.chain_code(), &chain_code, "the chain code of {label}");
+                assert_eq!(
+                    node.secret_key().to_bytes(),
+                    key,
+                    "the private key of {label}"
+                );
             }
         }
     }

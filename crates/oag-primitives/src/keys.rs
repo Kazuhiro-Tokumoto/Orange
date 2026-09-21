@@ -17,16 +17,16 @@ pub const SIGNATURE_LEN: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyError {
     /// 0 または曲線の位数以上の値。
-    #[error("秘密鍵が不正 (0 または曲線の位数以上)")]
+    #[error("the private key is invalid (zero, or at least the curve order)")]
     InvalidSecretKey,
     /// 曲線上の点に対応しない x 座標。
-    #[error("公開鍵が曲線上の点として解釈できない")]
+    #[error("the public key cannot be read as a point on the curve")]
     InvalidPublicKey,
     /// BIP340 の形式に合わない署名。
-    #[error("署名が BIP340 の形式に合わない")]
+    #[error("the signature does not match the BIP340 form")]
     InvalidSignature,
     /// 想定と異なる長さの入力。
-    #[error("長さが不正: {actual} バイト ({expected} バイトである必要がある)")]
+    #[error("the length is invalid: {actual} bytes (must be {expected})")]
     BadLength {
         /// 期待される長さ。
         expected: usize,
@@ -34,7 +34,7 @@ pub enum KeyError {
         actual: usize,
     },
     /// 16 進文字列として解釈できない入力。
-    #[error("16 進表記として解釈できない")]
+    #[error("cannot be parsed as hexadecimal")]
     BadHex,
 }
 
@@ -273,7 +273,7 @@ mod tests {
 
     fn key_from_seed(seed: &str) -> SecretKey {
         let digest = blake3::hash(seed.as_bytes());
-        SecretKey::from_bytes(*digest.as_bytes()).expect("有効な秘密鍵")
+        SecretKey::from_bytes(*digest.as_bytes()).expect("a valid private key")
     }
 
     #[test]
@@ -337,7 +337,11 @@ mod tests {
         let msg = [6u8; 32];
         let a = sk.sign(&msg);
         let b = sk.sign(&msg);
-        assert_ne!(a.to_bytes(), b.to_bytes(), "補助乱数により署名は毎回変わる");
+        assert_ne!(
+            a.to_bytes(),
+            b.to_bytes(),
+            "auxiliary randomness makes the signature differ every time"
+        );
         assert!(pk.verify(&msg, &a) && pk.verify(&msg, &b));
     }
 
@@ -421,7 +425,7 @@ mod tests {
         let cloned = key.clone();
         drop(key);
         // clone は別の実体なので、こちらは無事である。
-        assert_eq!(cloned.to_bytes(), before, "複製まで消えている");
+        assert_eq!(cloned.to_bytes(), before, "even the copy is gone");
     }
 
     #[test]
@@ -443,13 +447,13 @@ mod tests {
         for seed in 1u8..64 {
             let bytes = [seed; SECRET_KEY_LEN];
             let key = SecretKey::from_bytes(bytes).unwrap();
-            assert_eq!(key.to_bytes(), bytes, "秘密鍵が書き換えられている");
+            assert_eq!(key.to_bytes(), bytes, "the private key was overwritten");
             if key.public_key_compressed()[0] == 0x03 {
                 odd += 1;
             }
         }
         // y が奇数になる鍵を 1 つも踏んでいないなら、上の確認は意味がない。
-        assert!(odd > 0, "y が奇数の鍵を試せていない");
+        assert!(odd > 0, "a key with an odd y was never tried");
     }
 
     #[test]

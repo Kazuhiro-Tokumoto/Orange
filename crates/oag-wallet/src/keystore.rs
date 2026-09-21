@@ -30,10 +30,10 @@
 //! {
 //!   "version": 3,
 //!   "network": "regtest",
-//!   "kdf": { "algorithm": "argon2id", "salt": "<16 進>",
+//!   "kdf": { "algorithm": "argon2id", "salt": "<hex>",
 //!            "m_cost": 65536, "t_cost": 3, "p_cost": 1 },
-//!   "cipher": { "algorithm": "chacha20poly1305", "nonce": "<16 進>" },
-//!   "ciphertext": "<16 進>",
+//!   "cipher": { "algorithm": "chacha20poly1305", "nonce": "<hex>" },
+//!   "ciphertext": "<hex>",
 //!   "accounts": 1
 //! }
 //! ```
@@ -95,7 +95,7 @@ pub const MIN_PASSPHRASE_LEN: usize = 8;
 #[derive(Debug, thiserror::Error)]
 pub enum KeystoreError {
     /// ファイルを読み書きできない。
-    #[error("{path} を扱えない: {source}")]
+    #[error("cannot handle {path}: {source}")]
     Io {
         /// 対象のファイル。
         path: PathBuf,
@@ -103,7 +103,7 @@ pub enum KeystoreError {
         source: std::io::Error,
     },
     /// 中身が読めない。
-    #[error("{origin} を読めない: {message}")]
+    #[error("cannot read {origin}: {message}")]
     Malformed {
         /// どこから読んだか。
         origin: Origin,
@@ -112,10 +112,10 @@ pub enum KeystoreError {
     },
     /// 知らない形式の版数。
     #[error(
-        "{origin} は版数 {found} である。この実装が読めるのは {FORMAT_VERSION} のみ。\n\
-         版数 1 (鍵を平文で並べたもの) と版数 2 (独自導出の種) は読めない。\n\
-         BIP39 / BIP32 へ移す際に移行経路は用意しないと決めている。\n\
-         古いウォレットの資金は、そちらの実装で送り出してから作り直すこと。"
+        "{origin} is version {found}; this implementation reads only {FORMAT_VERSION}.\n\
+         Version 1 (a plaintext list of keys) and version 2 (a bespoke seed) are not read.\n\
+         No migration path was provided for the move to BIP39 / BIP32.\n\
+         Send the funds out with the old implementation, then create a new wallet."
     )]
     UnknownVersion {
         /// どこから読んだか。
@@ -124,7 +124,7 @@ pub enum KeystoreError {
         found: u32,
     },
     /// ネットワークが食い違う。
-    #[error("このウォレットは {stored} のものである ({asked} として開こうとした)")]
+    #[error("this wallet belongs to {stored} (tried to open it as {asked})")]
     WrongNetwork {
         /// ファイルに書かれていたネットワーク。
         stored: Network,
@@ -135,13 +135,15 @@ pub enum KeystoreError {
     ///
     /// **どちらであるかは区別しない。** 区別できると、改竄したものを
     /// 投げ込んで反応を見る手掛かりになる。
-    #[error("復号できない。パスフレーズが違うか、ファイルが壊れている")]
+    #[error("cannot decrypt; either the passphrase is wrong or the file is damaged")]
     CannotDecrypt,
     /// パスフレーズが短すぎる。
-    #[error("パスフレーズは {MIN_PASSPHRASE_LEN} 文字以上であること")]
+    #[error("the passphrase must be at least {MIN_PASSPHRASE_LEN} characters")]
     WeakPassphrase,
     /// 権限が緩い。
-    #[error("{path} を所有者以外が読める ({mode:o})。chmod 600 で直すこと")]
+    #[error(
+        "{path} is readable by someone other than the owner ({mode:o}); fix it with chmod 600"
+    )]
     TooPermissive {
         /// 対象のファイル。
         path: PathBuf,
@@ -149,7 +151,7 @@ pub enum KeystoreError {
         mode: u32,
     },
     /// すでに存在する。
-    #[error("{0} はすでにある。消すか、別の名前を指定すること")]
+    #[error("{0} already exists; delete it or choose another name")]
     AlreadyExists(PathBuf),
     /// 鍵を導出できない。
     #[error(transparent)]
@@ -158,7 +160,7 @@ pub enum KeystoreError {
     #[error(transparent)]
     Mnemonic(#[from] Bip39Error),
     /// 鍵の導出に失敗した。
-    #[error("パスフレーズから鍵を導出できない: {0}")]
+    #[error("cannot derive a key from the passphrase: {0}")]
     Kdf(String),
 }
 
@@ -178,7 +180,7 @@ impl std::fmt::Display for Origin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Origin::File(path) => write!(f, "{}", path.display()),
-            Origin::Text => f.write_str("ウォレットの記録"),
+            Origin::Text => f.write_str("the wallet record"),
         }
     }
 }
@@ -249,7 +251,7 @@ impl std::fmt::Debug for Keystore {
             .field("path", &self.path)
             .field("network", &self.network)
             .field("accounts", &self.accounts)
-            .field("seed", &"<伏せ字>")
+            .field("seed", &"<redacted>")
             .finish()
     }
 }
@@ -378,7 +380,7 @@ impl Keystore {
         let stored_network: Network = stored
             .network
             .parse()
-            .map_err(|_| malformed(format!("知らないネットワーク: {}", stored.network)))?;
+            .map_err(|_| malformed(format!("unknown network: {}", stored.network)))?;
         // ネットワークを取り違えると、別のチェーンのアドレスへ送りかねない。
         if stored_network != network {
             return Err(KeystoreError::WrongNetwork {
@@ -388,20 +390,20 @@ impl Keystore {
         }
 
         if stored.kdf.algorithm != "argon2id" {
-            return Err(malformed("知らない鍵導出方式".to_string()));
+            return Err(malformed("unknown key derivation scheme".to_string()));
         }
         if stored.cipher.algorithm != "chacha20poly1305" {
-            return Err(malformed("知らない暗号方式".to_string()));
+            return Err(malformed("unknown cipher".to_string()));
         }
-        let salt =
-            from_hex(&stored.kdf.salt).ok_or_else(|| malformed("ソルトが読めない".to_string()))?;
+        let salt = from_hex(&stored.kdf.salt)
+            .ok_or_else(|| malformed("the salt cannot be read".to_string()))?;
         let nonce = from_hex(&stored.cipher.nonce)
-            .ok_or_else(|| malformed("nonce が読めない".to_string()))?;
+            .ok_or_else(|| malformed("the nonce cannot be read".to_string()))?;
         if nonce.len() != NONCE_LEN {
-            return Err(malformed("nonce の長さが違う".to_string()));
+            return Err(malformed("the nonce has the wrong length".to_string()));
         }
         let ciphertext = from_hex(&stored.ciphertext)
-            .ok_or_else(|| malformed("暗号文が読めない".to_string()))?;
+            .ok_or_else(|| malformed("the ciphertext cannot be read".to_string()))?;
 
         // **保存されたパラメータで導出する。** 現在の既定値で導出すると、
         // 古い記録を開けなくなる。
@@ -573,7 +575,7 @@ impl Keystore {
             ciphertext: to_hex(&ciphertext),
             accounts: self.accounts,
         };
-        Ok(serde_json::to_string_pretty(&stored).expect("必ず JSON になる"))
+        Ok(serde_json::to_string_pretty(&stored).expect("it is always JSON"))
     }
 
     /// 暗号化してファイルへ書き出す。
@@ -616,10 +618,12 @@ fn unpack(plaintext: &[u8]) -> Result<(Mnemonic, Seed), KeystoreError> {
         origin: Origin::Text,
         message: what.to_string(),
     };
-    let (&len, rest) = plaintext.split_first().ok_or_else(|| bad("暗号文が空"))?;
+    let (&len, rest) = plaintext
+        .split_first()
+        .ok_or_else(|| bad("the ciphertext is empty"))?;
     let len = usize::from(len);
     if rest.len() != len + SEED_LEN {
-        return Err(bad("復号した中身の長さが違う"));
+        return Err(bad("the decrypted contents have the wrong length"));
     }
     let (entropy, seed) = rest.split_at(len);
     let mnemonic = Mnemonic::from_entropy(entropy)?;
@@ -727,8 +731,9 @@ fn encrypt(
     plaintext: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>, KeystoreError> {
-    let (cipher, nonce) = init(key, nonce)
-        .ok_or_else(|| KeystoreError::Kdf("鍵または nonce の長さが違う".to_string()))?;
+    let (cipher, nonce) = init(key, nonce).ok_or_else(|| {
+        KeystoreError::Kdf("the key or the nonce has the wrong length".to_string())
+    })?;
     cipher
         .encrypt(
             &nonce,
@@ -737,7 +742,7 @@ fn encrypt(
                 aad,
             },
         )
-        .map_err(|_| KeystoreError::Kdf("暗号化に失敗した".to_string()))
+        .map_err(|_| KeystoreError::Kdf("encryption failed".to_string()))
 }
 
 /// 鍵と nonce から暗号を用意する。長さが違えば `None`。
@@ -850,14 +855,14 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             !text.contains(&*mnemonic.phrase()),
-            "控えの語が平文で入っている"
+            "the recovery phrase is present in plaintext"
         );
 
         // 導出される鍵も入っていないこと。
         for i in 0..3 {
             let key = seed.derive(Network::Regtest, i).unwrap();
             let hex: String = key.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-            assert!(!text.contains(&hex), "{i} 番目の鍵が平文で入っている");
+            assert!(!text.contains(&hex), "key {i} is present in plaintext");
         }
         std::fs::remove_file(&path).unwrap();
     }
@@ -902,14 +907,17 @@ mod tests {
         let second: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
 
-        assert_ne!(first["kdf"]["salt"], second["kdf"]["salt"], "ソルトが同じ");
+        assert_ne!(
+            first["kdf"]["salt"], second["kdf"]["salt"],
+            "the salt is the same"
+        );
         assert_ne!(
             first["cipher"]["nonce"], second["cipher"]["nonce"],
-            "nonce が同じ"
+            "the nonce is the same"
         );
         assert_ne!(
             first["ciphertext"], second["ciphertext"],
-            "同じ種なのに暗号文まで同じ"
+            "the same seed even produced the same ciphertext"
         );
         std::fs::remove_file(&path).unwrap();
     }
@@ -943,7 +951,10 @@ mod tests {
             .iter()
             .map(|a| a.to_string())
             .collect();
-        assert_eq!(got, expected, "控えから復元したアドレスが違う");
+        assert_eq!(
+            got, expected,
+            "the address restored from the phrase differs"
+        );
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(&other).unwrap();
@@ -971,7 +982,7 @@ mod tests {
         assert_ne!(
             main.default_address().unwrap().to_string(),
             test.default_address().unwrap().to_string(),
-            "mainnet と testnet で同じアドレスが出ている"
+            "mainnet and testnet produce the same address"
         );
 
         // 開き直しても同じアドレスが出る。
@@ -994,7 +1005,7 @@ mod tests {
             Keystore::create(&path, Network::Regtest, b"short", ""),
             Err(KeystoreError::WeakPassphrase)
         ));
-        assert!(!path.exists(), "断ったのにファイルができている");
+        assert!(!path.exists(), "it refused yet the file was created");
     }
 
     #[test]
@@ -1027,7 +1038,11 @@ mod tests {
         Keystore::create(&path, Network::Regtest, PASS, "").unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "作ったときの権限が緩い");
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "the permissions at creation are too loose"
+        );
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(
@@ -1074,7 +1089,7 @@ mod tests {
                 Keystore::open(&path, Network::Regtest, PASS),
                 Err(KeystoreError::CannotDecrypt)
             ),
-            "アドレスの数を書き換えられても開けてしまう"
+            "it opens even after the address count was altered"
         );
         std::fs::remove_file(&path).unwrap();
     }
@@ -1099,7 +1114,7 @@ mod tests {
                 Keystore::open(&path, Network::Testnet, PASS),
                 Err(KeystoreError::CannotDecrypt)
             ),
-            "ネットワークを書き換えられても開けてしまう"
+            "it opens even after the network was altered"
         );
         std::fs::remove_file(&path).unwrap();
     }
@@ -1114,7 +1129,7 @@ mod tests {
 
         store.add_key().unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
-        assert_ne!(before, after, "書き換わっていない");
+        assert_ne!(before, after, "it was not rewritten");
 
         // 書きかけのファイルが残っていないこと。
         let dir = path.parent().unwrap();
@@ -1124,7 +1139,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.contains("tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "書きかけが残っている: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "a partial write is left behind: {leftovers:?}"
+        );
 
         // 種は変わらず、開き直せる。
         let reopened = Keystore::open(&path, Network::Regtest, PASS).unwrap();
@@ -1143,7 +1161,7 @@ mod tests {
         assert_ne!(
             sa.phrase(),
             sb.phrase(),
-            "違うウォレットが同じ種を持っている"
+            "different wallets hold the same seed"
         );
         std::fs::remove_file(&a).unwrap();
         std::fs::remove_file(&b).unwrap();
@@ -1156,7 +1174,7 @@ mod tests {
         let text = format!("{store:?}");
         assert!(
             !text.contains(&*mnemonic.phrase()),
-            "控えの語が漏れている: {text}"
+            "the recovery phrase is leaking: {text}"
         );
         std::fs::remove_file(&path).unwrap();
     }
@@ -1168,7 +1186,9 @@ mod tests {
         store.add_key().unwrap();
 
         for lock in store.locks().unwrap() {
-            let key = store.key_for(&lock).expect("自分の条件の鍵は引ける");
+            let key = store
+                .key_for(&lock)
+                .expect("a key for our own condition can be looked up");
             assert_eq!(Lock::pay_to_pubkey(&key.public_key()), lock);
         }
         let stranger = Lock::pay_to_pubkey(&SecretKey::generate().public_key());

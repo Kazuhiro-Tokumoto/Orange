@@ -216,13 +216,15 @@ mod tests {
         let outcome = mine(&template, &FastHasher, 0, 100_000, &NeverStop).unwrap();
 
         let attempts = outcome.attempts();
-        let block = outcome.block().expect("難易度 64 なら見つかるはず");
+        let block = outcome
+            .block()
+            .expect("it should be found at difficulty 64");
 
         // 見つけたブロックが本当に条件を満たしていること。
         let pow = FastHasher.hash(&block.header.encode());
         assert!(
             meets_difficulty(&pow, 64).unwrap(),
-            "難易度を満たしていないブロックが返された"
+            "a block that does not meet the difficulty was returned"
         );
         // 内容は変わっていないこと。
         assert_eq!(block.transactions, template.transactions);
@@ -234,7 +236,11 @@ mod tests {
     fn difficulty_one_is_found_immediately() {
         let template = template(1);
         let outcome = mine(&template, &FastHasher, 0, 10, &NeverStop).unwrap();
-        assert_eq!(outcome.attempts(), 1, "難易度 1 は 1 回目で当たるはず");
+        assert_eq!(
+            outcome.attempts(),
+            1,
+            "difficulty 1 should hit on the first try"
+        );
         assert!(outcome.block().is_some());
     }
 
@@ -255,10 +261,10 @@ mod tests {
             MiningOutcome::Stopped { attempts } => {
                 assert!(
                     attempts <= CHECK_INTERVAL + 1,
-                    "打ち切りの判断が遅すぎる ({attempts} 回)"
+                    "the abort decision came too late ({attempts} attempts)"
                 );
             }
-            other => panic!("打ち切られなかった: {other:?}"),
+            other => panic!("it was not aborted: {other:?}"),
         }
     }
 
@@ -274,7 +280,7 @@ mod tests {
         .unwrap();
         assert!(
             asked.get() <= 1_000 / CHECK_INTERVAL + 1,
-            "{} 回も問い合わせている",
+            "it asked {} times",
             asked.get()
         );
     }
@@ -287,7 +293,11 @@ mod tests {
         let template = template(1_000_000);
         let outcome = mine(&template, &counting, 0, 777, &NeverStop).unwrap();
         assert_eq!(outcome.attempts(), 777);
-        assert_eq!(counting.calls.get(), 777, "試した回数と計算回数が合わない");
+        assert_eq!(
+            counting.calls.get(),
+            777,
+            "the attempt count and the computation count disagree"
+        );
     }
 
     #[test]
@@ -338,7 +348,7 @@ mod tests {
             .sum();
         assert!(
             hard > easy * 4,
-            "難易度 256 の方が難易度 4 より明らかに多く試すはず ({easy} → {hard})"
+            "difficulty 256 should clearly take more attempts than difficulty 4 ({easy} to {hard})"
         );
     }
 }

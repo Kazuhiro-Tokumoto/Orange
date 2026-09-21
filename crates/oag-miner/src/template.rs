@@ -28,10 +28,10 @@ pub const COINBASE_RESERVE: usize = 1_000;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TemplateError {
     /// 金額の合計が総発行量を超えた。
-    #[error("金額の合計が総発行量を超えている")]
+    #[error("the sum of amounts exceeds the total supply")]
     AmountOverflow,
     /// 追加ノンスが長すぎる。
-    #[error("追加ノンスの長さ {actual} が上限 {max} を超えている")]
+    #[error("extra-nonce length {actual} exceeds the limit {max}")]
     ExtraNonceTooLong {
         /// 実際の長さ。
         actual: usize,
@@ -39,7 +39,7 @@ pub enum TemplateError {
         max: usize,
     },
     /// 組み立てた結果が上限を超えた。
-    #[error("ブロックサイズ {actual} が上限 {max} を超えている")]
+    #[error("block size {actual} exceeds the limit {max}")]
     BlockTooLarge {
         /// 実際のサイズ。
         actual: usize,
@@ -152,7 +152,7 @@ pub fn build_template(
     transactions.extend(selected);
 
     let txids: Vec<Hash> = transactions.iter().map(|tx| tx.txid()).collect();
-    let merkle_root = merkle::merkle_root(&txids).expect("コインベースが必ずある");
+    let merkle_root = merkle::merkle_root(&txids).expect("there is always a coinbase");
 
     let template = BlockTemplate {
         header: BlockHeader {
@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(
             template.transactions[0].outputs[0].amount,
             params::block_subsidy(HEIGHT).checked_add(expected).unwrap(),
-            "コインベースの受取額が報酬 + 手数料と一致しない"
+            "the coinbase payout does not match the reward plus fees"
         );
     }
 
@@ -314,7 +314,7 @@ mod tests {
             utxo: &utxo,
         };
         let summary = validate_block(&block, &ctx, &AcceptAnyPow)
-            .expect("組み立てたブロックが検証を通らない");
+            .expect("the assembled block does not pass validation");
         assert_eq!(summary.total_fees.to_string(), "0.2");
     }
 
@@ -347,7 +347,7 @@ mod tests {
 
         assert_ne!(
             ta.header.merkle_root, tb.header.merkle_root,
-            "追加ノンスを変えてもマークルルートが変わらない"
+            "changing the extra nonce does not change the merkle root"
         );
         assert_ne!(ta.hash_input(), tb.hash_input());
     }
@@ -375,24 +375,24 @@ mod tests {
                 .accept(spend(&funds, "0.01"), &utxo, HEIGHT, MTP)
                 .unwrap();
         }
-        assert_eq!(mempool.len(), 1_600, "試験の前提が崩れている");
+        assert_eq!(mempool.len(), 1_600, "the test's premise no longer holds");
 
         let template = build_template(&request(), &mempool).unwrap();
         assert!(
             template.size() <= params::MAX_BLOCK_SIZE,
-            "実際には {} バイト",
+            "actually {} bytes",
             template.size()
         );
         // 取り置いた分を除いてほぼ埋まっていること。1 件分の隙間しか残らない。
         let one_more = template.transactions[1].size();
         assert!(
             template.size() + one_more > params::MAX_BLOCK_SIZE - COINBASE_RESERVE,
-            "詰め込みが緩すぎる: {} バイト",
+            "packing is too loose: {} bytes",
             template.size()
         );
         assert!(
             template.transactions.len() < mempool.len(),
-            "全部入ってしまっている。上限が効いていない ({} 件)",
+            "everything fit; the limit is not working ({} entries)",
             template.transactions.len()
         );
     }
@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(
             template.transactions[0].outputs[0].amount,
             Amount::ZERO,
-            "発行終了後も報酬を受け取っている"
+            "still collecting a reward after emission ended"
         );
     }
 }

@@ -28,13 +28,13 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Reject {
     /// すでに保持している。
-    #[error("すでに mempool にある")]
+    #[error("already in the mempool")]
     AlreadyKnown,
     /// コインベースは単独では流通しない。
-    #[error("コインベーストランザクションは mempool に入れられない")]
+    #[error("a coinbase transaction cannot enter the mempool")]
     Coinbase,
     /// 大きすぎる。
-    #[error("サイズ {actual} が上限 {max} を超えている")]
+    #[error("size {actual} exceeds the limit {max}")]
     TooLarge {
         /// 実際のサイズ。
         actual: usize,
@@ -48,7 +48,7 @@ pub enum Reject {
     #[error(transparent)]
     Utxo(#[from] UtxoError),
     /// 手数料が最低中継料率に満たない。
-    #[error("手数料 {paid} が最低要求 {required} に満たない")]
+    #[error("fee {paid} is below the minimum required {required}")]
     FeeTooLow {
         /// 支払われた手数料。
         paid: Amount,
@@ -56,7 +56,7 @@ pub enum Reject {
         required: Amount,
     },
     /// ダスト閾値未満の出力を含む。
-    #[error("出力 {index} の金額 {amount} がダスト閾値 {threshold} 未満")]
+    #[error("the amount {amount} of output {index} is below the dust threshold {threshold}")]
     DustOutput {
         /// 出力番号。
         index: usize,
@@ -66,7 +66,7 @@ pub enum Reject {
         threshold: Amount,
     },
     /// 未知の版数の支払い条件を作ろうとしている。
-    #[error("出力 {index} が未知の版数 {version} を使っている (資金を失う恐れがある)")]
+    #[error("output {index} uses the unknown version {version} (the funds may be lost)")]
     UnknownLockVersionCreated {
         /// 出力番号。
         index: usize,
@@ -74,7 +74,7 @@ pub enum Reject {
         version: u8,
     },
     /// 未知の版数の支払い条件を使おうとしている。
-    #[error("入力 {index} が未知の版数 {version} の出力を使おうとしている")]
+    #[error("input {index} tries to spend an output of the unknown version {version}")]
     UnknownLockVersionSpent {
         /// 入力番号。
         index: usize,
@@ -85,7 +85,7 @@ pub enum Reject {
     ///
     /// BIP125 規則 2。未確認の入力を足されると、置き換えの可否を決めるのに
     /// 必要な手数料の合計が、まだ確定していない祖先の可否に依存する。
-    #[error("置き換えが新たな未確認入力 {outpoint:?} を加えている")]
+    #[error("the replacement adds a new unconfirmed input {outpoint:?}")]
     ReplacementAddsUnconfirmedInput {
         /// 加えられた参照先。
         outpoint: OutPoint,
@@ -93,7 +93,7 @@ pub enum Reject {
     /// 置き換えの手数料が、追い出す分の合計に満たない。
     ///
     /// BIP125 規則 3。
-    #[error("置き換えの手数料 {paid} が、追い出す {count} 件の合計 {replaced} に満たない")]
+    #[error("the replacement fee {paid} is below the total {replaced} of the {count} it evicts")]
     ReplacementPaysLess {
         /// 置き換えが払う手数料。
         paid: Amount,
@@ -105,7 +105,7 @@ pub enum Reject {
     /// 置き換えが自分自身を運ぶ帯域の代金を払っていない。
     ///
     /// BIP125 規則 4。
-    #[error("手数料の増分 {increment} が、{size} バイト分の要求 {required} に満たない")]
+    #[error("the fee increment {increment} is below the {required} required for {size} bytes")]
     ReplacementIncrementTooLow {
         /// 追い出す側の合計を超えた分。
         increment: Amount,
@@ -117,7 +117,7 @@ pub enum Reject {
     /// 1 度の置き換えで追い出す件数が多すぎる。
     ///
     /// BIP125 規則 5。
-    #[error("置き換えが {count} 件を追い出そうとしている (上限 {max})")]
+    #[error("the replacement would evict {count} entries (limit {max})")]
     TooManyReplacements {
         /// 追い出そうとしている件数 (子孫を含む)。
         count: usize,
@@ -973,7 +973,7 @@ mod tests {
                 to("1").lock,
             )],
         );
-        assert_eq!(tx.size(), probe.size(), "サイズが変わってしまっている");
+        assert_eq!(tx.size(), probe.size(), "the size has changed");
         assert_eq!(
             pool.accept(tx, &utxo, HEIGHT, MTP),
             Err(Reject::FeeTooLow {
@@ -1138,7 +1138,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(accepted.replaced, vec![first_id]);
-        assert!(!pool.contains(&first_id), "追い出されている");
+        assert!(!pool.contains(&first_id), "it was evicted");
         assert!(pool.contains(&accepted.txid));
         assert_eq!(pool.len(), 1);
     }
@@ -1157,7 +1157,7 @@ mod tests {
             matches!(err, Reject::ReplacementPaysLess { count: 1, .. }),
             "{err}"
         );
-        assert!(pool.contains(&first_id), "元のものが残っている");
+        assert!(pool.contains(&first_id), "the original is still there");
         assert_eq!(pool.len(), 1);
     }
 
@@ -1288,7 +1288,7 @@ mod tests {
 
         assert!(
             pool.contains(&first_id),
-            "落ちた置き換えのために元を捨ててはならない"
+            "the original must not be dropped for a replacement that failed"
         );
         assert_eq!(pool.len(), 1);
     }
@@ -1314,7 +1314,7 @@ mod tests {
         let child = simple_spend(&middle, "0.01");
         assert!(
             pool.accept(child, &utxo, HEIGHT, MTP).is_ok(),
-            "mempool 内の出力を使えない"
+            "an output in the mempool cannot be spent"
         );
         assert_eq!(pool.len(), 2);
     }
@@ -1340,7 +1340,7 @@ mod tests {
         let child_id = pool.accept(child, &utxo, HEIGHT, MTP).unwrap();
 
         let removed = pool.remove_recursive(&parent_id);
-        assert_eq!(removed.len(), 2, "子孫も取り除かれるべき");
+        assert_eq!(removed.len(), 2, "descendants should be removed too");
         assert!(pool.is_empty());
         assert_eq!(pool.total_size(), 0);
         assert!(!pool.contains(&child_id));
@@ -1362,7 +1362,11 @@ mod tests {
 
         let selected = pool.select_for_block(params::MAX_BLOCK_SIZE);
         assert_eq!(selected.len(), 2);
-        assert_eq!(selected[0].txid(), rich_id, "料率の高い方が先に来るべき");
+        assert_eq!(
+            selected[0].txid(),
+            rich_id,
+            "the higher rate should come first"
+        );
     }
 
     #[test]
@@ -1392,7 +1396,11 @@ mod tests {
 
         let selected = pool.select_for_block(params::MAX_BLOCK_SIZE);
         assert_eq!(selected.len(), 2);
-        assert_eq!(selected[0].txid(), parent_id, "親が先に来ていない");
+        assert_eq!(
+            selected[0].txid(),
+            parent_id,
+            "the parent did not come first"
+        );
         assert_eq!(selected[1].txid(), child_id);
     }
 
@@ -1481,7 +1489,7 @@ mod tests {
 
         let theirs = spend(&[&funds], vec![to("9.5")]);
         assert_eq!(pool.on_block_connected(&block_with(vec![theirs])), 1);
-        assert!(pool.is_empty(), "競合するものが残っている");
+        assert!(pool.is_empty(), "a conflicting entry is still there");
     }
 
     #[test]
@@ -1563,7 +1571,10 @@ mod tests {
 
         assert_eq!(report.retained, 0);
         assert_eq!(report.dropped, 1);
-        assert!(!pool.contains(&stale_id), "無効になったものが残っている");
+        assert!(
+            !pool.contains(&stale_id),
+            "an invalidated entry is still there"
+        );
     }
 
     #[test]
@@ -1600,7 +1611,10 @@ mod tests {
         // わざと子を先に渡す。
         let report = pool.rebuild_after_reorg(vec![child, parent], &utxo, HEIGHT, MTP);
 
-        assert_eq!(report.resubmitted, 2, "親子とも戻るべき");
+        assert_eq!(
+            report.resubmitted, 2,
+            "both parent and child should come back"
+        );
         assert_eq!(report.dropped, 0);
         assert!(pool.contains(&parent_id));
         assert!(pool.contains(&child_id));
@@ -1672,8 +1686,8 @@ mod tests {
         let rich_id = pool
             .accept(simple_spend(&rich, "1"), &utxo, HEIGHT, MTP)
             .unwrap();
-        assert_eq!(pool.len(), 1, "上限を超えたまま保持している");
-        assert!(pool.contains(&rich_id), "料率の高い方が残るべき");
+        assert_eq!(pool.len(), 1, "holding more than the limit");
+        assert!(pool.contains(&rich_id), "the higher rate should remain");
         assert!(!pool.contains(&cheap_id));
         assert!(pool.total_size() <= pool.policy().max_mempool_bytes);
     }
@@ -1708,6 +1722,6 @@ mod tests {
             .iter()
             .map(|id| pool.get(id).unwrap().tx.inputs.len())
             .sum();
-        assert_eq!(pool.spent.len(), inputs, "spent の記録が漏れている");
+        assert_eq!(pool.spent.len(), inputs, "a spent record is missing");
     }
 }

@@ -105,13 +105,13 @@ pub use randomx_rs::{RandomXDataset, RandomXFlag};
 #[non_exhaustive]
 pub enum RandomXPowError {
     /// キャッシュまたは VM の初期化に失敗した。
-    #[error("RandomX の初期化に失敗した: {0}")]
+    #[error("RandomX initialisation failed: {0}")]
     Init(String),
     /// どのフラグの組み合わせでも RandomX を初期化できなかった。
     ///
     /// 実行可能メモリも大きな確保もできない環境である。ここまで来たら
     /// このホストでは RandomX を動かせない。
-    #[error("RandomX を初期化できない (試したフラグ: {tried})。最後の誤り: {last}")]
+    #[error("cannot initialise RandomX (flags tried: {tried}). Last error: {last}")]
     NoUsableConfiguration {
         /// 試したフラグの一覧。
         tried: String,
@@ -119,13 +119,13 @@ pub enum RandomXPowError {
         last: String,
     },
     /// ハッシュの計算に失敗した。
-    #[error("RandomX のハッシュ計算に失敗した: {0}")]
+    #[error("the RandomX hash computation failed: {0}")]
     Hash(String),
     /// 返されたハッシュの長さが 32 バイトでない。
-    #[error("RandomX が {0} バイトを返した (32 バイトであるべき)")]
+    #[error("RandomX returned {0} bytes (should be 32)")]
     BadHashLength(usize),
     /// 難易度が 0。
-    #[error("難易度は 1 以上でなければならない")]
+    #[error("difficulty must be 1 or more")]
     ZeroDifficulty,
 }
 
@@ -225,7 +225,7 @@ fn create_vm(
     let vm = RandomXVM::new(flags, cache, dataset).map_err(|e| e.to_string())?;
     if vm_pointer_is_null(&vm) == Some(true) {
         std::mem::forget(vm);
-        return Err("randomx_create_vm が NULL を返した (確保できなかった)".to_string());
+        return Err("randomx_create_vm returned NULL (allocation failed)".to_string());
     }
     Ok(vm)
 }
@@ -238,7 +238,7 @@ fn try_each<T>(
     steps: &[RandomXFlag],
     mut attempt: impl FnMut(RandomXFlag) -> Result<T, String>,
 ) -> Result<(RandomXFlag, T), RandomXPowError> {
-    let mut last = String::from("(試していない)");
+    let mut last = String::from("(not tried)");
     for &flags in steps {
         match attempt(flags) {
             Ok(value) => return Ok((flags, value)),
@@ -285,7 +285,7 @@ impl RandomXVerifier {
         // 失敗したときだけなので、通常の経路では 1 回しか通らない。
         let (flags, vm) = try_each(&steps, |flags| {
             let cache = RandomXCache::new(flags, seed.as_bytes())
-                .map_err(|e| format!("キャッシュを確保できない: {e}"))?;
+                .map_err(|e| format!("cannot allocate the cache: {e}"))?;
             create_vm(flags, Some(cache), None)
         })?;
         Ok(RandomXVerifier {
@@ -349,7 +349,7 @@ impl RandomXVerifier {
         if crate::seed::seed_height(header.height) != self.seed_height {
             // 検証器のエポックが合っていない。呼び出し側の誤りである。
             return Err(RandomXPowError::Init(format!(
-                "検証器はシード高さ {} 用だが、ヘッダの高さ {} は {} を要求する",
+                "the verifier is for seed height {} but the header at height {} requires {}",
                 self.seed_height,
                 header.height,
                 crate::seed::seed_height(header.height)
@@ -428,7 +428,7 @@ impl RandomXMiner {
         // 候補がすぐ失敗するので、ここを順に試すのは安い。
         let (_, cache) = try_each(&flag_ladder(false), |flags| {
             RandomXCache::new(flags, seed.as_bytes())
-                .map_err(|e| format!("キャッシュを確保できない: {e}"))
+                .map_err(|e| format!("cannot allocate the cache: {e}"))
         })?;
         // データセットのフラグで意味を持つのは FLAG_LARGE_PAGES だけである。
         // 用いないので FLAG_DEFAULT でよい。
@@ -436,7 +436,7 @@ impl RandomXMiner {
         // start は 0 でなければならない。0 以外を渡すと、先頭が未初期化の
         // ままのデータセットができ、他の実装と食い違うハッシュを黙って返す。
         let dataset = RandomXDataset::new(RandomXFlag::FLAG_DEFAULT, cache, 0)
-            .map_err(|e| RandomXPowError::Init(format!("データセットを確保できない: {e}")))?;
+            .map_err(|e| RandomXPowError::Init(format!("cannot allocate the dataset: {e}")))?;
         RandomXMiner::sharing_dataset_with(seed, seed_height, dataset)
     }
 
@@ -577,37 +577,37 @@ const _: () = {
     // なので、ここが偽なら下の検査は全部当てにならない。
     assert!(
         Probe::<u64>::IS_SEND && Probe::<u64>::IS_SYNC,
-        "Send/Sync を調べる仕掛けが壊れている。下の検査は意味を成さない。"
+        "the mechanism that checks Send/Sync is broken. The check below is meaningless."
     );
 
     assert!(
         !Probe::<RandomXVM>::IS_SEND,
-        "randomx-rs が RandomXVM を Send にした。VM はスクラッチパッドを \
-         書き換えるので、スレッドをまたいで渡せるようになると危ない。\
-         このモジュールの前提を見直すこと。"
+        "randomx-rs has made RandomXVM Send. A VM rewrites its scratchpad, so \
+         being able to pass it across threads is dangerous. Revisit the \
+         assumptions of this module."
     );
     assert!(
         !Probe::<RandomXVM>::IS_SYNC,
-        "randomx-rs が RandomXVM を Sync にした。calculate_hash は &self を \
-         取るので、Sync になると 2 つのスレッドから同時に呼べてしまう。\
-         スクラッチパッドの競合であり、未定義動作である。"
+        "randomx-rs has made RandomXVM Sync. calculate_hash takes &self, so \
+         once it is Sync two threads can call it at the same time. That races \
+         on the scratchpad, which is undefined behaviour."
     );
     assert!(
         !Probe::<RandomXDataset>::IS_SEND,
-        "randomx-rs が RandomXDataset を Send にした。モジュールの説明に \
-         『データセットはスレッドをまたげない』と書いてあるので、直すこと。\
-         複数スレッドの fast 採掘ができるようになる。"
+        "randomx-rs has made RandomXDataset Send. This module's description \
+         says a dataset cannot cross threads, so fix that. Multi-threaded \
+         fast mining becomes possible."
     );
 
     // 上から自動で従うが、本モジュールが公開しているのはこちらなので
     // 直接も確かめておく。
     assert!(
         !Probe::<RandomXVerifier>::IS_SEND && !Probe::<RandomXVerifier>::IS_SYNC,
-        "RandomXVerifier がスレッドをまたげるようになった"
+        "RandomXVerifier has become able to cross threads"
     );
     assert!(
         !Probe::<RandomXMiner>::IS_SEND && !Probe::<RandomXMiner>::IS_SYNC,
-        "RandomXMiner がスレッドをまたげるようになった"
+        "RandomXMiner has become able to cross threads"
     );
 };
 
@@ -617,7 +617,7 @@ mod tests {
     use oag_primitives::hash;
 
     fn verifier() -> RandomXVerifier {
-        RandomXVerifier::new(&hash::block_hash(b"orange genesis"), 0).expect("初期化できる")
+        RandomXVerifier::new(&hash::block_hash(b"orange genesis"), 0).expect("can be initialised")
     }
 
     fn header(nonce: u64, difficulty: u64) -> BlockHeader {
@@ -685,7 +685,10 @@ mod tests {
         h.height = 5_000; // シード高さは 4096 になる
         assert_ne!(crate::seed::seed_height(h.height), 0);
         assert!(v.check(&h).is_err());
-        assert!(!v.verify(&h), "エポック不整合は PoW 不成立として扱う");
+        assert!(
+            !v.verify(&h),
+            "an epoch mismatch is treated as a PoW failure"
+        );
     }
 
     #[test]
@@ -701,7 +704,7 @@ mod tests {
                 break;
             }
         }
-        let (nonce, pow_hash) = found.expect("難易度 32 なら見つかるはず");
+        let (nonce, pow_hash) = found.expect("it should be found at difficulty 32");
 
         // 見つけた nonce が実際に条件を満たしていること。
         let target = crate::target::target_from_difficulty(difficulty).unwrap();
@@ -730,14 +733,14 @@ mod tests {
         for flags in &light {
             assert!(
                 !flags.contains(RandomXFlag::FLAG_FULL_MEM),
-                "light モードの候補に FLAG_FULL_MEM が入っている: {flags:?}"
+                "FLAG_FULL_MEM is among the light-mode candidates: {flags:?}"
             );
         }
         // fast は全部 FLAG_FULL_MEM を持つ。これが fast の定義である。
         for flags in &fast {
             assert!(
                 flags.contains(RandomXFlag::FLAG_FULL_MEM),
-                "fast モードの候補に FLAG_FULL_MEM が無い: {flags:?}"
+                "FLAG_FULL_MEM is missing from the fast-mode candidates: {flags:?}"
             );
         }
 
@@ -750,7 +753,7 @@ mod tests {
                 light[i..]
                     .iter()
                     .all(|f| !f.contains(RandomXFlag::FLAG_JIT)),
-                "JIT 無しのあとに JIT 付きが来ている: {light:?}"
+                "a JIT-enabled candidate comes after a JIT-less one: {light:?}"
             );
         }
 
@@ -758,7 +761,11 @@ mod tests {
         let mut seen = light.clone();
         seen.sort_by_key(|f| f.bits());
         seen.dedup();
-        assert_eq!(seen.len(), light.len(), "候補が重複している: {light:?}");
+        assert_eq!(
+            seen.len(),
+            light.len(),
+            "the candidates contain duplicates: {light:?}"
+        );
     }
 
     #[test]
@@ -770,7 +777,7 @@ mod tests {
         assert_eq!(
             vm_pointer_is_null(&v.vm),
             Some(false),
-            "randomx-rs の Debug 出力から VM のポインタを読めなくなった。\n             NULL 検査が効かなくなっているので、vm_pointer_is_null を\n             書き直すこと。実際の出力: {:?}",
+            "the VM pointer can no longer be read from randomx-rs's Debug output.\n             The NULL check has stopped working, so vm_pointer_is_null must be\n             rewritten. Actual output: {:?}",
             format!("{:?}", v.vm)
         );
     }
@@ -797,10 +804,10 @@ mod tests {
         let mut expected: Option<Hash> = None;
         for flags in flag_ladder(false) {
             let cache = RandomXCache::new(flags, seed.as_bytes())
-                .unwrap_or_else(|e| panic!("{flags:?} でキャッシュを作れない: {e}"));
+                .unwrap_or_else(|e| panic!("cannot create a cache with {flags:?}: {e}"));
             let vm = create_vm(flags, Some(cache), None)
-                .unwrap_or_else(|e| panic!("{flags:?} で VM を作れない: {e}"));
-            assert_eq!(vm_pointer_is_null(&vm), Some(false), "{flags:?} が NULL");
+                .unwrap_or_else(|e| panic!("cannot create a VM with {flags:?}: {e}"));
+            assert_eq!(vm_pointer_is_null(&vm), Some(false), "{flags:?} gave NULL");
 
             let v = RandomXVerifier {
                 seed_height: 0,
@@ -808,10 +815,10 @@ mod tests {
                 flags,
                 vm,
             };
-            let got = v.hash(b"orange").expect("ハッシュを計算できる");
+            let got = v.hash(b"orange").expect("a hash can be computed");
             match expected {
                 None => expected = Some(got),
-                Some(want) => assert_eq!(got, want, "{flags:?} だけ違うハッシュを返す"),
+                Some(want) => assert_eq!(got, want, "only {flags:?} returns a different hash"),
             }
         }
     }

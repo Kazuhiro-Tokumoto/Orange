@@ -46,22 +46,24 @@ pub enum NodeError {
     #[error(transparent)]
     Mine(#[from] oag_miner::MineError),
     /// 作業スレッドを起こせない、あるいは落ちた。
-    #[error("ノードの作業スレッド: {0}")]
+    #[error("the node's worker thread: {0}")]
     Thread(String),
     /// 掘ったブロックが受理されなかった。
-    #[error("自分で掘ったブロックが受理されなかった: {0:?}")]
+    #[error("a block we mined ourselves was not accepted: {0:?}")]
     SelfMinedRejected(AcceptOutcome),
     /// RandomX のシードになるブロックを知らない。
     ///
     /// **ここで代わりのハッシュを使ってはならない。** 鍵が違えば RandomX は
     /// 違うハッシュを返し、正しいブロックの PoW が落ちる。
-    #[error("高さ {seed_height} のブロックを知らないため、RandomX のシードを決められない")]
+    #[error(
+        "the block at height {seed_height} is unknown, so the RandomX seed cannot be determined"
+    )]
     UnknownSeedBlock {
         /// シードになるはずの高さ。
         seed_height: u64,
     },
     /// タイムスタンプを決められない。
-    #[error("チェーンの先端が未来すぎる (Median Time Past {mtp}、現在 {now})")]
+    #[error("the chain tip is too far in the future (median time past {mtp}, now {now})")]
     ClockTooFarBehind {
         /// 先端の Median Time Past。
         mtp: i64,
@@ -123,7 +125,7 @@ impl Node {
     pub fn open(network: Network, data_dir: &Path) -> Result<Node, NodeError> {
         let genesis = crate::genesis::genesis_for(network);
         std::fs::create_dir_all(data_dir)
-            .map_err(|e| StoreError::Io(format!("{} を作れない: {e}", data_dir.display())))?;
+            .map_err(|e| StoreError::Io(format!("cannot create {}: {e}", data_dir.display())))?;
         let store = Store::open(data_dir.join("chain.redb"))?;
         let retarget = if network.retargets() {
             Retarget::Enabled
@@ -210,12 +212,12 @@ impl Node {
             // JIT を使えない環境である。検証は動くが 10 倍ほど遅い。
             // 黙っていると「なぜか同期が進まない」に見えるので伝える。
             crate::log_warn!(
-                "RandomX の JIT を使えないため、インタプリタで検証する ({:?})。\n                 動作はするが、ブロックの検証がおよそ 10 倍遅くなる。\n                 実行可能メモリを禁じる設定 (SELinux の deny_execmem など) が\n                 掛かっていないか確かめること。",
+                "RandomX cannot use the JIT, so validation runs in the interpreter ({:?}).\n                 It works, but block validation is roughly ten times slower.\n                 Check whether something forbids executable memory\n                 (SELinux deny_execmem and the like).",
                 verifier.flags()
             );
         }
         crate::log_verify!(
-            "RandomX のシードを高さ {wanted} のブロック {} に切り替えた",
+            "switched the RandomX seed to block {} at height {wanted}",
             crate::log::short(&seed)
         );
         self.verifier = Some((wanted, verifier));
@@ -233,7 +235,7 @@ impl Node {
         f: impl FnOnce(&mut Self, &RandomXVerifier) -> Result<T, NodeError>,
     ) -> Result<T, NodeError> {
         self.ensure_verifier(height, branch)?;
-        let (epoch, verifier) = self.verifier.take().expect("直前に用意した");
+        let (epoch, verifier) = self.verifier.take().expect("prepared just beforehand");
         let result = f(self, &verifier);
         self.verifier = Some((epoch, verifier));
         result
@@ -499,7 +501,7 @@ mod tests {
         assert_eq!(
             orphaned,
             vec![parent, child],
-            "古い順に並んでいない (親より子が先に来ている)"
+            "not ordered oldest first (a child comes before its parent)"
         );
     }
 

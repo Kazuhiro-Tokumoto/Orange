@@ -68,19 +68,19 @@ const MAX_HISTORY: usize = 200;
 /// 鍵の方である。片方だけ渡されたら、その場で断る。
 pub fn load_tls(cert: &Path, key: &Path) -> Result<TlsAcceptor, String> {
     let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
-        .map_err(|e| format!("{} を読めない: {e}", cert.display()))?
+        .map_err(|e| format!("cannot read {}: {e}", cert.display()))?
         .collect::<Result<_, _>>()
-        .map_err(|e| format!("{} を証明書として読めない: {e}", cert.display()))?;
+        .map_err(|e| format!("cannot read {} as a certificate: {e}", cert.display()))?;
     if chain.is_empty() {
-        return Err(format!("{} に証明書が入っていない", cert.display()));
+        return Err(format!("{} contains no certificate", cert.display()));
     }
     let private = PrivateKeyDer::from_pem_file(key)
-        .map_err(|e| format!("{} を鍵として読めない: {e}", key.display()))?;
+        .map_err(|e| format!("cannot read {} as a key: {e}", key.display()))?;
 
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(chain, private)
-        .map_err(|e| format!("証明書と鍵が対応していない: {e}"))?;
+        .map_err(|e| format!("the certificate and the key do not correspond: {e}"))?;
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
@@ -95,17 +95,17 @@ pub async fn start_wallet(
 ) -> Result<SocketAddr, String> {
     let listener = TcpListener::bind(addr)
         .await
-        .map_err(|e| format!("{addr} でウォレットを待ち受けられない: {e}"))?;
+        .map_err(|e| format!("cannot listen for the wallet on {addr}: {e}"))?;
     let bound = listener
         .local_addr()
-        .map_err(|e| format!("住所を確かめられない: {e}"))?;
+        .map_err(|e| format!("cannot determine the address: {e}"))?;
 
     tokio::spawn(async move {
         loop {
             let (stream, _) = match listener.accept().await {
                 Ok(pair) => pair,
                 Err(e) => {
-                    crate::log_warn!("ウォレットの接続を受け入れられない: {e}");
+                    crate::log_warn!("cannot accept a wallet connection: {e}");
                     return;
                 }
             };
@@ -177,14 +177,14 @@ where
     let Some((head, mut body)) = read_head(&mut stream, &mut buffer).await else {
         return write_response(
             &mut stream,
-            &Response::fault("400 Bad Request", "要求を読めない"),
+            &Response::fault("400 Bad Request", "cannot read the request"),
         )
         .await;
     };
     if head.length > MAX_BODY {
         return write_response(
             &mut stream,
-            &Response::fault("413 Payload Too Large", "本体が大きすぎる"),
+            &Response::fault("413 Payload Too Large", "the body is too large"),
         )
         .await;
     }
@@ -299,14 +299,18 @@ async fn route(handle: &NodeHandle, head: &Head, body: &[u8]) -> Response {
         ("POST", "/api/scan") => api_scan(handle, body).await,
         ("POST", "/api/history") => api_history(handle, body).await,
         ("POST", "/api/send") => api_send(handle, body).await,
-        ("GET", _) => Response::fault("404 Not Found", "そのような頁は無い"),
-        _ => Response::fault("405 Method Not Allowed", "その手続きは受け付けない"),
+        ("GET", _) => Response::fault("404 Not Found", "no such page"),
+        _ => Response::fault("405 Method Not Allowed", "that method is not accepted"),
     }
 }
 
 fn parse(body: &[u8]) -> Result<serde_json::Value, Response> {
-    serde_json::from_slice(body)
-        .map_err(|e| Response::fault("400 Bad Request", &format!("要求が読めない: {e}")))
+    serde_json::from_slice(body).map_err(|e| {
+        Response::fault(
+            "400 Bad Request",
+            &format!("the request cannot be read: {e}"),
+        )
+    })
 }
 
 /// 問い合わせ用のアドレスを読む。**知らない形は先に断る。**
@@ -317,11 +321,11 @@ fn locks_of(
     let list = value
         .get("addresses")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| Response::fault("400 Bad Request", "addresses が無い"))?;
+        .ok_or_else(|| Response::fault("400 Bad Request", "addresses is missing"))?;
     if list.len() > MAX_ADDRESSES {
         return Err(Response::fault(
             "400 Bad Request",
-            &format!("一度に問い合わせられるのは {MAX_ADDRESSES} 個まで"),
+            &format!("at most {MAX_ADDRESSES} can be queried at once"),
         ));
     }
     let mut locks = Vec::with_capacity(list.len());
@@ -329,9 +333,12 @@ fn locks_of(
     for item in list {
         let text = item
             .as_str()
-            .ok_or_else(|| Response::fault("400 Bad Request", "アドレスは文字列であること"))?;
+            .ok_or_else(|| Response::fault("400 Bad Request", "an address must be a string"))?;
         let address = Address::decode_on(network, text).map_err(|e| {
-            Response::fault("400 Bad Request", &format!("アドレス {text} が不正: {e}"))
+            Response::fault(
+                "400 Bad Request",
+                &format!("the address {text} is invalid: {e}"),
+            )
         })?;
         locks.push(Lock::from_address(&address));
         texts.push(text.to_string());
@@ -376,7 +383,7 @@ async fn api_scan(handle: &NodeHandle, body: &[u8]) -> Response {
     };
     let total = match Amount::sum(found.iter().map(|r| r.entry.output.amount)) {
         Some(total) => total,
-        None => return Response::fault("500 Internal Server Error", "合計が桁あふれした"),
+        None => return Response::fault("500 Internal Server Error", "the total overflowed"),
     };
 
     let utxos: Vec<serde_json::Value> = found
@@ -457,19 +464,27 @@ async fn api_send(handle: &NodeHandle, body: &[u8]) -> Response {
         Err(response) => return response,
     };
     let Some(text) = request.get("hex").and_then(serde_json::Value::as_str) else {
-        return Response::fault("400 Bad Request", "hex が無い");
+        return Response::fault("400 Bad Request", "hex is missing");
     };
     let Ok(raw) = hex::decode(text) else {
-        return Response::fault("400 Bad Request", "hex が 16 進として読めない");
+        return Response::fault("400 Bad Request", "hex cannot be read as hexadecimal");
     };
     let tx = match Transaction::decode(&raw) {
         Ok(tx) => tx,
-        Err(e) => return Response::fault("400 Bad Request", &format!("取引として読めない: {e}")),
+        Err(e) => {
+            return Response::fault(
+                "400 Bad Request",
+                &format!("cannot be read as a transaction: {e}"),
+            )
+        }
     };
     // **読み直して同じにならないものは断る。** 余計な尾が付いたものを
     // 通すと、放送した中身と手元の表示がずれる。
     if tx.encode() != raw {
-        return Response::fault("400 Bad Request", "取引の符号化が一意でない");
+        return Response::fault(
+            "400 Bad Request",
+            "the transaction encoding is not canonical",
+        );
     }
 
     match handle.submit_tx(tx).await {

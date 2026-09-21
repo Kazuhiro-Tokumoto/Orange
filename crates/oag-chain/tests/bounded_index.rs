@@ -19,7 +19,8 @@ use oag_chain::{BlockStatus, Chain};
 
 /// 控えの上限を小さくして開く。**追い出しを実際に起こすため。**
 fn open_small(store: MemoryStore) -> Chain<MemoryStore> {
-    Chain::open_with_cache(store, genesis(), DIFFICULTY, Retarget::Enabled, 8).expect("開ける")
+    Chain::open_with_cache(store, genesis(), DIFFICULTY, Retarget::Enabled, 8)
+        .expect("can be opened")
 }
 
 const LEN: u64 = 150;
@@ -33,10 +34,14 @@ fn neither_the_candidates_nor_the_cache_follow_the_height() {
 
     for height in 1..=LEN {
         tip = *extend(&mut chain, tip, 1, height).last().unwrap();
-        assert_eq!(chain.tip_candidates(), 2, "高さ {height} で候補が増えた");
+        assert_eq!(
+            chain.tip_candidates(),
+            2,
+            "candidates grew at height {height}"
+        );
         assert!(
             chain.cached_entries() <= 8,
-            "高さ {height} で控えが上限を超えた ({} 件)",
+            "the cache exceeded its bound at height {height} ({} entries)",
             chain.cached_entries()
         );
     }
@@ -60,14 +65,14 @@ fn every_ancestor_is_still_reachable_after_eviction() {
     assert_eq!(
         chain.ancestor_hash_at(&tip, 0).unwrap(),
         Some(genesis_hash),
-        "ジェネシスまで辿れない"
+        "cannot be traced back to genesis"
     );
     for (i, hash) in blocks.iter().enumerate() {
         let height = i as u64 + 1;
         assert_eq!(
             chain.ancestor_hash_at(&tip, height).unwrap(),
             Some(*hash),
-            "高さ {height} の祖先を引けない"
+            "the ancestor at height {height} cannot be looked up"
         );
         assert_eq!(entry_of(&chain, hash).height(), height);
         assert_eq!(entry_of(&chain, hash).status, BlockStatus::FullyValid);
@@ -86,7 +91,7 @@ fn a_cold_cache_gives_the_same_answers() {
     // 控えを空にして開き直す。答えが変わってはならない。
     let store = chain.into_store();
     let chain = open_small(store);
-    assert_eq!(chain.cached_entries(), 0, "開いた直後から抱えている");
+    assert_eq!(chain.cached_entries(), 0, "holding it right after opening");
 
     assert_eq!(chain.best_header().unwrap().hash, best.hash);
     assert_eq!(
@@ -126,7 +131,7 @@ fn a_reorg_works_with_almost_no_cache() {
         Retarget::Enabled,
         1,
     )
-    .expect("開ける");
+    .expect("can be opened");
     let fork = genesis().header.hash();
 
     let a = extend(&mut chain, fork, 20, 1);
@@ -137,7 +142,7 @@ fn a_reorg_works_with_almost_no_cache() {
     assert_eq!(
         chain.tip().unwrap().hash,
         *b.last().unwrap(),
-        "切り替わらない"
+        "it does not switch"
     );
     assert_eq!(chain.height().unwrap(), 25);
 
@@ -149,7 +154,7 @@ fn a_reorg_works_with_almost_no_cache() {
         assert_ne!(
             chain.hash_at_height(height).unwrap(),
             Some(*hash),
-            "負けた枝が高さ {height} に残っている"
+            "the losing branch is still at height {height}"
         );
     }
 }

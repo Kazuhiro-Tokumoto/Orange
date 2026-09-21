@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""wasm が外から何も取り込んでいないことを確かめる。
+"""Check that the wasm imports nothing from outside.
 
-ブラウザのウォレットは `WebAssembly.instantiate(bytes, {})` だけで
-動かしている。取り込みが 1 つでも増えると、それを満たす JS の糊が要る。
-糊が要るということは、`wasm-bindgen` のような外部の道具に頼ることを
-意味し、`cargo build` だけでは作り直せなくなる。
+The browser wallet runs on `WebAssembly.instantiate(bytes, {})` alone. One
+added import means JS glue is needed to satisfy it. Needing glue means
+depending on external tooling such as `wasm-bindgen`, and then it can no
+longer be rebuilt with `cargo build` alone.
 
-**そうなっていないことを、変更のたびに確かめる。**
+**That this has not happened is checked on every change.**
 """
 
 import sys
@@ -25,7 +25,7 @@ def leb128(data, at):
 
 def imports_of(data):
     if data[:4] != b"\0asm":
-        raise SystemExit("wasm ではない")
+        raise SystemExit("not a wasm file")
     found = []
     at = 8
     while at < len(data):
@@ -42,7 +42,7 @@ def imports_of(data):
                 length, cursor = leb128(data, cursor)
                 name = data[cursor : cursor + length].decode()
                 cursor += length
-                cursor += 1  # 種別
+                cursor += 1  # kind
                 _, cursor = leb128(data, cursor)
                 found.append(f"{module}::{name}")
         at = end
@@ -51,18 +51,18 @@ def imports_of(data):
 
 def main():
     if len(sys.argv) != 2:
-        raise SystemExit("使い方: wasm-imports.py <ファイル>")
+        raise SystemExit("usage: wasm-imports.py <file>")
     found = imports_of(open(sys.argv[1], "rb").read())
     if found:
-        print("取り込みが増えている:", file=sys.stderr)
+        print("imports have grown:", file=sys.stderr)
         for entry in found:
             print(f"  {entry}", file=sys.stderr)
         print(
-            "\nブラウザ側は糊を持たない。crates/oag-node/assets/README.md を読むこと。",
+            "\nThe browser side has no glue. See crates/oag-node/assets/README.md.",
             file=sys.stderr,
         )
         raise SystemExit(1)
-    print("取り込みは無い")
+    print("no imports")
 
 
 if __name__ == "__main__":

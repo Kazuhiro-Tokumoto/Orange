@@ -30,7 +30,7 @@ pub const MAX_RISE_FACTOR: u128 = L_FLOOR_DIVISOR as u128;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LwmaError {
     /// タイムスタンプが `WINDOW + 1` 件に満たない。
-    #[error("タイムスタンプが {given} 件しかない ({needed} 件必要)")]
+    #[error("only {given} timestamps ({needed} required)")]
     InsufficientTimestamps {
         /// 与えられた件数。
         given: usize,
@@ -38,7 +38,7 @@ pub enum LwmaError {
         needed: usize,
     },
     /// 難易度が `WINDOW` 件に満たない。
-    #[error("難易度が {given} 件しかない ({needed} 件必要)")]
+    #[error("only {given} difficulties ({needed} required)")]
     InsufficientDifficulties {
         /// 与えられた件数。
         given: usize,
@@ -205,9 +205,12 @@ mod tests {
             .collect();
         let difficulties = vec![1_000_000u64; WINDOW];
         let next = next_difficulty(&timestamps, &difficulties).unwrap();
-        assert!(next < 1_000_000, "遅いのに難易度が下がっていない: {next}");
+        assert!(
+            next < 1_000_000,
+            "slow, yet the difficulty did not fall: {next}"
+        );
         // solvetime が 2T なら難易度は約半分になる。
-        assert!((450_000..550_000).contains(&next), "実際には {next}");
+        assert!((450_000..550_000).contains(&next), "actually {next}");
     }
 
     #[test]
@@ -217,7 +220,7 @@ mod tests {
             .collect();
         let difficulties = vec![1_000_000u64; WINDOW];
         let next = next_difficulty(&timestamps, &difficulties).unwrap();
-        assert!((1_900_000..2_100_000).contains(&next), "実際には {next}");
+        assert!((1_900_000..2_100_000).contains(&next), "actually {next}");
     }
 
     #[test]
@@ -240,7 +243,7 @@ mod tests {
         assert_eq!(
             u128::from(next),
             1_000_000 * MAX_RISE_FACTOR,
-            "上昇は 1 ブロックあたり 10 倍で頭打ちになるべき"
+            "a rise should cap at ten times per block"
         );
     }
 
@@ -259,7 +262,7 @@ mod tests {
         let cap = baseline * 2;
         assert!(
             attacked < cap,
-            "クランプが効いていない: {baseline} → {attacked}"
+            "the clamp is not working: {baseline} to {attacked}"
         );
     }
 
@@ -299,7 +302,7 @@ mod tests {
         let mean = sim.run(hashrate, 5_000);
         assert!(
             (57.0..63.0).contains(&mean),
-            "定常状態の平均ブロック間隔が {mean:.1} 秒 (目標 60 秒)"
+            "the steady-state mean block interval is {mean:.1} s (target 60 s)"
         );
     }
 
@@ -318,7 +321,7 @@ mod tests {
         }
         assert!(
             worst < 2.0,
-            "定常状態で難易度が均衡値の {worst:.2} 倍まで振れた"
+            "in steady state the difficulty swung to {worst:.2}x the equilibrium"
         );
     }
 
@@ -340,10 +343,10 @@ mod tests {
                 blocks_to_adapt = Some(i);
             }
         }
-        let blocks = blocks_to_adapt.expect("400 ブロック以内に追随しなかった");
+        let blocks = blocks_to_adapt.expect("did not track within 400 blocks");
         assert!(
             blocks <= 2 * WINDOW,
-            "追随に {blocks} ブロックかかった (窓幅の 2 倍 = {} 以内であるべき)",
+            "tracking took {blocks} blocks (should be within twice the window = {})",
             2 * WINDOW
         );
     }
@@ -365,10 +368,10 @@ mod tests {
                 blocks_to_adapt = Some(i);
             }
         }
-        let blocks = blocks_to_adapt.expect("400 ブロック以内に回復しなかった");
+        let blocks = blocks_to_adapt.expect("did not recover within 400 blocks");
         assert!(
             blocks <= 2 * WINDOW,
-            "回復に {blocks} ブロックかかった (窓幅の 2 倍 = {} 以内であるべき)",
+            "recovery took {blocks} blocks (should be within twice the window = {})",
             2 * WINDOW
         );
     }
@@ -392,7 +395,7 @@ mod tests {
         let mean = total / count as f64;
         assert!(
             (30.0..120.0).contains(&mean),
-            "変動下の平均ブロック間隔が {mean:.1} 秒"
+            "the mean block interval under variation is {mean:.1} s"
         );
     }
 }

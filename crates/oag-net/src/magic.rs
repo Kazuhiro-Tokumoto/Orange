@@ -9,7 +9,7 @@
 //! 恣意的に選ぶのではなく、ネットワーク名から決定的に導出する。
 //!
 //! ```text
-//! magic = BLAKE3("Orange/network/<ネットワーク名>")[0..4]
+//! magic = BLAKE3("Orange/network/<network name>")[0..4]
 //! ```
 //!
 //! こうすることで、値の出どころが説明でき、再現もできる。
@@ -60,7 +60,7 @@ mod tests {
             assert_eq!(
                 magic_for(network),
                 derive(network),
-                "{network} の識別子が導出と一致しない"
+                "the identifier for {network} does not match the derivation"
             );
         }
     }
@@ -90,7 +90,7 @@ mod tests {
             let magic = magic_for(network);
             assert!(
                 !magic.iter().all(|b| b.is_ascii_graphic()),
-                "{network} の識別子がすべて印字可能な ASCII になっている"
+                "the identifier for {network} is entirely printable ASCII"
             );
         }
     }

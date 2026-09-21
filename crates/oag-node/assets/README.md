@@ -1,61 +1,65 @@
-# ブラウザのウォレットに配るもの
+# What is served to the browser wallet
 
-`oag-node` は、この 3 つを埋め込んで `--wallet` の口から配る。
+[English](README.md) · [日本語](README.jp.md)
 
-| ファイル | 中身 |
+`oag-node` embeds these three files and serves them from the `--wallet`
+interface.
+
+| File | Contents |
 |---|---|
-| `wallet.html` | 画面。`/*CSS*/` のところにエクスプローラと同じ様式が入る |
-| `wallet.js` | 画面の出し入れと、ノードへの問い合わせ。**鍵に触らない** |
-| `wallet.wasm` | 鍵を扱う部分。`oag-wallet-wasm` を組んだもの |
+| `wallet.html` | the page. The same stylesheet as the explorer goes where `/*CSS*/` is |
+| `wallet.js` | moving things on and off the screen, and querying the node. **It never touches keys** |
+| `wallet.wasm` | the part that handles keys. `oag-wallet-wasm` compiled |
 
-## `wallet.wasm` の作り直し方
+## Rebuilding `wallet.wasm`
 
-`crates/oag-wallet-wasm` か、そこから読んでいるクレート (`oag-wallet`
-`oag-consensus` `oag-primitives`) を変えたら、**必ず作り直して一緒に
-コミットする**。
+Change `crates/oag-wallet-wasm`, or any crate it reads (`oag-wallet`,
+`oag-consensus`, `oag-primitives`), and you **must rebuild it and commit the
+result alongside**.
 
 ```sh
-rustup target add wasm32-unknown-unknown   # 一度だけ
+rustup target add wasm32-unknown-unknown   # once
 sh tools/wallet-wasm.sh
 ```
 
-`wallet.wasm` と、隣の `wallet.wasm.sources` の両方が書き換わる。
+Both `wallet.wasm` and the `wallet.wasm.sources` next to it are rewritten.
 
-## `wallet.wasm.sources` は何か
+## What `wallet.wasm.sources` is
 
-wasm の元になっている原稿の指紋である。
+A fingerprint of the source the wasm was built from.
 
-**バイト列そのものを突き合わせても確かめられない。** 登録簿の置き場が
-wasm に埋め込まれるため、同じ原稿でも機械が違えば違うバイト列になる
-(`/root/.cargo/...` と `/home/runner/.cargo/...`)。
+**Comparing the bytes themselves proves nothing.** The registry path is baked
+into the wasm, so the same source produces different bytes on different machines
+(`/root/.cargo/...` versus `/home/runner/.cargo/...`).
 
-だから原稿の側を見る。指紋が動いているのに `wallet.wasm` が古いままなら、
-直したはずのものがブラウザに届いていない。**CI がそれを見る。**
+So the source side is what gets checked. If the fingerprint moved while
+`wallet.wasm` stayed old, then what you thought you fixed never reached the
+browser. **CI watches for that.**
 
-中身が壊れていないことは別に確かめる。
+That the contents are not broken is checked separately.
 
 ```sh
 node tools/wallet-wasm-smoke.mjs
 ```
 
-`crates/oag-node/assets/wallet.js` の `call()` を写してあるので、ブラウザが
-通るのと同じ道筋を通る。
+It copies `call()` from `crates/oag-node/assets/wallet.js`, so it takes the same
+path the browser does.
 
-## なぜ `wasm-bindgen` を使わないのか
+## Why `wasm-bindgen` is not used
 
-出来上がりは**取り込み (import) を 1 つも持たない**ので、ブラウザ側は
-`WebAssembly.instantiate(bytes, {})` だけで動かせる。外部の道具に頼らない
-ぶん、`cargo build` だけで誰でも同じものを作り直せる。
+The result **has no imports at all**, so the browser side can run it with
+`WebAssembly.instantiate(bytes, {})` alone. Depending on no external tooling
+means anyone can rebuild the identical artifact with `cargo build`.
 
-道具の版数が crate の版数と一致していなければ組めない、という状態は、
-**誰も作り直せないものを配ること**に繋がる。
+A state where the tool's version must match the crate's version to build at all
+leads to **shipping something nobody can rebuild**.
 
-乱数だけは wasm 側に源が無いので、`crypto.getRandomValues` が出した
-32 バイトを起動時に渡している (`cmd: "seed"`)。`getrandom` の既定の裏側を
-選ぶと `wasm-bindgen` が要るようになるため、`getrandom_backend="custom"`
-で自前の裏側に差し替えてある。
+Randomness is the one exception, since the wasm has no source of its own: 32
+bytes from `crypto.getRandomValues` are handed in at startup (`cmd: "seed"`).
+Choosing `getrandom`'s default backend would pull in `wasm-bindgen`, so
+`getrandom_backend="custom"` swaps in our own.
 
-取り込みが増えていないかも CI が見る。
+CI also watches that the imports have not grown.
 
 ```sh
 python3 tools/wasm-imports.py crates/oag-node/assets/wallet.wasm

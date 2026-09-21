@@ -114,9 +114,9 @@ pub async fn run_as(
     let theirs = conn
         .handshake(version)
         .await
-        .map_err(|e| format!("{addr} とのハンドシェイクに失敗した: {e}"))?;
+        .map_err(|e| format!("the handshake with {addr} failed: {e}"))?;
     crate::log_peer!(
-        "{addr} と繋がった ({}、高さ {})",
+        "connected to {addr} ({}, height {})",
         theirs.user_agent,
         theirs.start_height
     );
@@ -124,7 +124,7 @@ pub async fn run_as(
     let source = conn.peer_addr().ok();
     let result = session(&handle, peer, conn, theirs.start_height, direction, source).await;
     handle.peer_gone(peer).await?;
-    crate::log_peer!("{addr} との接続が切れた");
+    crate::log_peer!("the connection to {addr} dropped");
     result
 }
 
@@ -160,7 +160,7 @@ async fn session(
                 }
                 Err(TransportError::Closed) => break,
                 Err(e) => {
-                    crate::log_warn!("受信に失敗した: {e}");
+                    crate::log_warn!("receiving failed: {e}");
                     break;
                 }
             }
@@ -374,7 +374,7 @@ impl Session {
         }
         self.stall_reported = true;
         crate::log_sync!(
-            "本体が {waited} 秒届かない (相手 {}、こちら {ours})",
+            "no block body for {waited} seconds (peer {}, us {ours})",
             self.peer_height
         );
         Ok(())
@@ -392,7 +392,7 @@ impl Session {
 
             // ハンドシェイクは済んでいる。重ねて来たら断る。
             Message::Version(_) | Message::Verack => {
-                Err("ハンドシェイク後に version/verack が来た".to_string())
+                Err("version/verack arrived after the handshake".to_string())
             }
 
             Message::GetHeaders(request) => {
@@ -543,7 +543,7 @@ impl Session {
             .accept_block_from(block, Some(self.peer))
             .await
             // 不正なブロックを送ってきた相手は切る。
-            .map_err(|e| format!("高さ {height} のブロックを受け付けられない: {e}"))?;
+            .map_err(|e| format!("cannot accept the block at height {height}: {e}"))?;
         self.request_bodies(handle, out).await
     }
 
@@ -565,7 +565,7 @@ impl Session {
             let announced = txids.len();
             let wanted = handle.want_txs(self.peer, txids).await?;
             if !wanted.is_empty() {
-                crate::log_tx!("告知 {announced} 件  うち {} 件を要求", wanted.len());
+                crate::log_tx!("{announced} announced  requested {}", wanted.len());
                 let items = wanted.into_iter().map(InvItem::tx).collect();
                 send(out, Message::GetData(items)).await?;
             }
@@ -602,7 +602,7 @@ impl Session {
             self.rejected_txs = self.rejected_txs.saturating_add(1);
             if self.rejected_txs % 100 == 1 {
                 crate::log_warn!(
-                    "トランザクションを受け付けなかった ({} 件目): {e}",
+                    "a transaction was not accepted (entry {}): {e}",
                     self.rejected_txs
                 );
             }
@@ -614,5 +614,5 @@ impl Session {
 async fn send(out: &mpsc::Sender<Message>, message: Message) -> Result<(), String> {
     out.send(message)
         .await
-        .map_err(|_| "送信の口が閉じている".to_string())
+        .map_err(|_| "the send channel is closed".to_string())
 }

@@ -60,7 +60,7 @@ fn wordlist() -> &'static [&'static str] {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Bip39Error {
     /// 語数が 12 / 15 / 18 / 21 / 24 のいずれでもない。
-    #[error("語数は 12 / 15 / 18 / 21 / 24 のいずれかであること (受け取った語数: {found})")]
+    #[error("the word count must be 12 / 15 / 18 / 21 / 24 (received: {found})")]
     BadWordCount {
         /// 受け取った語数。
         found: usize,
@@ -69,7 +69,7 @@ pub enum Bip39Error {
     ///
     /// **綴りは伏せない。** 書き写しの誤りを直すには、どの語かが分からねば
     /// ならない。ニーモニック全体ではなく 1 語だけを示す。
-    #[error("{position} 番目の語が単語表に無い: {word}")]
+    #[error("word {position} is not in the wordlist: {word}")]
     UnknownWord {
         /// 何番目の語か (1 起算)。
         position: usize,
@@ -77,13 +77,13 @@ pub enum Bip39Error {
         word: String,
     },
     /// エントロピーの長さが 16 / 20 / 24 / 28 / 32 バイトのいずれでもない。
-    #[error("エントロピーは 16 / 20 / 24 / 28 / 32 バイトのいずれかであること (受け取った長さ: {found})")]
+    #[error("entropy must be 16 / 20 / 24 / 28 / 32 bytes (received length: {found})")]
     BadEntropyLength {
         /// 受け取った長さ。
         found: usize,
     },
     /// 検査符号が合わない。
-    #[error("検査符号が合わない。どこか 1 語が違っている")]
+    #[error("the checksum does not match; one of the words is wrong")]
     BadChecksum,
 }
 
@@ -98,7 +98,7 @@ pub struct Mnemonic {
 impl std::fmt::Debug for Mnemonic {
     /// 語を出さない。ログに出れば資金が動く。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Mnemonic(<伏せ字>)")
+        f.write_str("Mnemonic(<redacted>)")
     }
 }
 
@@ -389,15 +389,15 @@ mod tests {
         for (entropy, phrase, seed) in BIP39_VECTORS {
             let entropy = from_hex(entropy);
             let mnemonic = Mnemonic::from_entropy(&entropy).unwrap();
-            assert_eq!(&*mnemonic.phrase(), *phrase, "エントロピー → 語");
+            assert_eq!(&*mnemonic.phrase(), *phrase, "entropy to words");
 
             let parsed = Mnemonic::parse(phrase).unwrap();
-            assert_eq!(parsed.entropy(), &entropy[..], "語 → エントロピー");
+            assert_eq!(parsed.entropy(), &entropy[..], "words to entropy");
 
             assert_eq!(
                 to_hex(&*parsed.to_seed("TREZOR")),
                 *seed,
-                "語 → 種 ({phrase})"
+                "words to seed ({phrase})"
             );
         }
     }
@@ -407,17 +407,24 @@ mod tests {
         let list = wordlist();
         assert_eq!(list.len(), 2048);
         // 二分探索で引くため、並びが崩れると別の語を引く。
-        assert!(list.windows(2).all(|w| w[0] < w[1]), "辞書順であること");
+        assert!(
+            list.windows(2).all(|w| w[0] < w[1]),
+            "it must be in lexical order"
+        );
         // BIP39 は先頭 4 文字で語を一意に定めることを求めている。
         let mut prefixes: Vec<&str> = list.iter().map(|w| &w[..4.min(w.len())]).collect();
         prefixes.sort_unstable();
         let before = prefixes.len();
         prefixes.dedup();
-        assert_eq!(prefixes.len(), before, "先頭 4 文字が重なる語がある");
+        assert_eq!(
+            prefixes.len(),
+            before,
+            "two words share their first four characters"
+        );
         assert!(
             list.iter()
                 .all(|w| w.chars().all(|c| c.is_ascii_lowercase())),
-            "英小文字だけであること"
+            "it must be lowercase ASCII only"
         );
     }
 

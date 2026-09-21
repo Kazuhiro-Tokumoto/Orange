@@ -60,18 +60,23 @@ fn runtime() -> tokio::runtime::Runtime {
 
 /// 1 要求出して、状態行と本文を返す。
 async fn get(addr: std::net::SocketAddr, target: &str) -> (String, String) {
-    let mut stream = TcpStream::connect(addr).await.expect("繋がる");
+    let mut stream = TcpStream::connect(addr).await.expect("it connects");
     let request = format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).await.expect("送れる");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("it can send");
 
     let mut raw = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
         .await
-        .expect("応答が来る")
-        .expect("読める");
+        .expect("a response arrives")
+        .expect("readable");
 
     let text = String::from_utf8_lossy(&raw).into_owned();
-    let (head, body) = text.split_once("\r\n\r\n").expect("頭と本文が分かれる");
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .expect("headers and body are separated");
     let status = head.lines().next().unwrap_or_default().to_string();
     (status, body.to_string())
 }
@@ -86,14 +91,14 @@ fn start(
     std::net::SocketAddr,
 ) {
     let dir = TempDir::new(tag);
-    let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
+    let service = NodeService::start(NETWORK, &dir.0).expect("a node can be started");
     let handle = service.handle();
     let runtime = runtime();
     let addr = runtime.block_on(async {
-        handle.build_index().await.expect("索引を作れる");
+        handle.build_index().await.expect("the index can be built");
         oag_node::explorer::start_explorer(handle.clone(), "127.0.0.1:0".parse().unwrap())
             .await
-            .expect("待ち受けられる")
+            .expect("it can listen")
     });
     (dir, service, runtime, addr)
 }
@@ -112,10 +117,10 @@ fn the_overview_renders() {
     let (status, body) = runtime.block_on(get(addr, "/"));
     assert!(status.contains("200"), "{status}");
     assert!(body.contains("<!doctype html>"));
-    assert!(body.contains("Orange"), "銘柄が出る");
-    assert!(body.contains("最近のブロック"), "一覧が出る");
+    assert!(body.contains("Orange"), "the name appears");
+    assert!(body.contains("recent blocks"), "the list appears");
     // 索引を作ってから起こしたので「あり」のはずである。
-    assert!(body.contains("あり"), "索引の状態が出る");
+    assert!(body.contains("yes"), "the index status appears");
     drop(service);
 }
 
@@ -124,9 +129,9 @@ fn a_block_page_shows_its_header_and_transactions() {
     let (_dir, service, runtime, addr) = start("block");
     let (status, body) = runtime.block_on(get(addr, "/block/0"));
     assert!(status.contains("200"), "{status}");
-    assert!(body.contains("ブロック 0"));
-    assert!(body.contains("マークル根"));
-    assert!(body.contains("採掘"), "コインベースの印が付く");
+    assert!(body.contains("block 0"));
+    assert!(body.contains("merkle root"));
+    assert!(body.contains("mined"), "the coinbase marker is shown");
     drop(service);
 }
 
@@ -141,7 +146,7 @@ fn a_block_can_be_found_by_hash_as_well_as_height() {
         .to_string();
     let (status, body) = runtime.block_on(get(addr, &format!("/block/{hash}")));
     assert!(status.contains("200"), "{status}");
-    assert!(body.contains("ブロック 0"));
+    assert!(body.contains("block 0"));
     drop(service);
 }
 
@@ -153,9 +158,12 @@ fn a_transaction_page_is_served_from_the_index() {
     let txid = genesis_txid(&service.handle(), &runtime);
     let (status, body) = runtime.block_on(get(addr, &format!("/tx/{txid}")));
     assert!(status.contains("200"), "{status}");
-    assert!(body.contains("確定済み"));
+    assert!(body.contains("confirmed"));
     assert!(body.contains(&txid));
-    assert!(body.contains("採掘による新規発行"), "コインベースの入力欄");
+    assert!(
+        body.contains("newly issued by mining"),
+        "the coinbase input column"
+    );
     drop(service);
 }
 
@@ -177,9 +185,12 @@ fn an_address_page_shows_the_history_from_the_index() {
 
     let (status, body) = runtime.block_on(get(addr, &format!("/address/{text}")));
     assert!(status.contains("200"), "{status}");
-    assert!(body.contains("履歴"));
-    assert!(body.contains("+"), "受け取りとして出る");
-    assert!(!body.contains("索引を持っていないので"), "索引はある");
+    assert!(body.contains("history"));
+    assert!(body.contains("+"), "shown as a receipt");
+    assert!(
+        !body.contains("no index is held, so"),
+        "the index is present"
+    );
     drop(service);
 }
 
@@ -191,12 +202,12 @@ fn searching_routes_by_the_shape_of_the_input() {
     // 数字は高さ。
     let (status, body) = runtime.block_on(get(addr, "/search?q=0"));
     assert!(status.contains("200"), "{status}");
-    assert!(body.contains("ブロック 0"));
+    assert!(body.contains("block 0"));
 
     // 64 文字の 16 進で、ブロックではないものは取引として引く。
     let (status, body) = runtime.block_on(get(addr, &format!("/search?q={txid}")));
     assert!(status.contains("200"), "{status}");
-    assert!(body.contains("確定済み"));
+    assert!(body.contains("confirmed"));
     drop(service);
 }
 
@@ -214,7 +225,7 @@ fn unknown_things_are_refused_rather_than_shown_empty() {
     let (status, _) = runtime.block_on(get(addr, "/address/oag1qqqqqq"));
     assert!(status.contains("404"), "{status}");
 
-    let (status, _) = runtime.block_on(get(addr, "/そんな頁は無い"));
+    let (status, _) = runtime.block_on(get(addr, "/no-such-page"));
     assert!(status.contains("404"), "{status}");
     drop(service);
 }
@@ -227,14 +238,14 @@ fn what_the_visitor_types_is_escaped_before_it_goes_into_the_page() {
     let (_, body) = runtime.block_on(get(addr, "/address/%3Cscript%3Ealert(1)%3C/script%3E"));
     assert!(
         !body.contains("<script>alert(1)"),
-        "生の script が本文に出てはならない"
+        "raw script must not appear in the body"
     );
-    assert!(body.contains("&lt;script&gt;"), "逃がした形で出る");
+    assert!(body.contains("&lt;script&gt;"), "it appears escaped");
 
     let (_, body) = runtime.block_on(get(addr, "/search?q=%22%3E%3Csvg+onload%3Dalert(1)%3E"));
     assert!(
         !body.contains("<svg onload"),
-        "属性から抜け出せてはならない"
+        "it must not be possible to break out of the attribute"
     );
     drop(service);
 }
@@ -265,18 +276,18 @@ fn without_an_index_the_pages_say_so_instead_of_showing_nothing() {
     // 索引が無いのに空の履歴を出すと、利用者はそれを「取引が無い」と
     // 受け取る。持っていないことを言わなければならない。
     let dir = TempDir::new("noindex");
-    let service = NodeService::start(NETWORK, &dir.0).expect("ノードを起こせる");
+    let service = NodeService::start(NETWORK, &dir.0).expect("a node can be started");
     let handle = service.handle();
     let runtime = runtime();
     let addr = runtime.block_on(async {
         oag_node::explorer::start_explorer(handle.clone(), "127.0.0.1:0".parse().unwrap())
             .await
-            .expect("待ち受けられる")
+            .expect("it can listen")
     });
 
     let (status, body) = runtime.block_on(get(addr, "/"));
     assert!(status.contains("200"), "{status}");
-    assert!(body.contains("なし"), "索引が無いと出る");
+    assert!(body.contains("no"), "shown when there is no index");
 
     let text = runtime.block_on(async {
         let hash = handle.hash_at_height(0).await.unwrap().unwrap();
@@ -289,14 +300,14 @@ fn without_an_index_the_pages_say_so_instead_of_showing_nothing() {
     });
     let (_, body) = runtime.block_on(get(addr, &format!("/address/{text}")));
     assert!(
-        body.contains("索引を持っていないので履歴を出せません"),
-        "断りが出る"
+        body.contains("no index is held, so history cannot be shown"),
+        "the refusal is shown"
     );
 
     // ブロックは索引なしでも見られる。
     let (status, body) = runtime.block_on(get(addr, "/block/0"));
     assert!(status.contains("200"), "{status}");
-    assert!(body.contains("ブロック 0"));
+    assert!(body.contains("block 0"));
     drop(service);
 }
 

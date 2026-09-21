@@ -90,31 +90,31 @@ fn link_child(
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     /// データベースの操作に失敗した。
-    #[error("データベースの操作に失敗した: {0}")]
+    #[error("a database operation failed: {0}")]
     Db(String),
     /// 保存されていた値を復号できなかった。データベースの破損を意味する。
-    #[error("保存されていた値を復号できない (データベースの破損): {0}")]
+    #[error("a stored value cannot be decoded (database corruption): {0}")]
     Corrupt(#[from] CodecError),
     /// UTXO セットの操作に失敗した。
     #[error(transparent)]
     Utxo(#[from] UtxoError),
     /// 先端が記録されていない。
-    #[error("先端が記録されていない")]
+    #[error("the tip is not recorded")]
     NoTip,
     /// ブロック本体を保持していない。
-    #[error("ブロック {0} の本体を保持していない")]
+    #[error("the body of block {0} is not held")]
     MissingBlock(Hash),
     /// 巻き戻し情報を保持していない。
-    #[error("ブロック {0} の巻き戻し情報を保持していない")]
+    #[error("the undo information for block {0} is not held")]
     MissingUndo(Hash),
     /// 入出力に失敗した。
-    #[error("入出力に失敗した: {0}")]
+    #[error("I/O failed: {0}")]
     Io(String),
     /// 索引を持っていない。
-    #[error("索引を持っていない (--index を付けて起動すること)")]
+    #[error("no index is held (start the node with --index)")]
     NoIndex,
     /// 索引が途中からしか無い。
-    #[error("索引は高さ {0} からしか無い。組み直しが要る")]
+    #[error("the index only starts at height {0}; a rebuild is needed")]
     PartialIndex(u64),
     /// 索引の鍵に収まらない値があった。
     #[error(transparent)]
@@ -289,7 +289,7 @@ fn index_from_in<T: ReadableTable<&'static str, Bytes>>(
             let bytes: [u8; 8] = guard
                 .value()
                 .try_into()
-                .map_err(|_| StoreError::Db("索引の記録が壊れている".to_string()))?;
+                .map_err(|_| StoreError::Db("an index record is corrupt".to_string()))?;
             Ok(Some(u64::from_le_bytes(bytes)))
         }
         None => Ok(None),
@@ -541,9 +541,11 @@ impl Store {
             let raw = body.value();
             let size = raw.len();
             // ヘッダの直後に取引数の varint が 1 個。そこまでで読むのをやめる。
-            let rest = raw
-                .get(BLOCK_HEADER_LEN..)
-                .ok_or_else(|| StoreError::Db(format!("ブロック {hash} の記録がヘッダより短い")))?;
+            let rest = raw.get(BLOCK_HEADER_LEN..).ok_or_else(|| {
+                StoreError::Db(format!(
+                    "the record for block {hash} is shorter than a header"
+                ))
+            })?;
             let transactions = Reader::new(rest).read_count::<Transaction>("block.transactions")?;
 
             out.push(BlockSummary {
@@ -1270,7 +1272,7 @@ mod tests {
             assert_eq!(
                 store.children_of(&blocks[i].header.hash()).unwrap(),
                 vec![blocks[i + 1].header.hash()],
-                "高さ {i} の子が引けない"
+                "the children at height {i} cannot be looked up"
             );
         }
         // 先端に子はいない。
@@ -1313,7 +1315,7 @@ mod tests {
         assert_eq!(
             store.children_of(&blocks[0].header.hash()).unwrap().len(),
             1,
-            "状態を書き直すたびに子が増えている"
+            "children multiply every time the state is rewritten"
         );
     }
 
@@ -1345,7 +1347,7 @@ mod tests {
             assert_eq!(
                 store.children_of(&blocks[i].header.hash()).unwrap(),
                 vec![blocks[i + 1].header.hash()],
-                "高さ {i} の子が組み直されていない"
+                "the children at height {i} were not rebuilt"
             );
         }
     }
@@ -1428,7 +1430,7 @@ mod tests {
         assert_eq!(store.utxo_count().unwrap(), 5);
 
         let found = store.scan_utxos(std::slice::from_ref(&mine), 100).unwrap();
-        assert_eq!(found.len(), 2, "自分の分だけ拾うべき");
+        assert_eq!(found.len(), 2, "it should pick up only its own");
         let mut heights: Vec<u64> = found.iter().map(|(_, e)| e.height).collect();
         heights.sort_unstable();
         assert_eq!(heights, vec![1, 3]);
@@ -1472,7 +1474,7 @@ mod tests {
         store.disconnect_tip().unwrap();
         assert!(
             store.scan_utxos(&[lock], 100).unwrap().is_empty(),
-            "巻き戻したのに見つかる"
+            "found even after the rewind"
         );
     }
 
@@ -1516,7 +1518,7 @@ mod tests {
             assert_eq!(
                 view.get(&outpoint).unwrap(),
                 memory.get(&outpoint).unwrap(),
-                "高さ {} で食い違った",
+                "disagreed at height {}",
                 block.header.height
             );
         }
@@ -1565,12 +1567,12 @@ mod tests {
         });
 
         assert!(store.connect_block(&bad).is_err());
-        assert_eq!(store.tip().unwrap(), tip_before, "先端が動いている");
+        assert_eq!(store.tip().unwrap(), tip_before, "the tip has moved");
         assert_eq!(store.height().unwrap(), height_before);
         assert_eq!(
             store.utxo_count().unwrap(),
             count_before,
-            "コインベース出力だけが書き込まれてしまっている"
+            "only the coinbase outputs were written"
         );
     }
 
@@ -1608,7 +1610,7 @@ mod tests {
 
         let store = tmp.open();
         let view = store.utxo_view().unwrap();
-        let entry = view.get(&outpoint).unwrap().expect("残っている");
+        let entry = view.get(&outpoint).unwrap().expect("still there");
         assert_eq!(entry.height, 1);
         assert!(entry.is_coinbase);
         assert_eq!(entry.output.amount, oag_consensus::params::BLOCK_REWARD);
@@ -1628,7 +1630,7 @@ mod tests {
         store.disconnect_tip().unwrap();
         assert!(
             view.get(&outpoint).unwrap().is_some(),
-            "読み取りビューが書き込みの影響を受けている"
+            "the read view is affected by the write"
         );
 
         let fresh = store.utxo_view().unwrap();
@@ -1649,12 +1651,12 @@ mod tests {
         for (height, block) in blocks.iter().enumerate() {
             let hash = block.header.hash();
             let path = out.join(height.to_string()).join(format!("{hash}.dat"));
-            assert!(path.exists(), "{} が無い", path.display());
+            assert!(path.exists(), "{} is missing", path.display());
             let bytes = std::fs::read(&path).unwrap();
             assert_eq!(
                 Block::decode(&bytes).unwrap(),
                 *block,
-                "書き出した内容が元のブロックと一致しない"
+                "the exported contents do not match the original block"
             );
         }
     }
@@ -1732,13 +1734,13 @@ mod tests {
             assert_eq!(
                 summary.transactions,
                 block.transactions.len(),
-                "高さ {} の取引数が本体と合わない",
+                "the transaction count at height {} does not match the body",
                 summary.height
             );
             assert_eq!(
                 summary.size,
                 block.size(),
-                "高さ {} の大きさが本体と合わない",
+                "the size at height {} does not match the body",
                 summary.height
             );
         }
@@ -1868,7 +1870,11 @@ mod tests {
         store.build_index().unwrap();
 
         let history = store.address_history(&payer, 0, 100).unwrap();
-        assert_eq!(history.len(), 2, "受け取りと使用の両方が出るべき");
+        assert_eq!(
+            history.len(),
+            2,
+            "both the receipt and the spend should appear"
+        );
         assert_eq!((history[0].height, history[0].position), (0, 0));
         assert_eq!((history[1].height, history[1].position), (1, 1));
 

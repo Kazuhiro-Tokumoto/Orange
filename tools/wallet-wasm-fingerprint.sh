@@ -1,17 +1,17 @@
 #!/bin/sh
-# wasm の元になっている原稿の指紋。
+# A fingerprint of the source the wasm is built from.
 #
-# **バイト列そのものは機械ごとに変わる。** 登録簿の置き場が埋め込まれる
-# ためで、`/root/.cargo/...` と `/home/runner/.cargo/...` は同じ原稿でも
-# 違うバイト列になる。だから「組み直して突き合わせる」では確かめられない。
+# **The bytes themselves differ per machine.** The registry path is baked in,
+# so `/root/.cargo/...` and `/home/runner/.cargo/...` give different bytes for
+# identical source. "Rebuild and compare" therefore proves nothing.
 #
-# 代わりに原稿の側を見る。**これが変わっているのに wasm が古いままなら、
-# 直したはずのものがブラウザに届いていない。**
+# So the source side is watched instead. **If this moved while the wasm stayed
+# old, what you thought you fixed never reached the browser.**
 set -eu
 
 cd "$(dirname "$0")/.."
 
-# wasm に入るのはこの 4 つと、版を決める Cargo.lock だけである。
+# Only these four, plus the Cargo.lock that pins versions, go into the wasm.
 find \
   crates/oag-wallet-wasm/src \
   crates/oag-wallet/src \

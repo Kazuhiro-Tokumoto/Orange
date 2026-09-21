@@ -113,7 +113,7 @@ mod tests {
         // 報酬が一定なので、総発行量は 高さ × 報酬 で厳密に一致する。
         let total = BLOCK_REWARD
             .checked_mul(EMISSION_END_HEIGHT)
-            .expect("総発行量に収まる");
+            .expect("fits within the total supply");
         assert_eq!(total, Amount::MAX);
         assert_eq!(total.to_atomic(), MAX_SUPPLY_ATOMIC);
     }
@@ -130,7 +130,7 @@ mod tests {
     fn emission_takes_about_190_years() {
         let seconds = EMISSION_END_HEIGHT * TARGET_BLOCK_TIME_SECS;
         let years = seconds as f64 / (BLOCKS_PER_YEAR * TARGET_BLOCK_TIME_SECS) as f64;
-        assert!((190.0..191.0).contains(&years), "実際には {years} 年");
+        assert!((190.0..191.0).contains(&years), "actually {years} years");
     }
 
     #[test]
@@ -172,6 +172,6 @@ mod tests {
         let input_cost = min_relay_fee(102).unwrap();
         assert_eq!(input_cost.to_string(), "0.00051");
         let ratio = DUST_THRESHOLD.to_atomic() as f64 / input_cost.to_atomic() as f64;
-        assert!((2.5..=3.5).contains(&ratio), "実際の倍率は {ratio}");
+        assert!((2.5..=3.5).contains(&ratio), "the actual ratio is {ratio}");
     }
 }

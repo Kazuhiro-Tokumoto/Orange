@@ -59,10 +59,10 @@ pub type HasherFactory =
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PoolError {
     /// OS がスレッドを作らせてくれない。
-    #[error("採掘スレッドを起こせない: {0}")]
+    #[error("cannot start a mining thread: {0}")]
     Spawn(String),
     /// 採掘器を建てられない。memory が足りないときはこれになる。
-    #[error("採掘器を用意できない: {0}")]
+    #[error("cannot prepare a miner: {0}")]
     Hasher(String),
 }
 
@@ -153,7 +153,7 @@ impl MiningPool {
         for _ in 0..threads {
             let outcome = match ready.recv() {
                 Ok(result) => result,
-                Err(_) => Err("採掘スレッドが黙って終わった".to_string()),
+                Err(_) => Err("a mining thread ended silently".to_string()),
             };
             if let Err(e) = outcome {
                 failure.get_or_insert(e);
@@ -406,12 +406,15 @@ mod tests {
         let (start_a, span_a) = nonce_range(0, 4);
         let (start_b, span_b) = nonce_range(1, 4);
         assert_eq!(start_a, 0);
-        assert_eq!(start_a + span_a, start_b, "範囲が飛んでいるか重なっている");
-        assert_eq!(span_a, span_b, "等分になっていない");
+        assert_eq!(start_a + span_a, start_b, "the ranges skip or overlap");
+        assert_eq!(span_a, span_b, "they are not divided evenly");
 
         // 最後の 1 人まで 64 ビットに収まること。
         let (start_last, span_last) = nonce_range(3, 4);
-        assert!(start_last.checked_add(span_last).is_some(), "範囲が溢れる");
+        assert!(
+            start_last.checked_add(span_last).is_some(),
+            "the range overflows"
+        );
     }
 
     #[test]
@@ -427,7 +430,9 @@ mod tests {
         assert_eq!(pool.threads(), 4);
 
         pool.dispatch(template(1));
-        let block = pool.wait(PATIENCE).expect("当たるはずの土台で当たらない");
+        let block = pool
+            .wait(PATIENCE)
+            .expect("no hit on a template that should hit");
 
         // 配った土台の中身がそのまま返ること。
         assert_eq!(block.header.height, 500);
@@ -479,7 +484,7 @@ mod tests {
 
         assert!(
             pool.take_found().is_none(),
-            "捨てたはずの世代の当たりを受け取った"
+            "received a hit from a generation that should have been discarded"
         );
         assert!(pool.wait(Duration::from_millis(50)).is_none());
     }
@@ -490,29 +495,29 @@ mod tests {
         pool.dispatch(template(1_000_000));
         std::thread::sleep(Duration::from_millis(50));
         let before = pool.attempts();
-        assert!(before > 0, "掘り始めていない");
+        assert!(before > 0, "mining has not started");
 
         // 当たる土台に差し替える。前の仕事は捨てられ、こちらが当たる。
         pool.dispatch(template(1_000_000));
         std::thread::sleep(Duration::from_millis(50));
-        assert!(pool.attempts() > before, "差し替えたあと掘っていない");
+        assert!(pool.attempts() > before, "not mining after the swap");
     }
 
     #[test]
     fn nothing_is_tried_until_a_job_arrives() {
         let pool = MiningPool::spawn(threads(2), never_wins()).unwrap();
         std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(pool.attempts(), 0, "仕事を配る前に掘っている");
+        assert_eq!(pool.attempts(), 0, "mining before work was handed out");
     }
 
     #[test]
     fn a_pool_that_cannot_build_its_hasher_does_not_start() {
         // fast モードで 2 GB を確保できないときにここを通る。
-        let factory: HasherFactory = Arc::new(|_| Err("memory が足りない".to_string()));
+        let factory: HasherFactory = Arc::new(|_| Err("not enough memory".to_string()));
         let error = MiningPool::spawn(threads(2), factory).unwrap_err();
         assert!(
             matches!(&error, PoolError::Hasher(e) if e.contains("memory")),
-            "誤りの中身が伝わっていない: {error}"
+            "the error contents did not come through: {error}"
         );
     }
 
@@ -521,7 +526,7 @@ mod tests {
         // 半分だけ動く状態を残さない。
         let factory: HasherFactory = Arc::new(|index| {
             if index == 1 {
-                Err("2 本目だけ建たない".to_string())
+                Err("only the second one fails to build".to_string())
             } else {
                 Ok(Box::new(NeverWins) as Box<dyn PowHasher>)
             }
@@ -545,11 +550,7 @@ mod tests {
         drop(pool);
 
         // `drop` は全スレッドの終わりを待ってから返る。
-        assert_eq!(
-            gone.load(Ordering::SeqCst),
-            3,
-            "終わっていないスレッドがある"
-        );
+        assert_eq!(gone.load(Ordering::SeqCst), 3, "a thread has not finished");
     }
 
     #[test]

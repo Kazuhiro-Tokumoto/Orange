@@ -33,19 +33,19 @@ pub const MAX_PAYLOAD_LEN: usize = 40;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AddressError {
     /// bech32m として不正 (チェックサム誤り、大文字小文字の混在など)。
-    #[error("bech32m として解釈できない: {0}")]
+    #[error("cannot be parsed as bech32m: {0}")]
     Bech32(
         /// bech32 クレートが返した説明。
         String,
     ),
     /// 本チェーンのどのネットワークにも対応しない HRP。
-    #[error("既知のネットワークに対応しない HRP: {0}")]
+    #[error("an HRP matching no known network: {0}")]
     UnknownHrp(
         /// 与えられた HRP。
         String,
     ),
     /// 期待したネットワークと異なるアドレス。
-    #[error("{expected} のアドレスを期待したが {actual} のアドレスだった")]
+    #[error("expected a {expected} address but it was a {actual} address")]
     NetworkMismatch {
         /// 期待したネットワーク。
         expected: Network,
@@ -53,16 +53,16 @@ pub enum AddressError {
         actual: Network,
     },
     /// データ部が空で版数を取り出せない。
-    #[error("アドレス版数が含まれていない")]
+    #[error("no address version is present")]
     MissingVersion,
     /// 版数が 5 ビットに収まらない。
-    #[error("アドレス版数 {0} は範囲外 (0-31)")]
+    #[error("address version {0} is out of range (0-31)")]
     VersionOutOfRange(
         /// 与えられた版数。
         u8,
     ),
     /// その版数に定められた長さとペイロードが一致しない。
-    #[error("版数 {version} のペイロード長 {actual} が不正 ({expected} である必要がある)")]
+    #[error("the payload length {actual} for version {version} is invalid (must be {expected})")]
     BadPayloadLength {
         /// 対象の版数。
         version: u8,
@@ -72,13 +72,13 @@ pub enum AddressError {
         actual: usize,
     },
     /// ペイロード長が全版数共通の範囲を外れている。
-    #[error("ペイロード長 {0} が範囲外 (2-40)")]
+    #[error("payload length {0} is out of range (2-40)")]
     PayloadLengthOutOfRange(
         /// 実際に与えられた長さ。
         usize,
     ),
     /// 同じ内容に対する非正準な文字列表現。
-    #[error("正準でないアドレス表現")]
+    #[error("a non-canonical address representation")]
     NonCanonical,
 }
 
@@ -156,7 +156,8 @@ impl Address {
     /// bech32m 文字列に符号化する。
     pub fn encode(&self) -> String {
         let hrp = Hrp::parse_unchecked(self.network.hrp());
-        let version = Fe32::try_from(self.version).expect("版数は 31 以下であることが不変条件");
+        let version = Fe32::try_from(self.version)
+            .expect("it is an invariant that the version is 31 or less");
         self.payload
             .iter()
             .copied()
@@ -310,7 +311,10 @@ mod tests {
         for network in Network::ALL {
             let text = Address::from_pubkey(network, &pk).encode();
             let after_separator = &text[network.hrp().len() + 1..];
-            assert!(after_separator.starts_with('q'), "版数 0 は 'q' で始まる");
+            assert!(
+                after_separator.starts_with('q'),
+                "version 0 starts with 'q'"
+            );
         }
     }
 
@@ -379,12 +383,12 @@ mod tests {
                 let corrupted: String = bytes.into_iter().collect();
                 assert!(
                     Address::decode(&corrupted).is_err(),
-                    "{corrupted} は検出されるべき"
+                    "{corrupted} should be detected"
                 );
                 checked += 1;
             }
         }
-        assert!(checked > 1_000, "十分な数の変異を検査していない");
+        assert!(checked > 1_000, "not enough mutations are being checked");
     }
 
     #[test]
@@ -416,7 +420,10 @@ mod tests {
         let address = Address::new(Network::Mainnet, 1, vec![0xab; 32]).unwrap();
         let text = address.encode();
         let after_separator = &text["oag".len() + 1..];
-        assert!(after_separator.starts_with('p'), "版数 1 は 'p' で始まる");
+        assert!(
+            after_separator.starts_with('p'),
+            "version 1 starts with 'p'"
+        );
 
         let decoded = Address::decode(&text).unwrap();
         assert_eq!(decoded, address);

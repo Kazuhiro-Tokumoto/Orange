@@ -1,13 +1,13 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>ウォレット · Orange</title>
+<title>Wallet · Orange</title>
 <style>
 /*CSS*/
-/* ここから下はウォレットだけのもの。 */
+/* everything below is wallet-only. */
 main{max-width:720px;margin:0 auto;padding:16px}
 .warn-bar{background:#8a2a02;color:#fff;padding:10px 16px;font-size:13px;text-align:center}
 .balance{text-align:center;padding:28px 12px 20px}
@@ -47,85 +47,85 @@ footer{padding:20px 16px;color:var(--dim);font-size:12px;text-align:center;borde
 </head>
 <body>
 <header>
-  <a class="brand" href="/">Orange <span>OAG ウォレット</span></a>
+  <a class="brand" href="/">Orange <span>OAG wallet</span></a>
   <nav><span id="chain" class="note"></span></nav>
 </header>
 
 <div id="insecure" class="warn-bar hidden">
-  この頁は暗号化されていない通信で届いています。<b>鍵を扱う画面としては危険です。</b>
-  手元の機械から開いている場合を除き、使わないでください。
+  This page arrived over an unencrypted connection. <b>That is dangerous for a page that handles keys.</b>
+  Do not use it unless you are opening it from your own machine.
 </div>
 
 <main>
 
-<!-- ━━━ 錠。ウォレットが開くまで ━━━ -->
+<!-- the lock: everything until the wallet opens -->
 <section id="gate">
   <div class="tabs" role="tablist">
-    <button id="tab-open" role="tab" aria-selected="true">開く</button>
-    <button id="tab-new" role="tab" aria-selected="false">作る</button>
-    <button id="tab-restore" role="tab" aria-selected="false">語から戻す</button>
+    <button id="tab-open" role="tab" aria-selected="true">Open</button>
+    <button id="tab-new" role="tab" aria-selected="false">Create</button>
+    <button id="tab-restore" role="tab" aria-selected="false">Restore from phrase</button>
   </div>
 
   <div id="pane-open" class="card">
-    <p id="no-record" class="note hidden">この機械にはまだ記録がありません。「作る」か「語から戻す」へ。</p>
+    <p id="no-record" class="note hidden">There is no record on this machine yet. Go to Create or Restore from phrase.</p>
     <div id="have-record">
-      <label for="open-pass">パスフレーズ</label>
-      <input id="open-pass" type="password" autocomplete="current-password" placeholder="作ったときのもの">
+      <label for="open-pass">Passphrase</label>
+      <input id="open-pass" type="password" autocomplete="current-password" placeholder="the one you set when creating it">
       <div class="row" style="margin-top:12px">
-        <button id="do-open" class="primary">開く</button>
+        <button id="do-open" class="primary">Open</button>
       </div>
       <p class="note" style="margin-top:12px">
-        鍵はこの機械から出ません。解錠には数秒かかります。
+        The keys never leave this machine. Unlocking takes a few seconds.
       </p>
-      <p><button id="do-forget" class="note" style="border:0;background:none;padding:0;text-decoration:underline">この機械から記録を消す</button></p>
+      <p><button id="do-forget" class="note" style="border:0;background:none;padding:0;text-decoration:underline">Delete the record from this machine</button></p>
     </div>
   </div>
 
   <div id="pane-new" class="card hidden">
-    <label for="new-pass">パスフレーズ (8 文字以上)</label>
+    <label for="new-pass">Passphrase (8 characters or more)</label>
     <input id="new-pass" type="password" autocomplete="new-password">
-    <label for="new-pass2">もう一度</label>
+    <label for="new-pass2">Again</label>
     <input id="new-pass2" type="password" autocomplete="new-password">
-    <label for="new-words">語数</label>
-    <select id="new-words"><option value="24">24 語</option><option value="12">12 語</option></select>
-    <div class="row" style="margin-top:14px"><button id="do-new" class="primary">作る</button></div>
+    <label for="new-words">Word count</label>
+    <select id="new-words"><option value="24">24 words</option><option value="12">12 words</option></select>
+    <div class="row" style="margin-top:14px"><button id="do-new" class="primary">Create</button></div>
   </div>
 
   <div id="pane-restore" class="card hidden">
-    <label for="res-phrase">控えの語</label>
-    <textarea id="res-phrase" autocomplete="off" spellcheck="false" placeholder="空白で区切って並べる"></textarea>
-    <label for="res-pass">新しいパスフレーズ (8 文字以上)</label>
+    <label for="res-phrase">Recovery phrase</label>
+    <textarea id="res-phrase" autocomplete="off" spellcheck="false" placeholder="separated by spaces"></textarea>
+    <label for="res-pass">New passphrase (8 characters or more)</label>
     <input id="res-pass" type="password" autocomplete="new-password">
-    <div class="row" style="margin-top:14px"><button id="do-restore" class="primary">戻す</button></div>
+    <div class="row" style="margin-top:14px"><button id="do-restore" class="primary">Restore</button></div>
     <p class="note" style="margin-top:12px">
-      戻したあと、どこまで使われていたかを鎖に問い合わせて探します。
+      After restoring, the chain is queried to find how far the wallet had been used.
     </p>
   </div>
   <p id="gate-msg" class="bad"></p>
 </section>
 
-<!-- ━━━ 控えの語。作った直後に一度だけ ━━━ -->
+<!-- the recovery phrase: shown once, right after creation -->
 <section id="backup" class="hidden">
   <div class="card">
-    <h2 style="margin-top:0">控えの語</h2>
-    <p class="bad"><b>これを書き写すまで先へ進めません。</b></p>
+    <h2 style="margin-top:0">Recovery phrase</h2>
+    <p class="bad"><b>You cannot continue until you have copied this down.</b></p>
     <p id="no-storage" class="bad hidden">
-      この機械に記録を置けませんでした。閉じると開き直せません。
-      <b>この語だけが戻す手立てです。</b>
+      No record could be stored on this machine. Close this and you cannot reopen it.
+      <b>These words are the only way back.</b>
     </p>
     <p class="note">
-      この機械の記録は消えることがあります。ブラウザの掃除でも、しばらく開かなくても消えます。
-      消えたときに資金を取り戻せるのは、この語だけです。<b>画面の写真は残さないでください。</b>
+      The record on this machine can disappear — through a browser cleanup, or simply from not visiting for a while.
+      When it does, these words are the only thing that recovers the funds. <b>Do not keep a photo of this screen.</b>
     </p>
     <div id="phrase-words" class="phrase"></div>
     <div class="row" style="margin-top:16px">
-      <button id="do-download">控えを書き出す</button>
-      <button id="do-backed" class="primary">書き写した</button>
+      <button id="do-download">Download a copy</button>
+      <button id="do-backed" class="primary">I have written it down</button>
     </div>
   </div>
 </section>
 
-<!-- ━━━ 本体 ━━━ -->
+<!-- the wallet itself -->
 <section id="wallet" class="hidden">
   <div class="balance">
     <div><span id="bal" class="big">—</span><span class="unit">OAG</span></div>
@@ -133,29 +133,29 @@ footer{padding:20px 16px;color:var(--dim);font-size:12px;text-align:center;borde
   </div>
 
   <div class="tabs" role="tablist">
-    <button id="tab-recv" role="tab" aria-selected="true">受け取る</button>
-    <button id="tab-send" role="tab" aria-selected="false">送る</button>
-    <button id="tab-coins" role="tab" aria-selected="false">未使用の出力</button>
+    <button id="tab-recv" role="tab" aria-selected="true">Receive</button>
+    <button id="tab-send" role="tab" aria-selected="false">Send</button>
+    <button id="tab-coins" role="tab" aria-selected="false">Unspent outputs</button>
   </div>
 
   <div id="pane-recv" class="card">
-    <p class="note">この住所に届いたものが残高になります。</p>
+    <p class="note">Whatever arrives at this address becomes your balance.</p>
     <p id="recv-addr" class="mono"></p>
     <div class="row">
-      <button id="do-copy">写す</button>
-      <button id="do-newaddr">新しい住所</button>
+      <button id="do-copy">Copy</button>
+      <button id="do-newaddr">New address</button>
     </div>
     <p class="note" style="margin-top:14px">
-      開いている間は、この画面から署名できます。離れるときは<b>閉じて</b>ください。
+      While it is open, this page can sign. <b>Lock it</b> when you step away.
     </p>
   </div>
 
   <div id="pane-send" class="card hidden">
-    <label for="send-to">宛先</label>
+    <label for="send-to">To</label>
     <input id="send-to" autocomplete="off" spellcheck="false" placeholder="oag1…">
-    <label for="send-amount">額 (OAG)</label>
+    <label for="send-amount">Amount (OAG)</label>
     <input id="send-amount" inputmode="decimal" autocomplete="off" placeholder="0.0">
-    <div class="row" style="margin-top:14px"><button id="do-send" class="primary">送る</button></div>
+    <div class="row" style="margin-top:14px"><button id="do-send" class="primary">Send</button></div>
     <p id="send-msg" class="note"></p>
   </div>
 
@@ -163,23 +163,23 @@ footer{padding:20px 16px;color:var(--dim);font-size:12px;text-align:center;borde
     <p id="coins-head" class="note"></p>
     <div id="coins"></div>
     <div class="row" style="margin-top:14px">
-      <button id="do-sweep">まとめる</button>
-      <button id="do-refresh">読み直す</button>
+      <button id="do-sweep">Consolidate</button>
+      <button id="do-refresh">Reload</button>
     </div>
     <p id="sweep-msg" class="note"></p>
   </div>
 
   <div class="row" style="margin-top:18px">
-    <button id="do-lock">閉じる</button>
-    <button id="do-phrase">控えの語を見る</button>
+    <button id="do-lock">Lock</button>
+    <button id="do-phrase">Show the recovery phrase</button>
   </div>
 </section>
 
-<p id="boot" class="note">読み込んでいます…</p>
+<p id="boot" class="note">Loading…</p>
 </main>
 
 <footer>
-  署名はこの機械の中だけで行われます。鍵はノードにもネットワークにも渡りません。
+  Signing happens only inside this machine. The keys reach neither the node nor the network.
 </footer>
 
 <script src="/app.js"></script>

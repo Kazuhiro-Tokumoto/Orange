@@ -47,12 +47,12 @@ pub async fn accept_loop(handle: NodeHandle, listener: Listener) {
                 let handle = handle.clone();
                 tokio::spawn(async move {
                     if let Err(e) = peer::run(handle, conn).await {
-                        crate::log_warn!("ピアとのやり取りを打ち切った: {e}");
+                        crate::log_warn!("dropped the exchange with the peer: {e}");
                     }
                 });
             }
             Err(e) => {
-                crate::log_warn!("接続を受け入れられない: {e}");
+                crate::log_warn!("cannot accept the connection: {e}");
                 return;
             }
         }
@@ -65,10 +65,10 @@ pub async fn dial(handle: NodeHandle, addr: SocketAddr) {
     match Connection::connect(magic_for(network), addr).await {
         Ok(conn) => {
             if let Err(e) = peer::run(handle, conn).await {
-                crate::log_warn!("{addr} とのやり取りを打ち切った: {e}");
+                crate::log_warn!("dropped the exchange with {addr}: {e}");
             }
         }
-        Err(e) => crate::log_warn!("{addr} に繋げない: {e}"),
+        Err(e) => crate::log_warn!("cannot connect to {addr}: {e}"),
     }
 }
 
@@ -101,9 +101,9 @@ pub async fn start_rpc(
     let server =
         oag_rpc::http::Server::bind(addr, credential.header_value().to_string(), rpc_handle)
             .await
-            .map_err(|e| format!("{addr} で RPC を待ち受けられない: {e}"))?;
+            .map_err(|e| format!("cannot listen for RPC on {addr}: {e}"))?;
     let bound = server.local_addr().map_err(|e| e.to_string())?;
-    println!("RPC を {bound} で待ち受ける (合言葉: {})", path.display());
+    println!("listening for RPC on {bound} (cookie: {})", path.display());
     tokio::spawn(server.serve());
     Ok(bound)
 }

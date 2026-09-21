@@ -169,7 +169,7 @@ fn round_trips<T: Decode + Encode>(bytes: &[u8], what: &str) {
         assert_eq!(
             again,
             bytes,
-            "{what}: 復号できたのに符号化し直すと別のバイト列になる\n  元: {}\n  再: {}",
+            "{what}: decoded, but re-encoding produces different bytes\n  was: {}\n  now: {}",
             hex(bytes),
             hex(&again)
         );
@@ -259,7 +259,7 @@ fn a_declared_count_never_outruns_the_input() {
         if let Ok(decoded) = Block::decode(&bytes) {
             assert!(
                 decoded.transactions.len() * Transaction::MIN_ENCODED_LEN <= bytes.len(),
-                "入力 {} バイトに対して取引 {} 件が通った",
+                "{} transactions passed for {} bytes of input",
                 bytes.len(),
                 decoded.transactions.len()
             );

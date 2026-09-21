@@ -118,13 +118,13 @@ pub async fn maintain(handle: NodeHandle, outbound: Outbound, fixed: Vec<SocketA
                     }
                 }
                 if let Err(e) = top_up(&handle, &outbound).await {
-                    crate::log_warn!("繋ぎ先を選べない: {e}");
+                    crate::log_warn!("cannot choose a destination: {e}");
                     return;
                 }
             }
             _ = save.tick() => {
                 if let Err(e) = handle.save_addresses().await {
-                    crate::log_warn!("住所帳を書き出せない: {e}");
+                    crate::log_warn!("cannot write out the address book: {e}");
                     return;
                 }
             }
@@ -184,15 +184,15 @@ fn spawn_dial(handle: NodeHandle, outbound: Outbound, addr: SocketAddr) {
             Ok(Ok(conn)) => {
                 let _ = handle.address_outcome(addr, DialOutcome::Connected).await;
                 if let Err(e) = peer::run_as(handle.clone(), conn, Direction::Outbound).await {
-                    crate::log_warn!("{addr} とのやり取りを打ち切った: {e}");
+                    crate::log_warn!("dropped the exchange with {addr}: {e}");
                 }
             }
             Ok(Err(e)) => {
-                crate::log_warn!("{addr} に繋げない: {e}");
+                crate::log_warn!("cannot connect to {addr}: {e}");
                 let _ = handle.address_outcome(addr, DialOutcome::Failed).await;
             }
             Err(_) => {
-                crate::log_warn!("{addr} に繋がらない ({CONNECT_TIMEOUT:?} で諦めた)");
+                crate::log_warn!("no connection to {addr} (gave up after {CONNECT_TIMEOUT:?})");
                 let _ = handle.address_outcome(addr, DialOutcome::Failed).await;
             }
         }
@@ -220,7 +220,7 @@ mod tests {
         let out = Outbound::new();
         assert!(out.is_empty());
         assert!(out.insert(addr(1)));
-        assert!(!out.insert(addr(1)), "同じ住所を二重に繋ぎに行っている");
+        assert!(!out.insert(addr(1)), "dialling the same address twice");
         assert_eq!(out.len(), 1);
 
         out.remove(&addr(1));

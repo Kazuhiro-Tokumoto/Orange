@@ -49,7 +49,7 @@ pub const MAX_BLOCK_TRANSACTIONS: usize = 5_000;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompactError {
     /// 取引数が上限を超えている。
-    #[error("取引数 {actual} が上限 {max} を超えている")]
+    #[error("transaction count {actual} exceeds the limit {max}")]
     TooManyTransactions {
         /// 実際の数。
         actual: usize,
@@ -57,13 +57,13 @@ pub enum CompactError {
         max: usize,
     },
     /// 先頭に埋め込まれた取引がない。コインベースは必ず埋め込む。
-    #[error("コインベースが埋め込まれていない")]
+    #[error("the coinbase is not embedded")]
     MissingCoinbase,
     /// 埋め込まれた取引の番号が範囲外、または並びが不正。
-    #[error("埋め込み取引の番号が不正")]
+    #[error("the index of an embedded transaction is invalid")]
     BadPrefilledIndex,
     /// 埋めようとした取引の数が求めた数と合わない。
-    #[error("{expected} 件求めたが {given} 件が返された")]
+    #[error("{expected} were requested but {given} were returned")]
     WrongFillCount {
         /// 求めた数。
         expected: usize,
@@ -71,12 +71,12 @@ pub enum CompactError {
         given: usize,
     },
     /// まだ埋まっていない場所がある。
-    #[error("取引が {0} 件不足している")]
+    #[error("{0} transactions are missing")]
     Incomplete(usize),
     /// 組み立てた結果がヘッダのマークルルートと一致しない。
     ///
     /// 短縮 ID の衝突か、相手が誤ったものを返している。
-    #[error("組み立てた本体がマークルルートと一致しない")]
+    #[error("the assembled body does not match the merkle root")]
     MerkleMismatch,
 }
 
@@ -470,10 +470,10 @@ mod tests {
 
         assert!(
             small * 20 < full,
-            "圧縮が効いていない: {full} → {small} バイト"
+            "compression is not working: {full} to {small} bytes"
         );
         // 内訳はヘッダ 100 + 短縮ID 6×1000 + コインベース + わずかな枠。
-        assert!((6_000..8_000).contains(&small), "実際には {small} バイト");
+        assert!((6_000..8_000).contains(&small), "actually {small} bytes");
     }
 
     #[test]
@@ -503,7 +503,7 @@ mod tests {
         let index = ShortIdIndex::build(&compact.key(), &block.transactions[1..]);
         let partial = compact.reconstruct(|id| index.get(id)).unwrap();
 
-        assert!(partial.is_complete(), "何も足りないはずがない");
+        assert!(partial.is_complete(), "nothing should be missing");
         assert_eq!(partial.into_block().unwrap(), block);
     }
 
@@ -590,11 +590,11 @@ mod tests {
         };
 
         let partial = compact.reconstruct(lookup).unwrap();
-        assert!(partial.is_complete(), "すべての場所が埋まってはいる");
+        assert!(partial.is_complete(), "every position is filled");
         assert_eq!(
             partial.into_block(),
             Err(CompactError::MerkleMismatch),
-            "誤った取引で組み立てたブロックが通ってしまった"
+            "a block assembled from the wrong transactions was accepted"
         );
     }
 
@@ -620,7 +620,7 @@ mod tests {
         assert_ne!(a.key(), b.key());
         assert_ne!(
             a.short_ids, b.short_ids,
-            "乱数を変えても短縮 ID が変わらない"
+            "the short IDs do not change when the nonce changes"
         );
     }
 
@@ -647,7 +647,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for i in 0..10_000u64 {
             let id = short_id(&key, &hash::txid(&i.to_le_bytes()));
-            assert!(seen.insert(id), "1 万件で衝突した ({i} 件目)");
+            assert!(seen.insert(id), "collided within ten thousand (entry {i})");
         }
     }
 
@@ -710,7 +710,7 @@ mod tests {
         let a = payment(1);
         let b = payment(2);
         let index = ShortIdIndex::build(&key, [&a, &b]);
-        assert_eq!(index.len(), 2, "衝突していない前提が崩れている");
+        assert_eq!(index.len(), 2, "the no-collision premise no longer holds");
         assert!(!index.is_empty());
         assert_eq!(index.get(&short_id(&key, &a.txid())), Some(a));
     }

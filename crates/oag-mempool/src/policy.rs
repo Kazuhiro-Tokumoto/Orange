@@ -83,7 +83,7 @@ mod tests {
         assert_eq!(policy.dust_threshold.to_string(), "0.0015");
         assert!(
             !policy.allow_unknown_lock_versions,
-            "未知の版数は既定で中継しない"
+            "unknown versions are not relayed by default"
         );
     }
 

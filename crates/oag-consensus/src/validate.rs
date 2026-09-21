@@ -68,7 +68,7 @@ pub struct BlockContext<'a> {
 pub enum ValidationError {
     // ── ブロック ──
     /// ブロックが大きすぎる。
-    #[error("ブロックサイズ {actual} が上限 {max} を超えている")]
+    #[error("block size {actual} exceeds the limit {max}")]
     BlockTooLarge {
         /// 実際のサイズ。
         actual: usize,
@@ -76,7 +76,7 @@ pub enum ValidationError {
         max: usize,
     },
     /// 高さが親 + 1 でない。
-    #[error("高さが {actual} だが {expected} であるべき")]
+    #[error("height is {actual} but should be {expected}")]
     BadHeight {
         /// ヘッダの値。
         actual: u64,
@@ -84,10 +84,10 @@ pub enum ValidationError {
         expected: u64,
     },
     /// 親ブロックの指定が誤っている。
-    #[error("prev_hash が親ブロックを指していない")]
+    #[error("prev_hash does not point at the parent block")]
     BadPrevHash,
     /// タイムスタンプが Median Time Past 以下。
-    #[error("タイムスタンプ {actual} が Median Time Past {median} を超えていない")]
+    #[error("timestamp {actual} does not exceed the median time past {median}")]
     TimestampTooOld {
         /// ヘッダの値。
         actual: i64,
@@ -95,7 +95,7 @@ pub enum ValidationError {
         median: i64,
     },
     /// タイムスタンプが未来すぎる。
-    #[error("タイムスタンプ {actual} がノードの現在時刻 {now} + {drift} 秒を超えている")]
+    #[error("timestamp {actual} exceeds the node's current time {now} + {drift} seconds")]
     TimestampTooFarInFuture {
         /// ヘッダの値。
         actual: i64,
@@ -105,7 +105,7 @@ pub enum ValidationError {
         drift: i64,
     },
     /// 難易度が調整結果と一致しない。
-    #[error("難易度が {actual} だが {expected} であるべき")]
+    #[error("difficulty is {actual} but should be {expected}")]
     BadDifficulty {
         /// ヘッダの値。
         actual: u64,
@@ -113,28 +113,28 @@ pub enum ValidationError {
         expected: u64,
     },
     /// v1 では補助 PoW を使えない。
-    #[error("補助 PoW (マージマイニング) は現行の版では無効")]
+    #[error("auxiliary PoW (merged mining) is disabled in the current version")]
     AuxPowNotEnabled,
     /// PoW が難易度を満たさない。
-    #[error("PoW が難易度を満たしていない")]
+    #[error("the PoW does not meet the difficulty")]
     BadProofOfWork,
     /// マークルルートが本体と一致しない。
-    #[error("マークルルートが本体と一致しない")]
+    #[error("the merkle root does not match the body")]
     BadMerkleRoot,
     /// ブロックにトランザクションがない。
-    #[error("ブロックが空である")]
+    #[error("the block is empty")]
     EmptyBlock,
     /// 先頭がコインベースでない。
-    #[error("先頭のトランザクションがコインベースでない")]
+    #[error("the first transaction is not a coinbase")]
     MissingCoinbase,
     /// 2 件目以降にコインベースがある。
-    #[error("{index} 件目のトランザクションがコインベースである")]
+    #[error("transaction {index} is a coinbase")]
     UnexpectedCoinbase {
         /// 位置。
         index: usize,
     },
     /// コインベースに刻まれた高さが違う。
-    #[error("コインベースの高さが {actual:?} だが {expected} であるべき")]
+    #[error("the coinbase height is {actual:?} but should be {expected}")]
     BadCoinbaseHeight {
         /// 読み取れた値。
         actual: Option<u64>,
@@ -142,7 +142,7 @@ pub enum ValidationError {
         expected: u64,
     },
     /// コインベースの受け取り額が過大。
-    #[error("コインベース出力 {actual} が報酬 + 手数料 {allowed} を超えている")]
+    #[error("coinbase output {actual} exceeds the reward plus fees {allowed}")]
     CoinbaseOverpay {
         /// 実際の出力合計。
         actual: Amount,
@@ -150,24 +150,24 @@ pub enum ValidationError {
         allowed: Amount,
     },
     /// 同一ブロック内で同じ UTXO を二重に使用している。
-    #[error("ブロック内で UTXO が二重に使用されている")]
+    #[error("a UTXO is spent twice within the block")]
     DoubleSpendInBlock,
 
     // ── トランザクション ──
     /// 入力が無い。
-    #[error("トランザクション {index} に入力がない")]
+    #[error("transaction {index} has no inputs")]
     NoInputs {
         /// ブロック内の位置。
         index: usize,
     },
     /// 出力が無い。
-    #[error("トランザクション {index} に出力がない")]
+    #[error("transaction {index} has no outputs")]
     NoOutputs {
         /// ブロック内の位置。
         index: usize,
     },
     /// トランザクションが大きすぎる。
-    #[error("トランザクションサイズ {actual} が上限 {max} を超えている")]
+    #[error("transaction size {actual} exceeds the limit {max}")]
     TransactionTooLarge {
         /// 実際のサイズ。
         actual: usize,
@@ -175,13 +175,13 @@ pub enum ValidationError {
         max: usize,
     },
     /// 使用しようとした UTXO が存在しない。
-    #[error("存在しないか使用済みの UTXO を参照している")]
+    #[error("references a UTXO that does not exist or is already spent")]
     MissingUtxo,
     /// 同一トランザクション内で同じ UTXO を二重に使用している。
-    #[error("トランザクション内で UTXO が二重に使用されている")]
+    #[error("a UTXO is spent twice within the transaction")]
     DuplicateInput,
     /// コインベース出力が成熟していない。
-    #[error("コインベース出力が成熟していない (生成 {created}、現在 {current}、必要 {required} ブロック)")]
+    #[error("the coinbase output is not mature (created {created}, now {current}, {required} blocks required)")]
     ImmatureCoinbase {
         /// 生成された高さ。
         created: u64,
@@ -191,7 +191,7 @@ pub enum ValidationError {
         required: u64,
     },
     /// 出力合計が入力合計を超えている。
-    #[error("出力合計 {outputs} が入力合計 {inputs} を超えている")]
+    #[error("total outputs {outputs} exceed total inputs {inputs}")]
     OutputsExceedInputs {
         /// 入力合計。
         inputs: Amount,
@@ -199,13 +199,13 @@ pub enum ValidationError {
         outputs: Amount,
     },
     /// 金額の合計が総発行量を超えた。
-    #[error("金額の合計が総発行量を超えている")]
+    #[error("the sum of amounts exceeds the total supply")]
     AmountOverflow,
     /// 署名の長さが不正。
-    #[error("署名の長さ {0} が不正 (64 または 65 である必要がある)")]
+    #[error("signature length {0} is invalid (must be 64 or 65)")]
     BadSignatureLength(usize),
     /// 署名検証に失敗した。
-    #[error("入力 {index} の署名が無効")]
+    #[error("the signature of input {index} is invalid")]
     BadSignature {
         /// 入力番号。
         index: usize,
@@ -221,13 +221,13 @@ pub enum ValidationError {
     #[error(transparent)]
     Utxo(#[from] UtxoError),
     /// 支払い条件のペイロードが公開鍵として解釈できない。
-    #[error("入力 {index} が参照する出力の公開鍵が不正")]
+    #[error("the public key of the output referenced by input {index} is invalid")]
     BadLockPubkey {
         /// 入力番号。
         index: usize,
     },
     /// locktime の条件を満たしていない。
-    #[error("locktime {locktime} が満たされていない (高さ {height}、時刻 {time})")]
+    #[error("locktime {locktime} is not satisfied (height {height}, time {time})")]
     LocktimeNotSatisfied {
         /// トランザクションの locktime。
         locktime: u64,
@@ -615,7 +615,7 @@ fn register_outputs(overlay: &mut OverlayView<'_>, tx: &Transaction, height: u64
         // トランザクションは MAX_TX_SIZE バイト以下なので、ここに来る
         // 番号は必ず収まる。**収まらなければ切り詰めてはならない。**
         // 切り詰めると別の出力が同じ OutPoint を持ち、UTXO セットが壊れる。
-        let index = u32::try_from(index).expect("出力数は MAX_TX_SIZE が抑えている");
+        let index = u32::try_from(index).expect("MAX_TX_SIZE bounds the output count");
         overlay.add_created(
             crate::tx::OutPoint::new(txid, index),
             UtxoEntry {
@@ -825,7 +825,7 @@ mod tests {
         bad.header.height += 1;
         let pow = CountingPow::accepting();
         assert!(validate_block(&bad, &f.context(), &pow).is_err());
-        assert_eq!(pow.calls.get(), 0, "PoW を計算してしまっている");
+        assert_eq!(pow.calls.get(), 0, "the PoW was computed after all");
 
         // 正当なブロックではちょうど 1 回呼ばれる。
         let good = f.block("0.001");
@@ -989,7 +989,7 @@ mod tests {
                 validate_block(&block, &f.context(), &AcceptAnyPow),
                 Err(ValidationError::CoinbaseOverpay { .. })
             ),
-            "1 atomic の超過を見逃している"
+            "an excess of 1 atomic slipped through"
         );
     }
 
@@ -1192,7 +1192,7 @@ mod tests {
         };
         assert!(
             validate_transaction(&tx, &utxo, SPEND_HEIGHT, MTP, 1).is_ok(),
-            "未知の版数は誰でも使用できなければならない"
+            "an unknown version must be spendable by anyone"
         );
     }
 
@@ -1223,7 +1223,7 @@ mod tests {
         assert_eq!(
             validate_transaction(&empty, &utxo, SPEND_HEIGHT, MTP, 1),
             Err(ValidationError::BadSignatureLength(0)),
-            "署名なしで使えてしまった"
+            "it was spendable without a signature"
         );
 
         // 何らかの 64 バイトを付けた場合。鍵として読めない時点で断る。
@@ -1232,7 +1232,7 @@ mod tests {
         assert_eq!(
             validate_transaction(&forged, &utxo, SPEND_HEIGHT, MTP, 1),
             Err(ValidationError::BadLockPubkey { index: 0 }),
-            "0 の鍵に対して署名の検証まで進んでいる"
+            "verification proceeded to the signature for the zero key"
         );
 
         // 自分の鍵で正しく署名した場合。これも通ってはならない。
@@ -1243,7 +1243,7 @@ mod tests {
         assert_eq!(
             validate_transaction(&signed, &utxo, SPEND_HEIGHT, MTP, 1),
             Err(ValidationError::BadLockPubkey { index: 0 }),
-            "自分の鍵で署名して使えてしまった"
+            "it could be spent by signing with our own key"
         );
     }
 

@@ -17,19 +17,19 @@ use crate::message::{Message, VersionMessage, MIN_PROTOCOL_VERSION};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HandshakeError {
     /// 最初のメッセージが `version` でない。
-    #[error("ハンドシェイクの前に {0} を受け取った")]
+    #[error("received {0} before the handshake")]
     Premature(&'static str),
     /// `version` を 2 回受け取った。
-    #[error("version を重ねて受け取った")]
+    #[error("received version twice")]
     DuplicateVersion,
     /// `verack` を `version` より先に受け取った。
-    #[error("version より先に verack を受け取った")]
+    #[error("received verack before version")]
     EarlyVerack,
     /// `verack` を 2 回受け取った。
-    #[error("verack を重ねて受け取った")]
+    #[error("received verack twice")]
     DuplicateVerack,
     /// プロトコル版数が古すぎる。
-    #[error("プロトコル版数 {actual} は古すぎる (最低 {minimum})")]
+    #[error("protocol version {actual} is too old (minimum {minimum})")]
     ProtocolTooOld {
         /// 相手の版数。
         actual: u32,
@@ -37,10 +37,10 @@ pub enum HandshakeError {
         minimum: u32,
     },
     /// 自分自身に繋いでいる。
-    #[error("自分自身への接続を検出した")]
+    #[error("detected a connection to ourselves")]
     SelfConnection,
     /// すでにハンドシェイクを終えている。
-    #[error("ハンドシェイクは完了している")]
+    #[error("the handshake is complete")]
     AlreadyDone,
 }
 
@@ -154,7 +154,7 @@ mod tests {
         // 相手の version が来たら verack を返す。
         let replies = local.on_message(&Message::Version(version(2))).unwrap();
         assert_eq!(replies, vec![Message::Verack]);
-        assert!(!local.is_ready(), "相手の verack をまだ受け取っていない");
+        assert!(!local.is_ready(), "the peer's verack has not arrived yet");
         assert_eq!(local.peer_version().unwrap().nonce, 2);
 
         // 相手の verack が来て完了。
@@ -198,7 +198,7 @@ mod tests {
             assert_eq!(
                 hs.on_message(&message),
                 Err(HandshakeError::Premature(message.command())),
-                "{} が通ってしまった",
+                "{} got through",
                 message.command()
             );
         }
@@ -243,7 +243,10 @@ mod tests {
         let mut hs = Handshake::new(1);
         hs.on_message(&Message::Version(version(2))).unwrap();
         hs.on_message(&Message::Verack).unwrap();
-        assert!(hs.is_ready(), "version を受けた時点で verack を返している");
+        assert!(
+            hs.is_ready(),
+            "verack is returned as soon as version is received"
+        );
     }
 
     #[test]

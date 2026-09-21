@@ -139,10 +139,10 @@ pub enum MemoryStoreError {
     #[error(transparent)]
     Utxo(#[from] oag_consensus::utxo::UtxoError),
     /// 先端が記録されていない。
-    #[error("先端が記録されていない")]
+    #[error("the tip is not recorded")]
     NoTip,
     /// 巻き戻し情報を保持していない。
-    #[error("ブロック {0} の巻き戻し情報を保持していない")]
+    #[error("the undo information for block {0} is not held")]
     MissingUndo(Hash),
 }
 

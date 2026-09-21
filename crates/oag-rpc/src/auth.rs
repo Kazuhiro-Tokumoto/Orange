@@ -27,7 +27,7 @@ pub const COOKIE_USER: &str = "__cookie__";
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     /// ファイルを読み書きできない。
-    #[error("{path} を扱えない: {source}")]
+    #[error("cannot handle {path}: {source}")]
     Io {
         /// 対象のファイル。
         path: PathBuf,
@@ -35,7 +35,7 @@ pub enum AuthError {
         source: std::io::Error,
     },
     /// ファイルの中身が合言葉の形をしていない。
-    #[error("{0} の中身が合言葉の形をしていない")]
+    #[error("the contents of {0} are not shaped like a cookie")]
     Malformed(PathBuf),
 }
 
@@ -48,7 +48,7 @@ pub struct Credential(String);
 
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Credential(<伏せ字>)")
+        f.write_str("Credential(<redacted>)")
     }
 }
 
@@ -171,8 +171,11 @@ mod tests {
     fn the_credential_is_not_printed() {
         let credential = Credential::from_userpass("user:hunter2");
         let text = format!("{credential:?}");
-        assert!(!text.contains("hunter2"), "合言葉が漏れている: {text}");
-        assert!(!text.contains("dXNlcjpodW50ZXIy"), "符号化しても漏れている");
+        assert!(!text.contains("hunter2"), "the cookie is leaking: {text}");
+        assert!(
+            !text.contains("dXNlcjpodW50ZXIy"),
+            "it leaks even when encoded"
+        );
     }
 
     #[test]
@@ -211,14 +214,19 @@ mod tests {
         let dir = temp_dir("perm");
         let path = write_cookie(&dir, "__cookie__:secret").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "権限が緩い: {:o}", mode & 0o777);
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "the permissions are too loose: {:o}",
+            mode & 0o777
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_cookie_without_a_colon_is_refused() {
         let dir = temp_dir("bad");
-        write_cookie(&dir, "合言葉の形をしていない").unwrap();
+        write_cookie(&dir, "not shaped like a cookie").unwrap();
         assert!(matches!(read_cookie(&dir), Err(AuthError::Malformed(_))));
         std::fs::remove_dir_all(&dir).unwrap();
     }

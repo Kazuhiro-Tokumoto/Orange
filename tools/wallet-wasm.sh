@@ -1,8 +1,8 @@
 #!/bin/sh
-# ブラウザに配る wasm を組み直して、原稿の指紋を一緒に残す。
+# Rebuild the wasm served to the browser and record the source fingerprint with it.
 #
-# `crates/oag-wallet-wasm` か、そこから読んでいるクレートを変えたら
-# これを走らせて、出来たものを一緒にコミットすること。
+# Change `crates/oag-wallet-wasm`, or any crate it reads, then run this and
+# commit the result alongside.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -15,6 +15,6 @@ cp target/wasm32-unknown-unknown/release/oag_wallet_wasm.wasm \
 
 sh tools/wallet-wasm-fingerprint.sh > crates/oag-node/assets/wallet.wasm.sources
 
-echo "組み直した:"
+echo "rebuilt:"
 ls -l crates/oag-node/assets/wallet.wasm
 cat crates/oag-node/assets/wallet.wasm.sources

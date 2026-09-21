@@ -25,19 +25,19 @@ const MAX_RESPONSE: usize = crate::http::MAX_BODY;
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     /// 繋がらない、または途中で切れた。
-    #[error("RPC に繋がらない: {0}")]
+    #[error("cannot connect to RPC: {0}")]
     Io(#[from] std::io::Error),
     /// 応答が返らなかった。
-    #[error("RPC の応答が {0:?} 以内に返らなかった")]
+    #[error("the RPC response did not arrive within {0:?}")]
     Timeout(Duration),
     /// HTTP として断られた。
-    #[error("RPC に断られた: {status}")]
+    #[error("RPC refused: {status}")]
     Http {
         /// 状態行。
         status: String,
     },
     /// 応答が JSON として読めない。
-    #[error("RPC の応答を読めない: {0}")]
+    #[error("cannot read the RPC response: {0}")]
     Malformed(String),
     /// ノードが誤りを返した。
     #[error("{}: {}", .0.code, .0.message)]
@@ -65,7 +65,7 @@ impl Client {
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, ClientError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = Request::new(id, method, params);
-        let body = serde_json::to_string(&request).expect("要求は必ず JSON になる");
+        let body = serde_json::to_string(&request).expect("the request is always JSON");
 
         let text = tokio::time::timeout(TIMEOUT, self.round_trip(&body))
             .await
@@ -78,7 +78,7 @@ impl Client {
         }
         response
             .result
-            .ok_or_else(|| ClientError::Malformed("result も error も無い".to_string()))
+            .ok_or_else(|| ClientError::Malformed("neither result nor error".to_string()))
     }
 
     async fn round_trip(&self, body: &str) -> Result<String, ClientError> {
@@ -107,7 +107,9 @@ impl Client {
                 break at;
             }
             if read_more(&mut stream, &mut buffer).await? == 0 {
-                return Err(ClientError::Malformed("ヘッダの終わりが無い".to_string()));
+                return Err(ClientError::Malformed(
+                    "there is no end of headers".to_string(),
+                ));
             }
         };
 
@@ -124,17 +126,19 @@ impl Client {
             .filter_map(|line| line.split_once(':'))
             .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
             .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-            .ok_or_else(|| ClientError::Malformed("Content-Length が無い".to_string()))?;
+            .ok_or_else(|| ClientError::Malformed("there is no Content-Length".to_string()))?;
         if length > MAX_RESPONSE {
             return Err(ClientError::Malformed(format!(
-                "応答が上限 {MAX_RESPONSE} を超えた"
+                "the response exceeded the limit {MAX_RESPONSE}"
             )));
         }
 
         let body_start = header_end + 4;
         while buffer.len() < body_start + length {
             if read_more(&mut stream, &mut buffer).await? == 0 {
-                return Err(ClientError::Malformed("応答が途中で切れた".to_string()));
+                return Err(ClientError::Malformed(
+                    "the response was cut off".to_string(),
+                ));
             }
         }
         Ok(String::from_utf8_lossy(&buffer[body_start..body_start + length]).into_owned())

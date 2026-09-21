@@ -98,13 +98,13 @@ impl Reorg {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ChainError {
     /// 親ブロックを知らない。
-    #[error("親ブロック {0} を知らない")]
+    #[error("parent block {0} is unknown")]
     UnknownParent(Hash),
     /// 親ブロックが無効と判明している。
-    #[error("親ブロック {0} が無効である")]
+    #[error("parent block {0} is invalid")]
     InvalidAncestor(Hash),
     /// ブロックが大きすぎる。
-    #[error("ブロックサイズ {actual} が上限 {max} を超えている")]
+    #[error("block size {actual} exceeds the limit {max}")]
     BlockTooLarge {
         /// 実際のサイズ。
         actual: usize,
@@ -112,22 +112,22 @@ pub enum ChainError {
         max: usize,
     },
     /// ジェネシスブロックが不正。
-    #[error("ジェネシスブロックが不正: {0}")]
+    #[error("the genesis block is malformed: {0}")]
     BadGenesis(&'static str),
     /// 記憶域に入っているジェネシスが指定と食い違う。
-    #[error("記憶域のジェネシスが指定と異なる (別のチェーンのデータベース)")]
+    #[error("the genesis in storage differs from the one given (database of another chain)")]
     GenesisMismatch,
     /// 本体を保持していない。
-    #[error("ブロック {0} の本体を保持していない")]
+    #[error("the body of block {0} is not held")]
     MissingBlockBody(Hash),
     /// 記憶域の操作に失敗した。
-    #[error("記憶域の操作に失敗した: {0}")]
+    #[error("a storage operation failed: {0}")]
     Store(String),
     /// リオーグの巻き戻しに失敗した。
     ///
     /// **チェーンの状態が不整合になっている可能性がある。**
     /// 再インデックスが必要である。
-    #[error("リオーグの巻き戻しに失敗した (状態が不整合の可能性がある): {0}")]
+    #[error("rewinding the reorg failed (state may be inconsistent): {0}")]
     RollbackFailed(String),
     /// 検証に失敗した。
     #[error(transparent)]
@@ -228,7 +228,7 @@ impl<S: ChainStore> Chain<S> {
                 let floor = store
                     .index_entry(&tip_hash)
                     .map_err(Self::store_err)?
-                    .ok_or(ChainError::BadGenesis("先端がインデックスに無い"))?
+                    .ok_or(ChainError::BadGenesis("the tip is not in the index"))?
                     .cumulative_work;
                 store
                     .for_each_index_entry(&mut |entry| {
@@ -275,7 +275,7 @@ impl<S: ChainStore> Chain<S> {
             .store
             .tip()
             .map_err(Self::store_err)?
-            .ok_or(ChainError::BadGenesis("先端が無い"))?;
+            .ok_or(ChainError::BadGenesis("there is no tip"))?;
         self.entry(&hash)?.ok_or(ChainError::MissingBlockBody(hash))
     }
 
@@ -749,7 +749,7 @@ impl<S: ChainStore> Chain<S> {
                 .block(hash)
                 .map_err(|e| ChainError::RollbackFailed(e.to_string()))?
                 .ok_or(ChainError::RollbackFailed(format!(
-                    "ブロック {hash} の本体が無い"
+                    "the body of block {hash} is missing"
                 )))?;
             self.store
                 .connect_block(&block)
@@ -808,9 +808,10 @@ impl<S: ChainStore> Chain<S> {
         let hash = self
             .index
             .best_header()
-            .ok_or(ChainError::BadGenesis("インデックスが空である"))?;
-        self.entry(&hash)?
-            .ok_or(ChainError::BadGenesis("最良ヘッダがインデックスに無い"))
+            .ok_or(ChainError::BadGenesis("the index is empty"))?;
+        self.entry(&hash)?.ok_or(ChainError::BadGenesis(
+            "the best header is not in the index",
+        ))
     }
 
     /// 最良ヘッダチェーン上の、指定した高さのブロックハッシュを集める。
@@ -932,22 +933,24 @@ impl<S: ChainStore> Chain<S> {
 fn check_genesis(genesis: &Block, genesis_difficulty: u64) -> Result<(), ChainError> {
     let header = &genesis.header;
     if header.height != 0 {
-        return Err(ChainError::BadGenesis("高さが 0 でない"));
+        return Err(ChainError::BadGenesis("height is not 0"));
     }
     if header.prev_hash != Hash::ZERO {
-        return Err(ChainError::BadGenesis("prev_hash が 0 でない"));
+        return Err(ChainError::BadGenesis("prev_hash is not 0"));
     }
     if header.difficulty != genesis_difficulty {
-        return Err(ChainError::BadGenesis("難易度が指定と一致しない"));
+        return Err(ChainError::BadGenesis(
+            "difficulty does not match the one given",
+        ));
     }
     if genesis.coinbase().is_none() {
-        return Err(ChainError::BadGenesis("コインベースがない"));
+        return Err(ChainError::BadGenesis("there is no coinbase"));
     }
     if !genesis.merkle_root_is_valid() {
-        return Err(ChainError::BadGenesis("マークルルートが一致しない"));
+        return Err(ChainError::BadGenesis("the merkle root does not match"));
     }
     if genesis.size() > params::MAX_BLOCK_SIZE {
-        return Err(ChainError::BadGenesis("大きすぎる"));
+        return Err(ChainError::BadGenesis("too large"));
     }
     Ok(())
 }

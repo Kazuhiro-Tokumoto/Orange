@@ -50,10 +50,10 @@ pub struct SighashType {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SighashError {
     /// 未定義の sighash バイト。
-    #[error("未定義の sighash 種別: {0:#04x}")]
+    #[error("undefined sighash type: {0:#04x}")]
     UnknownType(u8),
     /// 入力番号が範囲外。
-    #[error("入力番号 {index} が範囲外 (入力は {count} 個)")]
+    #[error("input index {index} is out of range (there are {count} inputs)")]
     InputIndexOutOfRange {
         /// 指定された番号。
         index: usize,
@@ -61,7 +61,7 @@ pub enum SighashError {
         count: usize,
     },
     /// 使用対象の出力の個数が入力数と一致しない。
-    #[error("使用対象の出力が {given} 個だが、入力は {expected} 個ある")]
+    #[error("{given} spent outputs were given but there are {expected} inputs")]
     SpentOutputCountMismatch {
         /// 与えられた個数。
         given: usize,
@@ -69,7 +69,7 @@ pub enum SighashError {
         expected: usize,
     },
     /// `SINGLE` に対応する出力が存在しない。
-    #[error("SINGLE に対応する出力 {index} が存在しない (出力は {count} 個)")]
+    #[error("there is no output {index} for SINGLE (there are {count} outputs)")]
     SingleWithoutMatchingOutput {
         /// 入力番号。
         index: usize,
@@ -318,7 +318,7 @@ mod tests {
         assert_ne!(
             h(&tx, &spent, 0),
             original,
-            "入力金額にコミットしていない (手数料流出攻撃が成立する)"
+            "it does not commit to input amounts (the fee-drain attack works)"
         );
     }
 
@@ -358,7 +358,7 @@ mod tests {
 
         let mut tx = base.clone();
         tx.inputs[1].sequence = 7;
-        assert_ne!(h(&tx, &spent, 0), original, "他の入力の sequence");
+        assert_ne!(h(&tx, &spent, 0), original, "another input's sequence");
 
         let mut tx = base.clone();
         tx.inputs[0].prev_out.index = 5;
@@ -366,15 +366,15 @@ mod tests {
 
         let mut tx = base.clone();
         tx.outputs[0].amount = Amount::from_oag(1).unwrap();
-        assert_ne!(h(&tx, &spent, 0), original, "出力金額");
+        assert_ne!(h(&tx, &spent, 0), original, "output amount");
 
         let mut tx = base.clone();
         tx.outputs.swap(0, 1);
-        assert_ne!(h(&tx, &spent, 0), original, "出力の順序");
+        assert_ne!(h(&tx, &spent, 0), original, "output order");
 
         let mut tx = base;
         tx.outputs.pop();
-        assert_ne!(h(&tx, &spent, 0), original, "出力の個数");
+        assert_ne!(h(&tx, &spent, 0), original, "output count");
     }
 
     #[test]
@@ -408,7 +408,10 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for t in types {
             let value = sighash(&tx, &spent, 0, t).unwrap();
-            assert!(seen.insert(value), "{t:?} が他と同じ sighash を生んだ");
+            assert!(
+                seen.insert(value),
+                "{t:?} produced the same sighash as another"
+            );
         }
     }
 
@@ -466,7 +469,7 @@ mod tests {
         assert_eq!(
             sighash(&tx, &spent, 0, t).unwrap(),
             original,
-            "他の出力は無関係"
+            "the other outputs are irrelevant"
         );
 
         let mut tx = base;
