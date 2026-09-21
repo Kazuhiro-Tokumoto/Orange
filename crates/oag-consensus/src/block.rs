@@ -123,6 +123,40 @@ impl Block {
     }
 }
 
+/// ヘッダを除いた本体 (取引の列) だけを符号化する。
+///
+/// # なぜ分けるのか
+///
+/// 記憶域はヘッダを索引側にも持っている。ブロック全体をそのまま保存すると
+/// **同じ 100 バイトを 2 か所に置く**ことになる。索引は本体がまだ届いて
+/// いないブロック (headers-first) にも要るので消せない。消せるのは
+/// こちら側である (`docs/SPEC.md` §19)。
+///
+/// 配線を流れる形式は変わらない。**記憶域の中だけの話である。**
+pub fn encode_body(transactions: &[Transaction]) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_varint(transactions.len() as u128, &mut out);
+    for tx in transactions {
+        tx.encode_into(&mut out);
+    }
+    out
+}
+
+/// [`encode_body`] が書いたものを、ヘッダと合わせてブロックに戻す。
+pub fn decode_body(header: BlockHeader, bytes: &[u8]) -> Result<Block, CodecError> {
+    let mut reader = Reader::new(bytes);
+    let count = reader.read_count::<Transaction>("block.transactions")?;
+    let mut transactions = Vec::with_capacity(count);
+    for _ in 0..count {
+        transactions.push(Transaction::read_from(&mut reader)?);
+    }
+    reader.finish()?;
+    Ok(Block {
+        header,
+        transactions,
+    })
+}
+
 impl Encode for Block {
     fn encode_into(&self, out: &mut Vec<u8>) {
         self.header.encode_into(out);

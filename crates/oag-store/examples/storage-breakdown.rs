@@ -58,6 +58,13 @@ fn main() {
 
     let file = std::fs::metadata(&path).unwrap().len();
 
+    // 詰め直すとどこまで返るか。
+    let packed = {
+        let mut store = Store::open(&path).unwrap();
+        store.compact().unwrap();
+        store.file_len().unwrap()
+    };
+
     let db = Database::open(&path).unwrap();
     let txn = db.begin_read().unwrap();
 
@@ -106,6 +113,11 @@ fn main() {
         stored_total as f64 * 100.0 / file as f64
     );
     println!("per block        {} B", file / height.max(1) as u64);
+    println!(
+        "after compact    {}  ({} freed)",
+        human(packed),
+        human(file.saturating_sub(packed))
+    );
 
     drop(txn);
     drop(db);

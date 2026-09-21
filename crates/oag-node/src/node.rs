@@ -151,6 +151,8 @@ impl AssumeValidSetting {
 pub struct NodeOptions {
     /// assumevalid。
     pub assume_valid: AssumeValidSetting,
+    /// 巻き戻し情報を残す深さ。`None` なら捨てない (既定)。
+    pub undo_keep: Option<u64>,
 }
 
 impl Node {
@@ -168,7 +170,7 @@ impl Node {
         let genesis = crate::genesis::genesis_for(network);
         std::fs::create_dir_all(data_dir)
             .map_err(|e| StoreError::Io(format!("cannot create {}: {e}", data_dir.display())))?;
-        let store = Store::open(data_dir.join("chain.redb"))?;
+        let store = Store::open(data_dir.join("chain.redb"))?.with_undo_keep(options.undo_keep);
         let retarget = if network.retargets() {
             Retarget::Enabled
         } else {

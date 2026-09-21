@@ -1038,6 +1038,12 @@ No limit is placed on reorg depth. **None MUST be placed.** A network that has
 split deeper than the limit never rejoins
 (→ [settled items in §19](#settled-items)).
 
+This is about a limit **as a rule**. A node that cannot go back because it no
+longer holds the rollback data is not the same as a rule that caps the depth.
+Even then it **MUST NOT** settle into some other state: it says it cannot
+follow, so that the operator can sync again
+(→ [§19](#settled-items)).
+
 #### How two diverged nodes converge
 
 Two nodes that mined different blocks while apart hold different ledgers at the
@@ -3087,7 +3093,7 @@ entries. At this chain's 60-second interval the same approach does not hold.
 | Partially signed transaction format | include it; the same roles as PSBT (BIP174) | [§16.8](#168-partially-signed-transactions-pst) |
 | Transaction index | **not provided.** Added as an optional feature when needed | below |
 | Coinbase maturity | **stays at 120 blocks.** Unchanged | below |
-| Maximum reorg depth | **not provided** | below |
+| Maximum reorg depth | **not provided.** Pruning rollback data is an option the operator chooses | below |
 | Multi-threaded mining | **included.** The dataset is not shared; one per thread | [§11.2](#112-modes) |
 | Resident size of the block index | **not proportional to height.** Storage holds the objects; only tip candidates and a bounded cache stay resident | below |
 
@@ -3252,6 +3258,29 @@ This chain's convergence is decided by cumulative work alone
 ([§10.6](#106-choosing-the-longest-chain)). Bitcoin is the same and has no depth
 limit. Leaving the attack possible is better than creating the possibility of a
 permanent split.
+
+#### Rollback data, though, an operator may throw away
+
+Rollback data (undo) is **only ever read when the chain reorganises back over a
+block**. One record is added per block, and its size follows the UTXOs that
+block spent, so a run of full blocks runs to tens of gigabytes a year.
+
+An implementation may prune it. But:
+
+- It SHOULD NOT prune by default. The decision above stands as the default.
+- Pruning is **not a consensus rule**. The set of blocks accepted does not
+  change, and a node that prunes converges on the same chain as one that does
+  not.
+- On meeting a reorganisation deeper than what it kept, it MUST NOT quietly
+  settle into a different state. It says it cannot follow, so that the operator
+  can sync again.
+
+The worry above — that a network split deeper than the cap never rejoins —
+applies to a cap that is a consensus rule. A node that discarded storage
+**gets back to the right chain by syncing again**. It is not a permanent split.
+
+`oag-node` enables it with `--prune-undo <blocks>`; leaving the number out
+keeps 4320 (three days at one minute per block).
 
 ---
 

@@ -11,6 +11,7 @@ use oag_node::node::{self, AssumeValidSetting, Node, NodeOptions};
 use oag_node::service::{MiningMode, NodeEvent, NodeHandle, NodeService};
 use oag_node::{accept_loop, dial};
 use oag_primitives::{Address, Hash, Network, SecretKey};
+use oag_store::Store;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -142,6 +143,24 @@ enum Command {
         /// The private key (PEM) for the wallet interface. Pass with `--tls-cert`.
         #[arg(long, value_name = "path", requires = "tls_cert")]
         tls_key: Option<PathBuf>,
+        /// Throw away rollback data older than this many blocks. Off by default.
+        ///
+        /// Rollback data is only ever read when the chain reorganises back over a
+        /// block. One record is kept per block and, until you ask for this, none of
+        /// them are ever removed. Its size follows what the block spent, so a run of
+        /// full blocks costs far more than the empty ones do.
+        ///
+        /// **What you give up is depth.** Past the number you set, this node can no
+        /// longer follow a reorganisation on its own; recovering means syncing the
+        /// chain again. That is why it is off unless you ask: `docs/SPEC.md` §19
+        /// settles that there is no maximum reorg depth, and this is a local storage
+        /// choice rather than a rule about which chain is valid.
+        ///
+        /// Passing it without a number keeps 4320 blocks, three days at one minute
+        /// each.
+        #[arg(long, value_name = "blocks", num_args = 0..=1,
+              default_missing_value = "4320")]
+        prune_undo: Option<u64>,
         /// Skip checking signatures at and below this block. `0` turns it off.
         ///
         /// Most of an initial sync is spent re-checking every signature from the
@@ -179,6 +198,18 @@ enum Command {
         /// Where to write the private key.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Pack the store down and hand the free space back to the OS.
+    ///
+    /// The database keeps old pages around after every write and reuses them,
+    /// so the file grows but never shrinks on its own. This rewrites it without
+    /// them. Nothing about the chain changes — only the size of the file.
+    ///
+    /// **Stop the node first.** This needs the store to itself. How long it
+    /// takes scales with the size of the store.
+    Compact {
+        #[command(flatten)]
+        common: Common,
     },
     /// Write the active chain's blocks out to files.
     ExportBlocks {
@@ -237,6 +268,7 @@ fn run() -> Result<(), String> {
             wallet,
             tls_cert,
             tls_key,
+            prune_undo,
             assumevalid,
             exit_after,
         } => {
@@ -261,7 +293,10 @@ fn run() -> Result<(), String> {
                 ),
             };
 
-            let options = NodeOptions { assume_valid };
+            let options = NodeOptions {
+                assume_valid,
+                undo_keep: prune_undo,
+            };
             let service = NodeService::start_with(network, &common.datadir, options)
                 .map_err(|e| e.to_string())?;
             let handle = service.handle();
@@ -283,6 +318,13 @@ fn run() -> Result<(), String> {
 
                 // **黙って効かせてはならない。** 検証を一部やめているので、
                 // 起動のたびに言う。
+                if let Some(keep) = prune_undo {
+                    oag_node::log_warn!(
+                        "keeping only {keep} blocks of rollback data; a reorg deeper \
+                         than that will need a resync"
+                    );
+                }
+
                 if let Some(hash) = assume_valid.resolve(network) {
                     oag_node::log_warn!(
                         "taking signatures at and below {hash} as settled; \
@@ -396,6 +438,31 @@ fn run() -> Result<(), String> {
                 }
                 print_status(&handle).await
             })?;
+            Ok(())
+        }
+        Command::Compact { common } => {
+            let path = common.datadir.join("chain.redb");
+            let mut store = Store::open(&path).map_err(|e| e.to_string())?;
+            let before = store.file_len().map_err(|e| e.to_string())?;
+            println!(
+                "packing {} ({})",
+                path.display(),
+                oag_node::log::bytes(before as usize)
+            );
+
+            let moved = store.compact().map_err(|e| e.to_string())?;
+            let after = store.file_len().map_err(|e| e.to_string())?;
+
+            if moved {
+                println!(
+                    "done: {} -> {} ({} freed)",
+                    oag_node::log::bytes(before as usize),
+                    oag_node::log::bytes(after as usize),
+                    oag_node::log::bytes(before.saturating_sub(after) as usize)
+                );
+            } else {
+                println!("nothing to pack ({})", oag_node::log::bytes(after as usize));
+            }
             Ok(())
         }
         Command::Info { common } => {

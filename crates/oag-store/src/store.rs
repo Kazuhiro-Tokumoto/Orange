@@ -32,6 +32,42 @@ const INDEX: TableDefinition<'static, Bytes, Bytes> = TableDefinition::new("bloc
 const CHILDREN: TableDefinition<'static, Bytes, Bytes> = TableDefinition::new("block_children");
 /// 巻き戻し情報。ハッシュ → 巻き戻し情報。
 const UNDO: TableDefinition<'static, Bytes, Bytes> = TableDefinition::new("undo");
+
+/// 巻き戻し情報を剪定するときの、勧める深さ。
+///
+/// **既定では剪定しない。** これは `--prune-undo` を値なしで渡したときに
+/// 使う値である。
+///
+/// # なぜ既定で剪定しないのか
+///
+/// 剪定すると、その深さより深い再編成に手元で追従できなくなる。
+/// `docs/SPEC.md` §19 は「**最大リオーグ深度を設けない**」と決めており、
+/// 蓋を作るより攻撃の可能性を残すほうがよい、としている。
+///
+/// 剪定はコンセンサス規則ではなく記憶域の都合であり、追従できなくなっても
+/// 引き直せば正しいチェーンに戻れる。とはいえ**黙って全員の挙動を
+/// 変えるべきではない**。要る人が選ぶ。
+///
+/// # なぜ捨てられるのか
+///
+/// 巻き戻し情報は**再編成で戻るときにしか読まない**。接続のたびに 1 件
+/// 増え、これまでは一度も消していなかったので、高さに比例して伸びていた。
+///
+/// しかも大きさは「そのブロックが使った UTXO の中身」なので、**ブロックが
+/// 混むほど重くなる**。満杯のブロックが続けば 1 ブロックあたり 100 KB 近く、
+/// 年間では数十 GB に達する。読まれないものにそれを払う理由はない。
+///
+/// # なぜ 4320 なのか
+///
+/// 60 秒ブロックで **3 日分**である。`RECOMMENDED_CONFIRMATIONS` は 10
+/// (約 10 分) であり、3 日分を戻せれば足りないということはまず無い。
+/// これより深い再編成が起きるとき、それは「ネットワークが 3 日間
+/// 乗っ取られていた」ということであり、巻き戻せるかどうかより前に
+/// 考えることがある。
+///
+/// 捨てた先へは戻れない。戻ろうとしたときは
+/// [`StoreError::MissingUndo`] として**黙らずに断る**。
+pub const SUGGESTED_UNDO_KEEP: u64 = 4320;
 /// UTXO セット。出力参照 → UTXO の内容。
 const UTXO: TableDefinition<'static, Bytes, Bytes> = TableDefinition::new("utxo");
 /// アクティブチェーン。高さ → ハッシュ。
@@ -52,6 +88,24 @@ const TX_INDEX: TableDefinition<'static, Bytes, ()> = TableDefinition::new("tx_i
 const ADDR_INDEX: TableDefinition<'static, Bytes, ()> = TableDefinition::new("addr_index");
 
 const META_TIP: &str = "tip";
+
+/// 記憶域の形式の版数を入れておく鍵。
+const META_FORMAT: &str = "format";
+
+/// 記憶域の形式の版数。
+///
+/// # なぜ要るのか
+///
+/// 版 2 で `blocks` の持ち方を変えた。版 1 はブロックを丸ごと (ヘッダ +
+/// 取引) 保存していたが、ヘッダは索引側にもあるため**同じ 100 バイトを
+/// 2 か所に置いていた**。版 2 は取引の列だけを保存する。
+///
+/// 古いファイルをそのまま読むと、**先頭のヘッダ 100 バイトを取引数の
+/// varint として読む**ことになる。運が悪ければ誤りにならず、無意味な
+/// ブロックが出てくる。**黙って間違えるくらいなら開かないほうがよい。**
+///
+/// 配線を流れる形式は変わっていない。作り直せば済む。
+const STORE_FORMAT: u32 = 2;
 /// 索引がどの高さから作られているか。**この鍵が無ければ索引は無い。**
 ///
 /// 値が 0 なら索引はジェネシスから揃っている。0 でない値は「途中から
@@ -110,6 +164,17 @@ pub enum StoreError {
     /// 入出力に失敗した。
     #[error("I/O failed: {0}")]
     Io(String),
+    /// 記憶域の形式が違う。
+    #[error(
+        "the store is format {found} but this build wants {expected}; \
+         delete the data directory and sync again"
+    )]
+    WrongFormat {
+        /// 保存されていた版数。
+        found: u32,
+        /// この実装が扱える版数。
+        expected: u32,
+    },
     /// 索引を持っていない。
     #[error("no index is held (start the node with --index)")]
     NoIndex,
@@ -350,12 +415,17 @@ pub struct IndexStats {
 /// 永続化された記憶域。
 pub struct Store {
     db: Database,
+    /// 開いたファイルの位置。大きさを測るときと、詰め直すときに要る。
+    path: std::path::PathBuf,
+    /// 巻き戻し情報を何ブロック分持っておくか。`None` なら捨てない。
+    undo_keep: Option<u64>,
 }
 
 impl Store {
     /// データベースを作る、または既存のものを開く。
     pub fn open(path: impl AsRef<Path>) -> Result<Store, StoreError> {
-        let db = Database::create(path).map_err(db_err)?;
+        let path = path.as_ref().to_path_buf();
+        let db = Database::create(&path).map_err(db_err)?;
         // すべてのテーブルを作っておく。読み取り時に存在しないと誤りになるため。
         let txn = db.begin_write().map_err(db_err)?;
         txn.open_table(BLOCKS).map_err(db_err)?;
@@ -368,7 +438,12 @@ impl Store {
         txn.open_table(TX_INDEX).map_err(db_err)?;
         txn.open_table(ADDR_INDEX).map_err(db_err)?;
         txn.commit().map_err(db_err)?;
-        let store = Store { db };
+        let store = Store {
+            db,
+            path,
+            undo_keep: None,
+        };
+        store.check_format()?;
         store.rebuild_children_if_missing()?;
         Ok(store)
     }
@@ -435,14 +510,117 @@ impl Store {
         }
     }
 
+    /// 保存してある本体と、索引のヘッダから、ブロックを組み立てる。
+    ///
+    /// `blocks` が持つのは**取引の列だけ**である。ヘッダは索引側にある
+    /// (`STORE_FORMAT` 版 2)。片方でも欠けていればブロックは作れない。
+    fn block_in<B, I>(blocks: &B, index: &I, hash: &Hash) -> Result<Option<Block>, StoreError>
+    where
+        B: ReadableTable<Bytes, Bytes>,
+        I: ReadableTable<Bytes, Bytes>,
+    {
+        let key = hash.as_bytes();
+        let Some(body) = blocks.get(key.as_slice()).map_err(db_err)? else {
+            return Ok(None);
+        };
+        let entry = index
+            .get(key.as_slice())
+            .map_err(db_err)?
+            .ok_or(StoreError::MissingBlock(*hash))?;
+        let header = BlockIndexEntry::decode(entry.value())?.header;
+        Ok(Some(oag_consensus::block::decode_body(
+            header,
+            body.value(),
+        )?))
+    }
+
+    /// 巻き戻し情報を残す深さを決める。
+    ///
+    /// **既定は `None` で、捨てない** (`docs/SPEC.md` §19)。値を渡すと
+    /// その深さより古いものを落とす。**落とした先へは追従できなくなる**
+    /// ので、追従する気のない深さまでに留めること。
+    ///
+    /// 勧める値は [`SUGGESTED_UNDO_KEEP`]。
+    pub fn with_undo_keep(mut self, blocks: Option<u64>) -> Store {
+        self.undo_keep = blocks;
+        self
+    }
+
+    /// 形式の版数を確かめ、空の記憶域には書き込む。
+    ///
+    /// **古い形式は開かない。** 読めてしまうほうが危ないためである。
+    fn check_format(&self) -> Result<(), StoreError> {
+        let txn = self.db.begin_write().map_err(db_err)?;
+        {
+            let mut meta = txn.open_table(META).map_err(db_err)?;
+            let found = meta.get(META_FORMAT).map_err(db_err)?.map(|g| {
+                let raw = g.value();
+                let mut buf = [0u8; 4];
+                let n = raw.len().min(4);
+                buf[..n].copy_from_slice(&raw[..n]);
+                u32::from_le_bytes(buf)
+            });
+            let has_tip = meta.get(META_TIP).map_err(db_err)?.is_some();
+
+            match found {
+                Some(STORE_FORMAT) => {}
+                Some(other) => {
+                    return Err(StoreError::WrongFormat {
+                        found: other,
+                        expected: STORE_FORMAT,
+                    })
+                }
+                // 版数が無く中身もない = 新品。印を付ける。
+                None if !has_tip => {
+                    meta.insert(META_FORMAT, STORE_FORMAT.to_le_bytes().as_slice())
+                        .map_err(db_err)?;
+                }
+                // 版数が無いのに中身がある = 版 1。読んではならない。
+                None => {
+                    return Err(StoreError::WrongFormat {
+                        found: 1,
+                        expected: STORE_FORMAT,
+                    })
+                }
+            }
+        }
+        txn.commit().map_err(db_err)
+    }
+
+    /// 記憶域を詰め直して、空きページを OS に返す。
+    ///
+    /// # なぜ要るのか
+    ///
+    /// redb は書き換えのたびに古いページを残す (MVCC)。それらは再利用
+    /// されるが、**ファイルは縮まない**。実測では実データ 1.13 MB に対し
+    /// ファイルが 2.28 MB あり、**半分が実データではなかった**。
+    ///
+    /// # 止めてから行うこと
+    ///
+    /// 排他で開く必要があるため、ノードを動かしたままでは呼べない。
+    /// 時間は記憶域の大きさに比例する。
+    ///
+    /// 戻り値は**実際に詰め直したか**である。詰めるものが無ければ `false`
+    /// を返すが、それは失敗ではない。
+    pub fn compact(&mut self) -> Result<bool, StoreError> {
+        self.db
+            .compact()
+            .map_err(|e| StoreError::Db(format!("compaction failed: {e}")))
+    }
+
+    /// ファイルの大きさ (バイト)。
+    pub fn file_len(&self) -> Result<u64, StoreError> {
+        std::fs::metadata(&self.path)
+            .map(|m| m.len())
+            .map_err(|e| StoreError::Io(format!("cannot stat {}: {e}", self.path.display())))
+    }
+
     /// ブロック本体を読む。
     pub fn block(&self, hash: &Hash) -> Result<Option<Block>, StoreError> {
         let txn = self.db.begin_read().map_err(db_err)?;
-        let table = txn.open_table(BLOCKS).map_err(db_err)?;
-        match table.get(hash.as_bytes().as_slice()).map_err(db_err)? {
-            Some(guard) => Ok(Some(Block::decode(guard.value())?)),
-            None => Ok(None),
-        }
+        let blocks = txn.open_table(BLOCKS).map_err(db_err)?;
+        let index = txn.open_table(INDEX).map_err(db_err)?;
+        Store::block_in(&blocks, &index, hash)
     }
 
     /// インデックスの 1 件を読む。
@@ -539,14 +717,12 @@ impl Store {
                 continue;
             };
             let raw = body.value();
-            let size = raw.len();
-            // ヘッダの直後に取引数の varint が 1 個。そこまでで読むのをやめる。
-            let rest = raw.get(BLOCK_HEADER_LEN..).ok_or_else(|| {
-                StoreError::Db(format!(
-                    "the record for block {hash} is shorter than a header"
-                ))
-            })?;
-            let transactions = Reader::new(rest).read_count::<Transaction>("block.transactions")?;
+            // 保存してあるのは取引の列だけなので、**表に出す大きさには
+            // ヘッダの分を足す**。利用者が見たいのは配線を流れる大きさで
+            // あって、こちらの都合の大きさではない。
+            let size = raw.len() + BLOCK_HEADER_LEN;
+            // 先頭に取引数の varint が 1 個。そこまでで読むのをやめる。
+            let transactions = Reader::new(raw).read_count::<Transaction>("block.transactions")?;
 
             out.push(BlockSummary {
                 height: height.value(),
@@ -622,8 +798,12 @@ impl Store {
         {
             let key = entry.hash.to_bytes();
             let mut blocks = txn.open_table(BLOCKS).map_err(db_err)?;
+            // **ヘッダは書かない。** すぐ下の索引が同じものを持つ。
             blocks
-                .insert(key.as_slice(), block.encode().as_slice())
+                .insert(
+                    key.as_slice(),
+                    oag_consensus::block::encode_body(&block.transactions).as_slice(),
+                )
                 .map_err(db_err)?;
             let mut index = txn.open_table(INDEX).map_err(db_err)?;
             index
@@ -683,6 +863,17 @@ impl Store {
 
             let mut active = txn.open_table(ACTIVE).map_err(db_err)?;
             active.insert(height, key.as_slice()).map_err(db_err)?;
+
+            // 古くなった巻き戻し情報を落とす。**同じトランザクションの中で
+            // 行う。** 別に分けると、落とした後に接続が巻き戻って
+            // 「戻れるはずの高さの情報が無い」状態が残りうる。
+            if let Some(stale) = self.undo_keep.and_then(|keep| height.checked_sub(keep)) {
+                if let Some(guard) = active.get(stale).map_err(db_err)? {
+                    let old_key = guard.value().to_vec();
+                    drop(guard);
+                    undo_table.remove(old_key.as_slice()).map_err(db_err)?;
+                }
+            }
 
             let mut meta = txn.open_table(META).map_err(db_err)?;
             meta.insert(META_TIP, key.as_slice()).map_err(db_err)?;
@@ -751,11 +942,8 @@ impl Store {
         if indexed {
             let block = {
                 let blocks = txn.open_table(BLOCKS).map_err(db_err)?;
-                let guard = blocks
-                    .get(tip.to_bytes().as_slice())
-                    .map_err(db_err)?
-                    .ok_or(StoreError::MissingBlock(tip))?;
-                Block::decode(guard.value())?
+                let index = txn.open_table(INDEX).map_err(db_err)?;
+                Store::block_in(&blocks, &index, &tip)?.ok_or(StoreError::MissingBlock(tip))?
             };
             erase_index(&txn, &block, &undo, entry.height())?;
         }
@@ -824,12 +1012,10 @@ impl Store {
             for (height, hash) in &chain {
                 let (block, undo) = {
                     let blocks = txn.open_table(BLOCKS).map_err(db_err)?;
+                    let index = txn.open_table(INDEX).map_err(db_err)?;
                     let undo_table = txn.open_table(UNDO).map_err(db_err)?;
-                    let block = blocks
-                        .get(hash.as_bytes().as_slice())
-                        .map_err(db_err)?
+                    let block = Store::block_in(&blocks, &index, hash)?
                         .ok_or(StoreError::MissingBlock(*hash))?;
-                    let block = Block::decode(block.value())?;
                     let undo = undo_table
                         .get(hash.as_bytes().as_slice())
                         .map_err(db_err)?
@@ -1073,19 +1259,21 @@ impl Store {
         let txn = self.db.begin_read().map_err(db_err)?;
         let active = txn.open_table(ACTIVE).map_err(db_err)?;
         let blocks = txn.open_table(BLOCKS).map_err(db_err)?;
+        let index = txn.open_table(INDEX).map_err(db_err)?;
 
         let mut count = 0;
         for row in active.iter().map_err(db_err)? {
             let (height, hash_bytes) = row.map_err(db_err)?;
             let hash = Hash::from_slice(hash_bytes.value()).map_err(|_| StoreError::NoTip)?;
-            let body = blocks
-                .get(hash_bytes.value())
-                .map_err(db_err)?
-                .ok_or(StoreError::MissingBlock(hash))?;
+            // **書き出すのは配線を流れる形式である。** 記憶域がヘッダを
+            // 別に持っているのはこちらの都合であり、外に出すものを
+            // それに合わせてはならない。
+            let block =
+                Store::block_in(&blocks, &index, &hash)?.ok_or(StoreError::MissingBlock(hash))?;
 
             let sub = dir.join(height.value().to_string());
             std::fs::create_dir_all(&sub).map_err(|e| StoreError::Io(e.to_string()))?;
-            std::fs::write(sub.join(format!("{hash}.dat")), body.value())
+            std::fs::write(sub.join(format!("{hash}.dat")), block.encode())
                 .map_err(|e| StoreError::Io(e.to_string()))?;
             count += 1;
         }
@@ -1174,10 +1362,10 @@ mod tests {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// テストごとに独立した一時ディレクトリ。
-    struct TempDb(std::path::PathBuf);
+    pub(super) struct TempDb(std::path::PathBuf);
 
     impl TempDb {
-        fn new() -> TempDb {
+        pub(super) fn new() -> TempDb {
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1189,7 +1377,7 @@ mod tests {
             TempDb(dir)
         }
 
-        fn db_path(&self) -> std::path::PathBuf {
+        pub(super) fn db_path(&self) -> std::path::PathBuf {
             self.0.join("chain.redb")
         }
 
@@ -1245,7 +1433,7 @@ mod tests {
     }
 
     /// 高さ 0 から `count` 個のブロックを繋いだ状態にする。
-    fn build(store: &Store, count: u64) -> Vec<Block> {
+    pub(super) fn build(store: &Store, count: u64) -> Vec<Block> {
         let mut blocks = Vec::new();
         let mut prev = Hash::ZERO;
         for height in 0..count {
@@ -1941,5 +2129,218 @@ mod tests {
 
         let stranger = Lock::pay_to_pubkey(&SecretKey::generate().public_key());
         assert!(store.address_history(&stranger, 0, 100).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod storage_shape_tests {
+    use super::tests::{build, TempDb};
+    use super::*;
+
+    // ━━━━━━━━ 巻き戻し情報の剪定 ━━━━━━━━
+
+    #[test]
+    fn old_undo_is_dropped_and_recent_undo_is_kept() {
+        let tmp = TempDb::new();
+        let store = Store::open(tmp.db_path()).unwrap().with_undo_keep(Some(5));
+        let blocks = build(&store, 12);
+
+        // 先端から 5 個分は残っている。
+        for block in blocks.iter().rev().take(5) {
+            let hash = block.header.hash();
+            assert!(
+                store.undo(&hash).is_ok(),
+                "the undo for height {} was dropped too early",
+                block.header.height
+            );
+        }
+
+        // それより古いものは消えている。
+        for block in blocks.iter().take(6) {
+            let hash = block.header.hash();
+            assert!(
+                matches!(store.undo(&hash), Err(StoreError::MissingUndo(_))),
+                "the undo for height {} is still held",
+                block.header.height
+            );
+        }
+    }
+
+    #[test]
+    fn by_default_nothing_is_dropped() {
+        // **既定の挙動を変えないこと。** SPEC §19 は最大リオーグ深度を
+        // 設けないと決めている。剪定は選んだ人だけのものである。
+        let tmp = TempDb::new();
+        let store = Store::open(tmp.db_path()).unwrap();
+        let blocks = build(&store, 12);
+
+        for block in &blocks {
+            assert!(
+                store.undo(&block.header.hash()).is_ok(),
+                "the undo for height {} was dropped without being asked",
+                block.header.height
+            );
+        }
+    }
+
+    #[test]
+    fn dropping_undo_does_not_disturb_shallow_rollback() {
+        // 残している深さの中でなら、剪定を入れても従来どおり戻れる。
+        let tmp = TempDb::new();
+        let store = Store::open(tmp.db_path()).unwrap().with_undo_keep(Some(5));
+        let blocks = build(&store, 12);
+        let before = store.utxo_count().unwrap();
+
+        for _ in 0..3 {
+            store.disconnect_tip().unwrap();
+        }
+        assert_eq!(store.height().unwrap(), Some(8));
+
+        // 戻した分を繋ぎ直すと元に戻る。
+        for block in blocks.iter().skip(9) {
+            store.connect_block(block).unwrap();
+        }
+        assert_eq!(store.height().unwrap(), Some(11));
+        assert_eq!(store.utxo_count().unwrap(), before);
+    }
+
+    #[test]
+    fn rolling_back_past_what_is_kept_is_refused_not_guessed() {
+        // **黙って間違った状態を作らないこと。** 戻せないなら断る。
+        let tmp = TempDb::new();
+        let store = Store::open(tmp.db_path()).unwrap().with_undo_keep(Some(3));
+        build(&store, 10);
+
+        let mut failed = false;
+        for _ in 0..10 {
+            match store.disconnect_tip() {
+                Ok(_) => {}
+                Err(StoreError::MissingUndo(_)) => {
+                    failed = true;
+                    break;
+                }
+                Err(e) => panic!("an unexpected error: {e}"),
+            }
+        }
+        assert!(failed, "it rolled back further than the undo it kept");
+    }
+
+    // ━━━━━━━━ ブロックの持ち方 ━━━━━━━━
+
+    #[test]
+    fn the_stored_body_does_not_carry_the_header() {
+        let tmp = TempDb::new();
+        let store = Store::open(tmp.db_path()).unwrap();
+        let blocks = build(&store, 3);
+        let block = &blocks[2];
+        let hash = block.header.hash();
+
+        let stored = {
+            let txn = store.db.begin_read().unwrap();
+            let table = txn.open_table(BLOCKS).unwrap();
+            table
+                .get(hash.as_bytes().as_slice())
+                .unwrap()
+                .unwrap()
+                .value()
+                .to_vec()
+        };
+
+        assert_eq!(
+            stored.len(),
+            block.encode().len() - BLOCK_HEADER_LEN,
+            "the stored record is not exactly the block minus its header"
+        );
+        assert!(
+            !block.encode().starts_with(&stored),
+            "the stored record still begins where the whole block begins"
+        );
+    }
+
+    #[test]
+    fn a_block_read_back_is_the_block_that_went_in() {
+        // ヘッダを別に置いても、出てくるものは同じでなければならない。
+        let tmp = TempDb::new();
+        let store = Store::open(tmp.db_path()).unwrap();
+        let blocks = build(&store, 5);
+
+        for block in &blocks {
+            let hash = block.header.hash();
+            assert_eq!(
+                store.block(&hash).unwrap().as_ref(),
+                Some(block),
+                "height {} came back different",
+                block.header.height
+            );
+        }
+    }
+
+    #[test]
+    fn the_summary_reports_the_size_that_goes_over_the_wire() {
+        // 記憶域がヘッダを別に持っているのはこちらの都合であり、
+        // 表に出す大きさはそれに影響されてはならない。
+        let tmp = TempDb::new();
+        let store = Store::open(tmp.db_path()).unwrap();
+        let blocks = build(&store, 4);
+
+        let summaries = store.recent_summaries(4).unwrap();
+        assert_eq!(summaries.len(), 4);
+        for summary in &summaries {
+            let block = blocks
+                .iter()
+                .find(|b| b.header.hash() == summary.hash)
+                .expect("the summary names a block that was put in");
+            assert_eq!(
+                summary.size,
+                block.encode().len(),
+                "the size does not match"
+            );
+            assert_eq!(summary.transactions, block.transactions.len());
+        }
+    }
+
+    // ━━━━━━━━ 形式の版数 ━━━━━━━━
+
+    #[test]
+    fn a_store_from_the_old_format_is_refused_not_misread() {
+        // 版 1 は blocks にブロックを丸ごと入れていた。そのまま読むと
+        // ヘッダの先頭 100 バイトを取引数として読むことになる。
+        let tmp = TempDb::new();
+        let path = tmp.db_path();
+        {
+            let store = Store::open(&path).unwrap();
+            build(&store, 3);
+        }
+
+        // 版数の印だけを消して、版 1 の見た目にする。
+        {
+            let db = Database::open(&path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut meta = txn.open_table(META).unwrap();
+                meta.remove(META_FORMAT).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        match Store::open(&path) {
+            Err(StoreError::WrongFormat { found, expected }) => {
+                assert_eq!(found, 1);
+                assert_eq!(expected, STORE_FORMAT);
+            }
+            Ok(_) => panic!("a store in the old format was opened"),
+            Err(e) => panic!("an unexpected error: {e}"),
+        }
+    }
+
+    #[test]
+    fn a_fresh_store_records_the_format_and_reopens() {
+        let tmp = TempDb::new();
+        let path = tmp.db_path();
+        {
+            let store = Store::open(&path).unwrap();
+            build(&store, 2);
+        }
+        Store::open(&path).expect("a store this build wrote can be reopened");
     }
 }
