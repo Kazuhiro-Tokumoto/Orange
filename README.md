@@ -28,15 +28,17 @@ Based on [chroma](https://github.com/kusogakiller/chroma).
 
 ## A note on language
 
-The README, [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md)
-and the specification ([`docs/SPEC.en.md`](docs/SPEC.en.md)) are in English.
-**The node's log output, the CLI messages, the block explorer and the browser
-wallet are still in Japanese.** Command names, flags and RPC methods are in
-English, so the commands below work as written.
+Everything you see while using this is in English: the node's log output, the
+CLI help and error messages, the block explorer, the browser wallet, this
+README, [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md) and
+the specification ([`docs/SPEC.en.md`](docs/SPEC.en.md)).
 
-If you hit Japanese text you cannot read, open an Issue in English and it will
-be answered. Localisation is not implemented; it would be a welcome
-contribution.
+Two things are still Japanese. The normative specification is
+[`docs/SPEC.md`](docs/SPEC.md), and the English one is a translation of it. And
+the comments in the source are written in Japanese — roughly 5,700 lines of
+them. Reading the code means meeting those.
+
+Issues and pull requests are read in either language.
 
 ## Design goals
 
@@ -229,28 +231,25 @@ Each line is tagged with what it is about. **"Carried it here" and "checked it
 myself" are different claims**, so when things stall you can tell which one
 stalled.
 
-**The node currently logs in Japanese.** The tags are listed below with their
-meanings; an English locale is not implemented yet.
-
 ```text
-[ピア] 127.0.0.1:19444 と繋がった (/oag-node:0.1.0/、高さ 303)
-[同期] ヘッダ +303 (303 件中)  高さ 303 まで判明
-[同期] 本体 169/303 (56%)  26.4 blk/s  残り 134
-[同期] 追いついた  高さ 287
-[検証] 高さ 288 を接続  取引 1  203 B  mempool 0 件
-[検証] リオーグ  -3 +4  高さ 4
-[取引] 告知 1 件  うち 1 件を要求
-[取引] 受信 9aa5bac0  手数料 5 OAG  151 B  mempool 1 件
+[peer] connected to 127.0.0.1:19444 (/oag-node:0.1.0/, height 303)
+[sync] headers +303 (303 total)  chain known to height 303
+[sync] bodies 169/303 (56%)  26.4 blk/s  134 left
+[sync] caught up  height 287
+[check] connected height 288  1 tx  203 B  mempool 0
+[check] reorg  -3 +4  height 4
+[tx] 1 announced  requested 1
+[tx] received 9aa5bac0  fee 5 OAG  151 B  mempool 1
 ```
 
-| Tag | Reads as | What it is about |
-| --- | --- | --- |
-| `[ピア]` | peer | connections coming and going, seed results |
-| `[同期]` | sync | what is being carried from a peer. **It says nothing about whether the contents are valid** |
-| `[検証]` | check | what the node verified for itself |
-| `[取引]` | tx | mempool traffic |
-| `[採掘]` | mining | blocks found, how mining is configured |
-| `[警告]` | warning | trouble. **This tag alone goes to stderr** |
+| Tag | What it is about |
+| --- | --- |
+| `[peer]` | connections coming and going, seed results |
+| `[sync]` | what is being carried from a peer. **It says nothing about whether the contents are valid** |
+| `[check]` | what the node verified for itself |
+| `[tx]` | mempool traffic |
+| `[mining]` | blocks found, how mining is configured |
+| `[warn]` | trouble. **This tag alone goes to stderr** |
 
 During initial sync, lines are batched every 2 seconds; once caught up, one
 line per block. **If the node is behind and no block body arrives for 30

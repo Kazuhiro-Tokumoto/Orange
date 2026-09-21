@@ -36,5 +36,5 @@ body:
     id: log
     attributes:
       label: "Log / ログ"
-      description: "Whatever you can paste. Lines tagged `[同期]` `[検証]` `[警告]` help most. 貼れる範囲で。"
+      description: "Whatever you can paste. Lines tagged `[sync]` `[check]` `[warn]` help most. 貼れる範囲で。"
       render: text
