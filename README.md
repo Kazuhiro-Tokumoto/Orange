@@ -28,11 +28,11 @@ Based on [chroma](https://github.com/kusogakiller/chroma).
 
 ## A note on language
 
-This README is the only part of the project that is in English so far.
+The README, [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md)
+and the specification ([`docs/SPEC.en.md`](docs/SPEC.en.md)) are in English.
 **The node's log output, the CLI messages, the block explorer and the browser
-wallet are all in Japanese**, and so is [`docs/SPEC.md`](docs/SPEC.md). Command
-names, flags and RPC methods are in English, so the commands below work as
-written.
+wallet are still in Japanese.** Command names, flags and RPC methods are in
+English, so the commands below work as written.
 
 If you hit Japanese text you cannot read, open an Issue in English and it will
 be answered. Localisation is not implemented; it would be a welcome
@@ -51,7 +51,12 @@ Explicit non-goals: privacy, smart contracts, high throughput.
 **[`docs/SPEC.md`](docs/SPEC.md) is normative.** It records every parameter,
 every consensus rule, and the reasoning behind each design decision. Where the
 implementation disagrees with the spec, the spec wins and the implementation is
-corrected. (The spec is currently written in Japanese.)
+corrected.
+
+An English translation is at [`docs/SPEC.en.md`](docs/SPEC.en.md). Section
+numbering is identical, so "§10.2" points to the same rule in both. **The
+Japanese remains normative** — if the two disagree, that is a bug in the
+translation, and reporting it is welcome.
 
 ## Progress
 

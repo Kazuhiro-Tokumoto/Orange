@@ -12,8 +12,9 @@ we cannot see from here.
 Email is fine too: `manh@manh2309.org`
 
 **Write in English or Japanese — either is read.** The project's own documents
-are mostly Japanese (see [the note on language](README.md#a-note-on-language)),
-but you do not have to write in it.
+include Japanese-only parts (see
+[the note on language](README.md#a-note-on-language)), but you do not have to
+write in it.
 
 ## Connecting
 
@@ -70,7 +71,9 @@ change. Forgetting breaks CI (it has happened).
 ## The specification is normative
 
 If [`docs/SPEC.md`](docs/SPEC.md) and the code disagree, **the bug is in the
-code, not in the spec.** (The spec is written in Japanese.)
+code, not in the spec.** The spec is written in Japanese and that version is
+normative; an English translation is at
+[`docs/SPEC.en.md`](docs/SPEC.en.md), with identical section numbering.
 
 Conversely, if you find a place where the implementation decides something the
 spec does not mention, that is a hole in the spec. **Tell us about those too.**

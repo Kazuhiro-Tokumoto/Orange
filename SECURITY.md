@@ -31,7 +31,7 @@ That said, I have plenty of free time, so I do generally reply.
 ## What is most worth sending anyway
 
 - Conditions under which consensus splits (input that slips past any of
-  `docs/SPEC.md` §10.2 / §10.3)
+  `docs/SPEC.en.md` §10.2 / §10.3)
 - Places where signing or key derivation gives a different answer than another
   implementation
 - Any path that recovers a key from a wallet record without the passphrase
