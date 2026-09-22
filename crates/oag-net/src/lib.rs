@@ -39,5 +39,8 @@ pub use frame::FrameError;
 pub use handshake::{Handshake, HandshakeError};
 pub use locator::{build_locator, find_fork_height};
 pub use magic::magic_for;
-pub use message::{InvItem, InvKind, Message, MessageError, NetAddress, VersionMessage};
+pub use message::{
+    effective_services, InvItem, InvKind, Message, MessageError, NetAddress, VersionMessage,
+    SERVICE_FULL_NODE, SERVICE_LIMITED, SERVICE_NONE,
+};
 pub use sync::BlockDownload;

@@ -9,9 +9,22 @@ use oag_primitives::Hash;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// 現在のプロトコル版数。
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// 版数 2 で [`VersionMessage::services`] の送出を始めた。版数 1 を話す
+/// ノードはこの欄を埋めていない ([`effective_services`])。
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// この版数から [`VersionMessage::services`] が意味を持つ。
+///
+/// 版数 1 のノードは `services` を常に 0 のまま送っていた。0 を額面通り
+/// 「何も提供しない」と読むと、稼働中のフルノードが軒並み軽量ノード扱いに
+/// なる。版数で区切ることで、「未記入の 0」と「申告された 0」を区別する。
+pub const SERVICES_PROTOCOL_VERSION: u32 = 2;
 
 /// 受け入れる最小のプロトコル版数。
+///
+/// **版数 1 のノードとは繋ぎ続ける。** 名乗りを変えただけで、やり取りの
+/// 書式は何も変わっていない。
 pub const MIN_PROTOCOL_VERSION: u32 = 1;
 
 /// `inv` / `getdata` / `notfound` に載せられる項目数の上限。
@@ -32,10 +45,57 @@ pub const MAX_LOCATOR: usize = 64;
 /// ユーザエージェント文字列の最大バイト数。
 pub const MAX_USER_AGENT: usize = 64;
 
-/// 提供する機能を表すビット。現在は定義していない。
+/// 何も提供しない。ヘッダしか持たないノードがこれを名乗る。
+///
+/// **版数 1 からの 0 と取り違えないこと。** 判定には
+/// [`effective_services`] を通す。
 pub const SERVICE_NONE: u64 = 0;
-/// フルノードであること (ブロックを提供できる)。
+
+/// フルノードであること (**創世からすべての**ブロックを提供できる)。
+///
+/// 一部でも配れないノードがこれを名乗ってはならない (MUST NOT, SPEC §14.5)。
 pub const SERVICE_FULL_NODE: u64 = 1;
+
+/// 直近のブロックだけを提供できること (剪定ノード)。
+///
+/// 古いブロックを求められたら `notfound` を返す。どこまで遡れるかは
+/// 名乗りに含まれない。
+pub const SERVICE_LIMITED: u64 = 1 << 1;
+
+// 名乗りを変えただけで、やり取りの書式は変わっていない。版数 1 を締め出す
+// 理由がない。**この関係が崩れると、稼働中のノードが同期先を失う。**
+const _: () = assert!(MIN_PROTOCOL_VERSION < SERVICES_PROTOCOL_VERSION);
+const _: () = assert!(PROTOCOL_VERSION >= SERVICES_PROTOCOL_VERSION);
+
+/// 相手の申告を、版数を踏まえて解釈する。
+///
+/// 版数 1 のノードは `services` を送出しなかった。**この版数を話す実装は
+/// フルノードしか存在しなかった**ため、フルノードとして扱う。推測ではなく、
+/// 版数 1 で軽量ノードや剪定ノードが公開されたことがないという事実による。
+///
+/// ```
+/// use oag_net::message::{effective_services, SERVICE_FULL_NODE, SERVICE_NONE};
+///
+/// // 版数 1 は未記入。フルノードと見なす。
+/// assert_eq!(effective_services(1, 0), SERVICE_FULL_NODE);
+/// // 版数 2 以降は額面通り。
+/// assert_eq!(effective_services(2, SERVICE_NONE), SERVICE_NONE);
+/// ```
+///
+/// # 申告であって保証ではない
+///
+/// 相手は嘘をつける。配れないのに [`SERVICE_FULL_NODE`] を名乗ることは
+/// 妨げられない。**繋ぎ先を選ぶための手がかり**であって、信用の根拠では
+/// ない。応じない相手は `notfound` と時間切れで他へ回す
+/// ([`crate::sync`])。
+#[must_use]
+pub const fn effective_services(protocol_version: u32, services: u64) -> u64 {
+    if protocol_version < SERVICES_PROTOCOL_VERSION {
+        SERVICE_FULL_NODE
+    } else {
+        services
+    }
+}
 
 /// メッセージの誤り。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -635,4 +695,55 @@ fn read_nonce(payload: &[u8]) -> Result<u64, MessageError> {
     let nonce = reader.read_u64()?;
     reader.finish()?;
     Ok(nonce)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_one_never_filled_the_services_field() {
+        // 版数 1 を話す実装はフルノードしか存在しなかった。推測ではなく、
+        // 軽量ノードも剪定ノードもその版数で公開されたことがないという事実。
+        assert_eq!(effective_services(1, 0), SERVICE_FULL_NODE);
+        // 版数 1 が何を送ってきても、読まない。
+        assert_eq!(effective_services(1, SERVICE_LIMITED), SERVICE_FULL_NODE);
+    }
+
+    #[test]
+    fn from_version_two_the_field_is_taken_at_face_value() {
+        assert_eq!(effective_services(2, SERVICE_NONE), SERVICE_NONE);
+        assert_eq!(effective_services(2, SERVICE_FULL_NODE), SERVICE_FULL_NODE);
+        assert_eq!(effective_services(2, SERVICE_LIMITED), SERVICE_LIMITED);
+        // 未知のビットは落とさずに通す。読む側が自分の知るビットだけ見る。
+        assert_eq!(effective_services(3, 1 << 20), 1 << 20);
+    }
+
+    #[test]
+    fn a_zero_means_two_different_things() {
+        // ここが今回の設計の要。同じ 0 が版数で別の意味になる。
+        assert_ne!(effective_services(1, 0), effective_services(2, 0));
+    }
+
+    #[test]
+    fn the_service_bits_do_not_overlap() {
+        assert_eq!(SERVICE_FULL_NODE & SERVICE_LIMITED, 0);
+        assert_eq!(SERVICE_NONE, 0);
+    }
+
+    #[test]
+    fn a_version_message_round_trips() {
+        let v = VersionMessage {
+            protocol_version: PROTOCOL_VERSION,
+            services: SERVICE_FULL_NODE,
+            timestamp: 1_700_000_000,
+            nonce: 42,
+            user_agent: "/oag-node:0.1.0/".to_string(),
+            start_height: 1234,
+            relay: true,
+        };
+        let mut bytes = Vec::new();
+        v.encode_into(&mut bytes);
+        assert_eq!(VersionMessage::decode(&bytes).unwrap(), v);
+    }
 }

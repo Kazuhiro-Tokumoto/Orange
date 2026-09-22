@@ -276,6 +276,13 @@ enum Request {
         /// 結果。
         outcome: DialOutcome,
     },
+    /// 相手が名乗った提供機能を住所帳に記録する。
+    PeerServices {
+        /// 相手。**こちらから繋いだ住所に限る。**
+        addr: SocketAddr,
+        /// [`oag_net::effective_services`] を通した後の値。
+        services: u64,
+    },
     /// 自分自身の住所を登録する。以後これを覚えない。
     OwnAddresses(Vec<SocketAddr>),
     /// 自分自身の住所を引く。ピアに名乗るために使う。
@@ -550,6 +557,18 @@ impl NodeHandle {
         outcome: DialOutcome,
     ) -> Result<(), String> {
         self.tell(Request::AddressOutcome { addr, outcome }).await
+    }
+
+    /// 相手が名乗った提供機能を記録する。
+    ///
+    /// **こちらから繋いだ相手にだけ呼ぶ。** 繋がれた側の住所は相手の
+    /// 一時ポートであり、住所帳の鍵にならない。
+    pub async fn record_peer_services(
+        &self,
+        addr: SocketAddr,
+        services: u64,
+    ) -> Result<(), String> {
+        self.tell(Request::PeerServices { addr, services }).await
     }
 
     /// 自分自身の住所を登録する。
@@ -1235,6 +1254,9 @@ impl Service {
                     }
                     DialOutcome::Failed => self.node.addresses_mut().mark_failure(&addr, at),
                 }
+            }
+            Request::PeerServices { addr, services } => {
+                self.node.addresses_mut().set_services(&addr, services);
             }
             Request::OwnAddresses(addrs) => {
                 self.own_addresses = addrs.clone();

@@ -28,7 +28,8 @@
 
 use crate::service::NodeHandle;
 use oag_net::message::{
-    GetHeaders, InvItem, InvKind, Message, VersionMessage, MAX_HEADERS, PROTOCOL_VERSION,
+    effective_services, GetHeaders, InvItem, InvKind, Message, VersionMessage, MAX_HEADERS,
+    PROTOCOL_VERSION, SERVICE_FULL_NODE,
 };
 use oag_net::sync::PeerId;
 use oag_net::transport::{Connection, TransportError};
@@ -68,7 +69,9 @@ fn now() -> i64 {
 async fn our_version(handle: &NodeHandle) -> Result<VersionMessage, String> {
     Ok(VersionMessage {
         protocol_version: PROTOCOL_VERSION,
-        services: 0,
+        // 本ノードは創世からすべてのブロックを配れる。剪定を入れるときは
+        // ここを名乗り分ける (SPEC §14.5)。
+        services: SERVICE_FULL_NODE,
         timestamp: now(),
         nonce: handle.nonce(),
         user_agent: USER_AGENT.to_string(),
@@ -122,6 +125,14 @@ pub async fn run_as(
     );
 
     let source = conn.peer_addr().ok();
+    // 名乗りを住所帳に控える。**こちらから繋いだ相手だけ**である。繋がれた
+    // 側の住所は相手の一時ポートであり、次に繋ぎ直せる宛先ではない。
+    if direction == Direction::Outbound {
+        if let Some(addr) = source {
+            let services = effective_services(theirs.protocol_version, theirs.services);
+            let _ = handle.record_peer_services(addr, services).await;
+        }
+    }
     let result = session(&handle, peer, conn, theirs.start_height, direction, source).await;
     handle.peer_gone(peer).await?;
     crate::log_peer!("the connection to {addr} dropped");

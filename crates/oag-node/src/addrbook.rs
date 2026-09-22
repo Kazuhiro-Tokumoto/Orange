@@ -132,6 +132,17 @@ pub struct Entry {
     pub last_success: Option<i64>,
     /// 繋がってから連続して失敗した回数。
     pub failures: u32,
+    /// 相手が名乗った提供機能。**まだ聞いていなければ 0。**
+    ///
+    /// 自分でハンドシェイクして確かめた値だけを入れる。他のピアから
+    /// 伝え聞いた値は入れない — 第三者について嘘をつけるからである。
+    ///
+    /// 欄の無い古い `peers.json` からは 0 として読み込まれる
+    /// (`serde(default)`)。「書いてなかった」と「まだ聞いていない」は
+    /// どちらも「知らない」であり、同じ 0 で構わない。次に繋いだときに
+    /// 本当の値が入る。
+    #[serde(default)]
+    pub services: u64,
 }
 
 impl Entry {
@@ -141,6 +152,7 @@ impl Entry {
             last_try: None,
             last_success: None,
             failures: 0,
+            services: 0,
         }
     }
 
@@ -766,6 +778,25 @@ impl AddressBook {
         }
     }
 
+    /// 相手が名乗った提供機能を覚える。ハンドシェイクが成立した直後に呼ぶ。
+    ///
+    /// **知らない住所には何もしない。** 先に [`AddressBook::mark_success`]
+    /// を呼んで住所帳に載せてから呼ぶこと。名乗りだけで住所帳を太らせると、
+    /// 繋がりもしない住所が枠を取る。
+    ///
+    /// `services` は [`oag_net::effective_services`] を通した後の値を渡す。
+    /// 版数 1 の相手はフルノードとして記録される。
+    pub fn set_services(&mut self, addr: &SocketAddr, services: u64) {
+        let Some(info) = self.entries.get_mut(addr) else {
+            return;
+        };
+        if info.entry.services == services {
+            return;
+        }
+        info.entry.services = services;
+        self.dirty = true;
+    }
+
     /// 繋がったことを記録し、`tried` 表へ昇格させる。
     ///
     /// **まだ覚えていない住所なら、ここで覚える。** 実際に繋がった住所は
@@ -986,7 +1017,7 @@ impl AddressBook {
         proven
             .into_iter()
             .take(want.min(MAX_TO_SHARE))
-            .map(|(addr, entry)| NetAddress::from_socket(*addr, 0, entry.last_seen))
+            .map(|(addr, entry)| NetAddress::from_socket(*addr, entry.services, entry.last_seen))
             .collect()
     }
 
@@ -1602,6 +1633,77 @@ mod tests {
         assert!(!restored.is_dirty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn services_survive_a_round_trip() {
+        let dir = std::env::temp_dir().join(format!("oag-addr-svc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("peers.json");
+        let a = addr(93, 184, 216, 1);
+
+        let mut b = AddressBook::open(NET, &path);
+        b.add(a, NOW, NOW);
+        b.mark_success(&a, NOW);
+        b.set_services(&a, oag_net::SERVICE_FULL_NODE);
+        b.save().unwrap();
+
+        let restored = AddressBook::open(NET, &path);
+        assert_eq!(
+            restored.get(&a).unwrap().services,
+            oag_net::SERVICE_FULL_NODE
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_address_book_without_the_services_field_still_loads() {
+        // **版を上げていない。** services の無い古い peers.json を捨てると、
+        // 上げた瞬間に全ノードの住所帳が飛び、シード 1 台に全員がぶら下がる。
+        let dir = std::env::temp_dir().join(format!("oag-addr-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("peers.json");
+        let a = addr(93, 184, 216, 1);
+
+        let mut b = AddressBook::open(NET, &path);
+        b.add(a, NOW, NOW);
+        b.mark_success(&a, NOW);
+        b.set_services(&a, oag_net::SERVICE_FULL_NODE);
+        b.save().unwrap();
+
+        // 欄ごと削って、この変更より前に書かれたファイルに戻す。
+        let text = std::fs::read_to_string(&path).unwrap();
+        let old = text.replace(&format!(",\"services\":{}", oag_net::SERVICE_FULL_NODE), "");
+        assert!(!old.contains("services"), "the field was not removed");
+        std::fs::write(&path, &old).unwrap();
+
+        let restored = AddressBook::open(NET, &path);
+        assert_eq!(restored.len(), 1, "an old address book was discarded");
+        assert!(restored.get(&a).unwrap().is_proven());
+        // 「書いてなかった」も「まだ聞いていない」も、同じ 0 でよい。
+        assert_eq!(restored.get(&a).unwrap().services, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shared_addresses_carry_what_we_were_told() {
+        let mut b = book();
+        let a = addr(93, 184, 216, 1);
+        b.add(a, NOW, NOW);
+        b.mark_success(&a, NOW);
+        assert_eq!(b.to_share(NOW, 10)[0].services, 0, "before the handshake");
+
+        b.set_services(&a, oag_net::SERVICE_FULL_NODE);
+        assert_eq!(b.to_share(NOW, 10)[0].services, oag_net::SERVICE_FULL_NODE);
+    }
+
+    #[test]
+    fn services_are_not_recorded_for_an_unknown_address() {
+        let mut b = book();
+        b.set_services(&addr(93, 184, 216, 9), oag_net::SERVICE_FULL_NODE);
+        assert!(b.is_empty(), "a bare claim put an address in the book");
     }
 
     #[test]

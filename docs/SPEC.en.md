@@ -1939,6 +1939,47 @@ Features implemented:
 - **headers-first sync**
 - **compact blocks** — see [§14.9](#149-compact-blocks). Required from v1
 
+#### Advertised services
+
+The `services` field of `version` states **what a node can serve**.
+
+| Bit | Name | Meaning |
+| --- | --- | --- |
+| — (0) | `SERVICE_NONE` | Serves nothing; holds headers only |
+| `1 << 0` | `SERVICE_FULL_NODE` | Serves every block **from genesis** |
+| `1 << 1` | `SERVICE_LIMITED` | Serves only recent blocks (pruned node) |
+
+**A node that cannot serve every block MUST NOT advertise
+`SERVICE_FULL_NODE`.** How far back it can go is not part of the
+advertisement; a node that lacks a requested block answers `notfound`
+(see "When told it is not held" above).
+
+##### `services` is undefined at protocol version 1
+
+Nodes speaking protocol version 1 always sent this field as 0.
+
+**No implementation other than the full node ever spoke version 1.** A peer at
+version 1 MUST therefore be treated as `SERVICE_FULL_NODE` regardless of the
+value it sent. This is not a guess: no light or pruned node was ever released
+for that version.
+
+A 0 from version 1 MUST NOT be read at face value as "serves nothing". Reading
+it that way would reclassify every running full node as a light node. **An
+advertised 0 and an unfilled 0 are distinguishable only by version.**
+
+`services` carries meaning **from version 2 onward**.
+
+##### An advertisement, not a guarantee
+
+A peer can lie. Nothing in the protocol stops a node from advertising
+`SERVICE_FULL_NODE` while serving nothing. The advertisement is **a hint for
+choosing who to connect to**, not a basis for trust; a peer that does not
+deliver is routed around by `notfound` and by the request timeout.
+
+Advertisements heard second-hand SHOULD NOT be recorded. The `services` carried
+in `addr` is hearsay about a third party and can be forged. **Only record what
+was confirmed in your own handshake.**
+
 #### The sync procedure
 
 Headers-first. Collect headers to confirm the shape of the chain, then fetch
