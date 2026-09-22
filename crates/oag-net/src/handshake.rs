@@ -129,7 +129,10 @@ impl Handshake {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{InvItem, PROTOCOL_VERSION, SERVICE_FULL_NODE};
+    use crate::message::{
+        effective_services, InvItem, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, SERVICE_FULL_NODE,
+        SERVICE_NONE,
+    };
     use oag_primitives::hash;
 
     fn version(nonce: u64) -> VersionMessage {
@@ -182,6 +185,47 @@ mod tests {
         assert!(a.is_ready() && b.is_ready());
         assert_eq!(a.peer_version().unwrap().nonce, 20);
         assert_eq!(b.peer_version().unwrap().nonce, 10);
+    }
+
+    #[test]
+    fn a_version_one_peer_is_still_welcome() {
+        // **稼働中のネットワークは全員が版数 1 である。** ここが落ちると、
+        // 新しいノードはどこからも同期できなくなる。
+        let old = VersionMessage {
+            protocol_version: 1,
+            // 版数 1 の実装はこの欄を埋めなかった。
+            services: SERVICE_NONE,
+            ..version(2)
+        };
+
+        let mut local = Handshake::new(1);
+        let _ = local.start(version(1));
+        assert_eq!(
+            local.on_message(&Message::Version(old.clone())),
+            Ok(vec![Message::Verack])
+        );
+        assert_eq!(local.on_message(&Message::Verack), Ok(Vec::new()));
+        assert!(local.is_ready(), "a version 1 peer was turned away");
+
+        // 送ってきた 0 は未記入である。フルノードとして読む。
+        let theirs = local.peer_version().unwrap();
+        assert_eq!(theirs.services, SERVICE_NONE);
+        assert_eq!(
+            effective_services(theirs.protocol_version, theirs.services),
+            SERVICE_FULL_NODE
+        );
+    }
+
+    #[test]
+    fn the_oldest_version_we_accept_still_gets_in() {
+        let oldest = VersionMessage {
+            protocol_version: MIN_PROTOCOL_VERSION,
+            services: SERVICE_NONE,
+            ..version(2)
+        };
+        let mut local = Handshake::new(1);
+        let _ = local.start(version(1));
+        assert!(local.on_message(&Message::Version(oldest)).is_ok());
     }
 
     #[test]
