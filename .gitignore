@@ -2,3 +2,12 @@
 **/*.rs.bk
 *.pdb
 .DS_Store
+
+# ノードの持ち物。--datadir をどう名付けても拾えるように、名前で無視する。
+chain.redb*
+peers.json
+light.scan
+
+# 鍵が入っている。暗号化されていても公開リポジトリに入れてはいけない。
+wallet.json
+*.wallet.json
