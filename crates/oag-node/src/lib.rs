@@ -21,6 +21,7 @@ pub mod addrbook;
 pub mod connect;
 pub mod explorer;
 pub mod genesis;
+pub mod light;
 pub mod log;
 pub mod node;
 pub mod peer;

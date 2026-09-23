@@ -27,6 +27,7 @@ oag-net = { workspace = true, features = ["tokio"] }
 oag-primitives.workspace = true
 oag-rpc.workspace = true
 oag-store.workspace = true
+oag-wallet = { workspace = true, default-features = false }
 hex.workspace = true
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true

@@ -527,6 +527,7 @@ dependencies = [
  "oag-primitives",
  "oag-rpc",
  "oag-store",
+ "oag-wallet",
  "rustls-pemfile",
  "serde",
  "serde_json",
