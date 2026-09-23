@@ -3365,6 +3365,57 @@ combined with `--prune-undo`, nor with `--index`, `--explorer` or `--wallet`,
 which need the index. The shallowest depth it accepts is 144; below that the
 one- and two-block reorganisations of ordinary operation would leave it stuck.
 
+#### A light node is built first without changing the protocol
+
+A light node (one holding only headers) **can be built from the existing
+messages alone**.
+
+```text
+getheaders / headers    the header chain; it verifies the proof of work itself
+getdata(Block) / block  the contents; it recomputes the merkle root itself
+```
+
+**Merkle proofs are not needed.** A proof exists so that a block need not be
+downloaded, not to make verification stronger. With the block in hand the root
+can be computed. Filters and proofs alike are **tools for saving bandwidth, and
+leaving them out costs nothing in safety**.
+
+So `PROTOCOL_VERSION` stays where it is and running nodes change nothing.
+
+##### What to settle now so it is not rewritten once blocks fill up
+
+So that filters (BIP158-style) can be added later, a light node SHOULD
+implement these as **two separate stages**:
+
+1. **Deciding whether to fetch** — for now, always fetch. Later this becomes:
+   fetch the filter, fetch the block only on a match
+2. **Verifying and collecting** — verify the block and collect the transactions
+   touching its own locks
+
+**Stage 2 does not change by one bit** between the two, because either path
+ends with the block itself in hand and checks it the same way. A filter lives
+entirely inside stage 1. Mixing the two means rewriting all of it when blocks
+fill up.
+
+##### Filters MUST NOT be committed to blocks
+
+A filter digest MUST NOT go into the header. Changing the header format is a
+hard fork, **a price a running chain cannot pay**. Bitcoin also chose not to
+commit them in BIP157/158.
+
+An uncommitted filter can be lied about. A lie makes a node **miss a payment to
+itself** (it cannot be made to see a transaction that is not there: fetching the
+block settles that). Pulling filters from several peers and comparing them makes
+up for it. This is a property a light node carries anyway, not one filters
+introduce.
+
+##### The announcement can be added at that time
+
+Serving filters is announced as `SERVICE_COMPACT_FILTERS` (`1 << 2`).
+`effective_services` in [§14.5](#145-p2p-protocol) passes unknown bits through
+unchanged, so **adding a bit costs running nodes nothing**. It is the road
+already travelled by `SERVICE_LIMITED` for pruned nodes.
+
 ---
 
 ## Appendix A: parameter list
