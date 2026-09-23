@@ -23,7 +23,7 @@ use oag_mempool::Mempool;
 use oag_miner::{build_template, BlockTemplate, TemplateError, TemplateRequest};
 use oag_pow::randomx::{RandomXPowError, RandomXVerifier};
 use oag_pow::seed_height;
-use oag_primitives::{Hash, Network};
+use oag_primitives::{Amount, Hash, Network};
 use oag_store::{Store, StoreError};
 use std::path::Path;
 
@@ -77,8 +77,13 @@ pub enum NodeError {
 pub struct NodeStatus {
     /// ネットワーク。
     pub network: Network,
-    /// 先端の高さ。
+    /// 先端の高さ。**本体を繋いだ高さ**である。
+    ///
+    /// 軽量モードでは本体を繋がないので 0 のまま動かない。どこまで
+    /// 追えているかは [`header_height`](NodeStatus::header_height) が答える。
     pub height: u64,
+    /// 検証済みヘッダの先端の高さ。
+    pub header_height: u64,
     /// 先端のブロックハッシュ。
     pub tip: Hash,
     /// 先端までの累積作業量。
@@ -95,6 +100,26 @@ pub struct NodeStatus {
     pub known_addresses: usize,
     /// ブロック本体を持っている一番低い高さ。剪定していなければ 0。
     pub blocks_from: u64,
+    /// 軽量モードの様子。通常のノードでは `None`。
+    ///
+    /// **`Node` は埋めない。** 走査の状態を持っているのは
+    /// [`crate::service`] 側なので、あちらが後から入れる。
+    pub light: Option<LightStatus>,
+}
+
+/// 軽量モードの様子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LightStatus {
+    /// どの高さまで走査したか。まだなら `None`。
+    pub scanned_to: Option<u64>,
+    /// 見張っている支払い条件の数。
+    pub watched: usize,
+    /// 持っている硬貨の数。
+    pub coins: usize,
+    /// 手元にある合計。**成熟していないコインベースを含む。**
+    pub total: Amount,
+    /// いま使える合計。
+    pub spendable: Amount,
 }
 
 /// 掘れて、先端になったブロック。
@@ -149,7 +174,9 @@ impl AssumeValidSetting {
 }
 
 /// ノードを開くときの設定。
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// **`Copy` ではない。** `watch` が伸びるためである。
+#[derive(Debug, Clone, Default)]
 pub struct NodeOptions {
     /// assumevalid。
     pub assume_valid: AssumeValidSetting,
@@ -168,6 +195,18 @@ pub struct NodeOptions {
     /// `--prune --drop-index` を 1 回で通すにはここで順序を決める必要が
     /// ある。
     pub drop_index: bool,
+    /// 軽量モードで動かす。
+    ///
+    /// UTXO セットも索引も mempool も持たず、本体は走査して捨てる
+    /// (`crate::light`)。**検証を預けるわけではない。** ヘッダの PoW も
+    /// 本体のマークルルートも自分で確かめる。預けるのは「見せられなかった
+    /// ものがあるか」だけである (SPEC §19)。
+    pub light: bool,
+    /// 軽量モードで見張る支払い条件。
+    ///
+    /// **走査を始める前に渡しきること。** 後から足したものは、通り過ぎた
+    /// ブロックには適用されない。
+    pub watch: Vec<Lock>,
 }
 
 impl Node {
@@ -249,6 +288,7 @@ impl Node {
         Ok(NodeStatus {
             network: self.network,
             height: tip.height(),
+            header_height: self.chain.best_header()?.height(),
             tip: tip.hash,
             cumulative_work: tip.cumulative_work,
             next_difficulty: self.chain.expected_difficulty_for_child_of(&tip.hash)?,
@@ -257,6 +297,7 @@ impl Node {
             mempool_len: self.mempool.len(),
             known_addresses: self.addresses.len(),
             blocks_from: self.chain.store().blocks_from()?,
+            light: None,
         })
     }
 

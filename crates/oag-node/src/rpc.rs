@@ -213,6 +213,14 @@ async fn get_info(handle: &NodeHandle) -> Result<Value, RpcError> {
         // 0 でなければ、それより下のブロックは配れない (SPEC §14.5)。
         "blocksfrom": status.blocks_from,
         "pruned": status.blocks_from > 0,
+        // 軽量モードのときだけ入る。通常のノードでは null。
+        "light": status.light.map(|l| json!({
+            "scannedto": l.scanned_to,
+            "watching": l.watched,
+            "coins": l.coins,
+            "balance": l.total.to_string(),
+            "spendable": l.spendable.to_string(),
+        })),
     }))
 }
 

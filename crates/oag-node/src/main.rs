@@ -189,6 +189,36 @@ enum Command {
               default_missing_value = "4320",
               conflicts_with_all = ["index", "explorer", "wallet"])]
         prune: Option<u64>,
+        /// Follow the chain without keeping it. Off by default.
+        ///
+        /// Headers are collected and their proof of work checked exactly as a full
+        /// node checks it. Blocks are fetched, checked against the merkle root in
+        /// their header, scanned for the addresses given with `--watch`, and then
+        /// thrown away. Nothing is stored but the headers.
+        ///
+        /// **This is not the same as trusting somebody.** Every header's proof of
+        /// work and every block's merkle root is checked here. What cannot be
+        /// checked is whether a block was withheld: a peer that says "there is
+        /// nothing there" cannot be contradicted, so a payment can be missed. The
+        /// reverse cannot happen — a payment that is not in the chain cannot be
+        /// conjured up (`docs/SPEC.md` §19).
+        ///
+        /// **It saves disk, not bandwidth.** Every block is still downloaded; it is
+        /// just not kept. At present that is roughly 130 MB a year.
+        ///
+        /// It cannot mine, relay transactions, or serve blocks to anyone, and it
+        /// announces itself as offering nothing.
+        #[arg(long, conflicts_with_all = ["mine", "prune", "prune_undo",
+                                          "index", "explorer", "wallet"])]
+        light: bool,
+        /// An address to watch for in light mode. May be given more than once.
+        ///
+        /// **Give them all before the first run.** Blocks already scanned are not
+        /// looked at again, so an address added later needs a resync.
+        ///
+        /// Only the address is needed, never a key: this watches, it does not spend.
+        #[arg(long, value_name = "address", requires = "light")]
+        watch: Vec<String>,
         /// Skip checking signatures at and below this block. `0` turns it off.
         ///
         /// Most of an initial sync is spent re-checking every signature from the
@@ -298,6 +328,8 @@ fn run() -> Result<(), String> {
             tls_key,
             prune_undo,
             prune,
+            light,
+            watch,
             assumevalid,
             exit_after,
         } => {
@@ -322,6 +354,21 @@ fn run() -> Result<(), String> {
                 ),
             };
 
+            // 見張る先は、記憶域を開く前に解釈する。開いてから断るのは無駄。
+            let watch: Vec<Lock> = watch
+                .iter()
+                .map(|text| {
+                    Address::decode_on(network, text)
+                        .map(|a| Lock::from_address(&a))
+                        .map_err(|e| format!("--watch {text} is not a valid address: {e}"))
+                })
+                .collect::<Result<_, _>>()?;
+            if light && watch.is_empty() {
+                oag_node::log_warn!(
+                    "--light without --watch follows the chain but tracks no coins"
+                );
+            }
+
             // `--prune` は本体と巻き戻し情報の両方を同じ深さで刈る。
             // 片方だけ深く持っても、戻れる深さは浅いほうで決まる。
             let options = NodeOptions {
@@ -329,6 +376,8 @@ fn run() -> Result<(), String> {
                 undo_keep: prune_undo.or(prune),
                 block_keep: prune,
                 drop_index,
+                light,
+                watch,
             };
             let service = NodeService::start_with(network, &common.datadir, options)
                 .map_err(|e| e.to_string())?;
@@ -365,6 +414,15 @@ fn run() -> Result<(), String> {
                         "keeping only the most recent {keep} blocks; older ones are \
                          answered with notfound and this node announces itself as \
                          limited rather than full"
+                    );
+                }
+
+                // 何を預けていて何を預けていないのかを、起動のたびに言う。
+                if light {
+                    oag_node::log_warn!(
+                        "light mode: headers and merkle roots are checked here, but \
+                         blocks are not kept and cannot be served to anyone. \
+                         A peer that withholds a block can make you miss a payment"
                     );
                 }
 
@@ -595,6 +653,11 @@ fn print_node_status(node: &Node) -> Result<(), String> {
 fn print_status_lines(s: &node::NodeStatus) {
     println!("  network          {}", s.network);
     println!("  height           {}", s.height);
+    // 追いついていない間と軽量モードでは、この 2 つがずれる。**ずれたまま
+    // 片方だけ見せると、止まっているように見える。**
+    if s.header_height != s.height {
+        println!("  headers to       {}", s.header_height);
+    }
     println!("  tip              {}", s.tip);
     println!("  cumulative work  {}", s.cumulative_work);
     println!("  next difficulty  {}", s.next_difficulty);
@@ -603,6 +666,16 @@ fn print_status_lines(s: &node::NodeStatus) {
     // 剪定していないノードでは黙っている。全員に関係する行ではない。
     if s.blocks_from > 0 {
         println!("  bodies from      {} (pruned below)", s.blocks_from);
+    }
+    if let Some(l) = s.light {
+        println!(
+            "  scanned to       {}",
+            l.scanned_to
+                .map_or("(nothing yet)".to_string(), |h| h.to_string())
+        );
+        println!("  watching         {} addresses", l.watched);
+        println!("  coins            {}", l.coins);
+        println!("  balance          {} ({} spendable)", l.total, l.spendable);
     }
     println!("  mempool         {}", s.mempool_len);
     println!("  peers known      {}", s.known_addresses);

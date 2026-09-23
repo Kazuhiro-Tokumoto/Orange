@@ -34,10 +34,10 @@ use oag_miner::pool::{HasherFactory, MiningPool};
 use oag_miner::PowHasher;
 use oag_net::message::NetAddress;
 use oag_net::message::MAX_HEADERS;
-use oag_net::message::{SERVICE_FULL_NODE, SERVICE_LIMITED};
+use oag_net::message::{SERVICE_FULL_NODE, SERVICE_LIMITED, SERVICE_NONE};
 use oag_net::sync::{BlockDownload, PeerId, TxRequests};
 use oag_pow::randomx::{RandomXMiner, RandomXVerifier};
-use oag_primitives::{Hash, Network};
+use oag_primitives::{Amount, Hash, Network};
 use oag_store::{BlockSummary, IndexStats, TxLocation};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -186,7 +186,11 @@ pub enum DialOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockAccepted {
     /// チェーンとしての結果。
-    pub outcome: AcceptOutcome,
+    ///
+    /// **軽量モードでは `None`。** あちらは本体をチェーンに繋がず、
+    /// 走査して捨てる。どの変種も当てはまらないので、当てはまる振りを
+    /// しない。
+    pub outcome: Option<AcceptOutcome>,
     /// この結果、先端が動いたか。
     pub moved_tip: bool,
 }
@@ -444,8 +448,11 @@ pub struct NodeHandle {
 /// 配れるのに [`SERVICE_LIMITED`] と名乗るのは控えめすぎる側の誤りであり、
 /// 相手は深い同期の相手に選ばないだけである。逆は SPEC §14.5 の
 /// MUST NOT に触れる。**控えめな側へ倒す。**
-fn services_for(block_keep: Option<u64>, blocks_from: u64) -> u64 {
-    if block_keep.is_some() || blocks_from > 0 {
+fn services_for(light: bool, block_keep: Option<u64>, blocks_from: u64) -> u64 {
+    if light {
+        // 本体を 1 つも持たない。**配れるものが無い。**
+        SERVICE_NONE
+    } else if block_keep.is_some() || blocks_from > 0 {
         SERVICE_LIMITED
     } else {
         SERVICE_FULL_NODE
@@ -811,6 +818,8 @@ struct Service {
     /// トランザクションの取り寄せ。**頼んだものだけを受け取るための記録。**
     tx_requests: TxRequests,
     mining: Option<Lock>,
+    /// 軽量モードの状態。`None` なら通常のノードである。
+    light: Option<crate::light::LightNode>,
     events: broadcast::Sender<NodeEvent>,
     /// これまでに掘れたブロックの数。
     mined: u64,
@@ -882,6 +891,10 @@ impl NodeService {
 
         let data_dir = data_dir.to_path_buf();
         let events_for_thread = events.clone();
+        // 取っ手を組むのに要るので、options を作業スレッドへ渡す前に控える。
+        let block_keep = options.block_keep;
+        let light_mode = options.light;
+        let watch = options.watch.clone();
         let thread = std::thread::Builder::new()
             .name("oag-node".to_string())
             .spawn(move || {
@@ -906,11 +919,21 @@ impl NodeService {
                         return;
                     }
                 };
+                let light = light_mode.then(|| {
+                    let genesis = node
+                        .chain()
+                        .hash_at_height(0)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(Hash::ZERO);
+                    crate::light::LightNode::new(genesis, watch)
+                });
                 Service {
                     node,
                     download: BlockDownload::new(),
                     tx_requests: TxRequests::new(),
                     mining: None,
+                    light,
                     events: events_for_thread,
                     mined: 0,
                     own_addresses: Vec::new(),
@@ -936,7 +959,7 @@ impl NodeService {
                     events,
                     network,
                     nonce: make_nonce(),
-                    services: services_for(options.block_keep, blocks_from),
+                    services: services_for(light_mode, block_keep, blocks_from),
                 },
                 thread: Some(thread),
             }),
@@ -1262,7 +1285,22 @@ impl Service {
         }
         match request {
             Request::Status(reply) => {
-                let _ = reply.send(self.node.status().map_err(|e| e.to_string()));
+                let status = self.node.status().map_err(|e| e.to_string()).map(|mut s| {
+                    // 走査の状態を持っているのはこちらである。
+                    s.light = self.light.as_ref().map(|light| {
+                        let tracker = light.tracker();
+                        let height = tracker.scanned_to().unwrap_or(0);
+                        crate::node::LightStatus {
+                            scanned_to: tracker.scanned_to(),
+                            watched: tracker.watched_len(),
+                            coins: tracker.len(),
+                            total: tracker.total().unwrap_or(Amount::ZERO),
+                            spendable: tracker.spendable(height).unwrap_or(Amount::ZERO),
+                        }
+                    });
+                    s
+                });
+                let _ = reply.send(status);
             }
             Request::BestHeaderHeight(reply) => {
                 let result = self
@@ -1595,6 +1633,11 @@ impl Service {
         let height = block.header.height;
         let size = block.size();
         let transactions = block.transactions.len();
+        // 軽量モードは繋がない。確かめて、自分の分だけ拾って、捨てる。
+        if self.light.is_some() {
+            return self.scan_block(block);
+        }
+
         let before = self.node.chain().tip().map_err(|e| e.to_string())?.hash;
         let outcome = self.node.accept_block(block, now()).map_err(|e| {
             // 頼んだものが駄目だったのだから、依頼中の印は外す。
@@ -1609,7 +1652,44 @@ impl Service {
             self.announce_tip(from);
             self.report_tip(height, transactions, size, &outcome);
         }
-        Ok(BlockAccepted { outcome, moved_tip })
+        Ok(BlockAccepted {
+            outcome: Some(outcome),
+            moved_tip,
+        })
+    }
+
+    /// 軽量モードで本体を 1 つ受け取る。
+    ///
+    /// **チェーンには繋がない。** `LightNode` が確かめて走査し、本体は
+    /// そこで落ちる。先端はヘッダ側で既に進んでいるので、報せ直さない。
+    fn scan_block(&mut self, block: Block) -> Result<BlockAccepted, String> {
+        let hash = block.header.hash();
+        let scanned = {
+            let light = self.light.as_mut().expect("light mode");
+            // 借用を分けるため、チェーンは Node から直に渡す。
+            let chain = self.node.chain();
+            light.offer(block, chain)
+        };
+        self.download.received(&hash);
+        let scanned = scanned.map_err(|e| e.to_string())?;
+
+        for step in &scanned {
+            if step.changes.is_empty() {
+                continue;
+            }
+            // **自分に関係のあるブロックだけ言う。** 他人の取引で埋めると
+            // 肝心の入出金が流れる。
+            crate::log_verify!(
+                "scan   height {}  +{} -{}",
+                step.height,
+                step.changes.received.len(),
+                step.changes.spent.len()
+            );
+        }
+        Ok(BlockAccepted {
+            outcome: None,
+            moved_tip: false,
+        })
     }
 
     /// 先端が動いたことを記録に出す。
@@ -1751,11 +1831,22 @@ impl Service {
         self.download.expire(now);
 
         // 本体が要るブロックを待ち行列に補充する。
-        let missing = self
-            .node
-            .chain()
-            .missing_bodies(oag_net::sync::MAX_IN_FLIGHT_PER_PEER * 8)
-            .map_err(|e| e.to_string())?;
+        //
+        // **軽量モードでは `missing_bodies` が使えない。** あちらは
+        // 「本体を持っていないヘッダ」を答えるが、軽量モードは走査したら
+        // 捨てるので、いつまでも同じものを答え続ける。走査済みの位置から
+        // 先を数える `LightNode` に聞く。
+        let want = oag_net::sync::MAX_IN_FLIGHT_PER_PEER * 8;
+        let missing = match &self.light {
+            Some(light) => light
+                .wanted(self.node.chain(), want)
+                .map_err(|e| e.to_string())?,
+            None => self
+                .node
+                .chain()
+                .missing_bodies(want)
+                .map_err(|e| e.to_string())?,
+        };
         self.download.want(missing);
 
         Ok(self.download.assign(peer, now))
@@ -1802,6 +1893,18 @@ mod tests {
     fn the_mode_carries_over_when_the_thread_count_changes() {
         assert!(MiningMode::fast().with_threads(8).fast);
         assert!(!MiningMode::light().with_threads(8).fast);
+    }
+
+    #[test]
+    fn a_light_node_offers_nothing() {
+        // 本体を 1 つも持たない。**配れるものが無い。** 剪定ノードの
+        // 「直近なら配れる」とは別である (SPEC §14.5)。
+        assert_eq!(services_for(true, None, 0), SERVICE_NONE);
+        // 剪定の設定が混ざっていても軽量が勝つ。CLI では排他だが、
+        // 名乗りの決め方としてここを曖昧にしない。
+        assert_eq!(services_for(true, Some(4320), 9), SERVICE_NONE);
+        assert_eq!(services_for(true, None, 0) & SERVICE_FULL_NODE, 0);
+        assert_eq!(services_for(true, None, 0) & SERVICE_LIMITED, 0);
     }
 
     // ━━━━━━━━ ハッシュレートの窓 ━━━━━━━━
@@ -1919,21 +2022,21 @@ mod tests {
 
     #[test]
     fn a_node_that_keeps_everything_says_so() {
-        assert_eq!(services_for(None, 0), SERVICE_FULL_NODE);
+        assert_eq!(services_for(false, None, 0), SERVICE_FULL_NODE);
     }
 
     #[test]
     fn a_node_set_to_prune_says_limited_before_it_has_pruned_anything() {
         // **同期の途中で名乗りが変わってはならない。** 相手が聞くのは
         // 握手の 1 回だけである。いずれ捨てるのだから、最初からそう言う。
-        assert_eq!(services_for(Some(4320), 0), SERVICE_LIMITED);
+        assert_eq!(services_for(false, Some(4320), 0), SERVICE_LIMITED);
     }
 
     #[test]
     fn a_store_that_was_pruned_before_says_limited_even_without_the_flag() {
         // `--prune` を外して起動し直しても、捨てたブロックは戻らない。
         // 設定ではなく実績で名乗る (SPEC §14.5 の MUST NOT)。
-        assert_eq!(services_for(None, 1), SERVICE_LIMITED);
+        assert_eq!(services_for(false, None, 1), SERVICE_LIMITED);
     }
 
     #[test]
@@ -1941,7 +2044,7 @@ mod tests {
         // 「創世から全部配れる」と「直近しか配れない」は同時に真に
         // ならない。どちらか一方だけを名乗る。
         for (keep, from) in [(None, 0), (Some(4320), 0), (None, 1), (Some(144), 9)] {
-            let services = services_for(keep, from);
+            let services = services_for(false, keep, from);
             assert_ne!(
                 services & SERVICE_FULL_NODE != 0,
                 services & SERVICE_LIMITED != 0,
