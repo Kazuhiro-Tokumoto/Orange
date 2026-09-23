@@ -32,11 +32,37 @@
 //! でっち上げられることはない。** ブロックのほうが嘘なら merkle root か
 //! PoW で落ちる。
 
+use oag_consensus::codec::{write_varint, CodecError, Decode, Encode, Reader};
 use oag_consensus::lock::Lock;
 use oag_consensus::tx::OutPoint;
 use oag_consensus::{Block, Transaction};
 use oag_primitives::{Amount, Hash};
 use std::collections::{HashMap, HashSet};
+
+/// 保存形式の版数。
+///
+/// 形が変わったら上げる。**古いものを読めてしまうほうが危ない。** 読めて
+/// しまえば、意味の違う欄を黙って取り違えたまま残高を出すことになる。
+const TRACKER_FORMAT: u8 = 1;
+
+/// 保存した走査結果を読むときの誤り。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TrackerError {
+    /// 保存形式が違う。
+    #[error(
+        "the saved scan is format {found} but this build wants {expected}; \
+             delete it and scan again"
+    )]
+    WrongFormat {
+        /// 保存されていた版数。
+        found: u8,
+        /// この実装が読める版数。
+        expected: u8,
+    },
+    /// バイト列が壊れている。
+    #[error(transparent)]
+    Codec(#[from] CodecError),
+}
 
 /// 自分のものだと分かっている未使用出力。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,6 +313,105 @@ impl CoinTracker {
         out
     }
 
+    /// 走査の結果をバイト列にする。
+    ///
+    /// # なぜ保存するのか
+    ///
+    /// 保存しないと、**起動のたびにチェーンを丸ごと落とし直す。** 置いた
+    /// まま動かしておきたい人にとって、これが一番の負担になる。再起動が
+    /// 再同期を意味するなら、誰も置きっぱなしにしない。
+    ///
+    /// # 見張る条件も一緒に入れる
+    ///
+    /// 読み戻すときに、前回と同じ条件を見張っているかを確かめるためで
+    /// ある。違っていれば走査をやり直さなければならない。**黙って続きから
+    /// 数えると、足したアドレスへの入金が永久に抜け落ちる。**
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(TRACKER_FORMAT);
+        // 見張る条件。**順序を決めてから書く。** HashSet の並びは走るたびに
+        // 変わるので、同じ状態から同じバイト列が出ない。
+        let mut watched: Vec<Vec<u8>> = self.watched.iter().map(|l| l.encode()).collect();
+        watched.sort_unstable();
+        write_varint(watched.len() as u128, &mut out);
+        for lock in &watched {
+            out.extend_from_slice(lock);
+        }
+        // 硬貨。こちらも高さと参照で並べておく。
+        let mut coins: Vec<&OwnedCoin> = self.coins.values().collect();
+        coins.sort_unstable_by_key(|c| (c.height, c.out_point.index, c.out_point.txid));
+        write_varint(coins.len() as u128, &mut out);
+        for coin in coins {
+            coin.out_point.encode_into(&mut out);
+            coin.amount.encode_into(&mut out);
+            coin.lock.encode_into(&mut out);
+            write_varint(u128::from(coin.height), &mut out);
+            out.push(u8::from(coin.coinbase));
+        }
+        // どこまで見たか。**まだなら 0、見たなら高さ + 1** として書く。
+        // 「高さ 0 まで見た」と「まだ見ていない」を区別する必要がある。
+        write_varint(u128::from(self.scanned_to.map_or(0, |h| h + 1)), &mut out);
+        out
+    }
+
+    /// [`encode`](Self::encode) の逆。
+    ///
+    /// **形式が違うものは読まない。** 読めてしまうほうが危ない。
+    pub fn decode(buf: &[u8]) -> Result<CoinTracker, TrackerError> {
+        let mut reader = Reader::new(buf);
+        let format = reader.read_u8()?;
+        if format != TRACKER_FORMAT {
+            return Err(TrackerError::WrongFormat {
+                found: format,
+                expected: TRACKER_FORMAT,
+            });
+        }
+
+        let watched_count = reader.read_count_of("tracker.watched", Lock::MIN_ENCODED_LEN)?;
+        let mut watched = HashSet::with_capacity(watched_count);
+        for _ in 0..watched_count {
+            watched.insert(Lock::read_from(&mut reader)?);
+        }
+
+        let coin_len = OutPoint::MIN_ENCODED_LEN + 1 + Lock::MIN_ENCODED_LEN + 1 + 1;
+        let coin_count = reader.read_count_of("tracker.coins", coin_len)?;
+        let mut coins = HashMap::with_capacity(coin_count);
+        for _ in 0..coin_count {
+            let out_point = OutPoint::read_from(&mut reader)?;
+            let amount = reader.read_amount()?;
+            let lock = Lock::read_from(&mut reader)?;
+            let height = reader.read_varint_u64("tracker.coin.height")?;
+            let coinbase = reader.read_u8()? != 0;
+            coins.insert(
+                out_point,
+                OwnedCoin {
+                    out_point,
+                    amount,
+                    lock,
+                    height,
+                    coinbase,
+                },
+            );
+        }
+
+        let scanned_to = reader.read_varint_u64("tracker.scanned_to")?.checked_sub(1);
+        reader.finish()?;
+
+        Ok(CoinTracker {
+            watched,
+            coins,
+            scanned_to,
+        })
+    }
+
+    /// 見張っている条件が `locks` とぴったり同じか。
+    ///
+    /// **違っていたら続きから数えてはならない。** 足したアドレスへの入金が
+    /// 永久に抜け落ちる。呼び出し側は走査をやり直す。
+    pub fn watches_exactly(&self, locks: &[Lock]) -> bool {
+        self.watched.len() == locks.len() && locks.iter().all(|l| self.watched.contains(l))
+    }
+
     /// 出力のうち、自分宛のものを拾う。
     fn take_outputs(&mut self, tx: &Transaction, height: u64, into: &mut Vec<OwnedCoin>) {
         let coinbase = tx.is_coinbase();
@@ -502,6 +627,156 @@ mod tests {
         let tx = spend(OutPoint::new(cb.txid(), 0), &[(oag(7), mine)]);
         t.connect(&block(5, vec![cb, tx]));
         assert_eq!(t.spendable(5).unwrap(), oag(7));
+    }
+
+    // ━━━━━━━━ 保存と読み戻し ━━━━━━━━
+
+    #[test]
+    fn a_saved_scan_comes_back_the_same() {
+        let mine = lock();
+        let other = lock();
+        let mut t = CoinTracker::new();
+        t.watch(mine.clone());
+        t.watch(other.clone());
+
+        let cb = coinbase(1, &mine);
+        t.connect(&block(1, vec![cb.clone()]));
+        let tx = spend(
+            OutPoint::new(cb.txid(), 0),
+            &[(oag(3), other.clone()), (oag(2), lock())],
+        );
+        t.connect(&block(2, vec![coinbase(2, &lock()), tx]));
+
+        let back = CoinTracker::decode(&t.encode()).unwrap();
+        assert_eq!(back.len(), t.len());
+        assert_eq!(back.total().unwrap(), t.total().unwrap());
+        assert_eq!(back.scanned_to(), t.scanned_to());
+        assert_eq!(back.watched_len(), 2);
+        assert!(back.watches(&mine) && back.watches(&other));
+        // 硬貨の中身まで一致すること。金額だけ合っていても使えない。
+        let mut a: Vec<&OwnedCoin> = t.coins().collect();
+        let mut b: Vec<&OwnedCoin> = back.coins().collect();
+        a.sort_unstable_by_key(|c| (c.height, c.out_point.index));
+        b.sort_unstable_by_key(|c| (c.height, c.out_point.index));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn an_empty_scan_survives_the_trip() {
+        let t = CoinTracker::new();
+        let back = CoinTracker::decode(&t.encode()).unwrap();
+        assert!(back.is_empty());
+        assert_eq!(back.scanned_to(), None);
+        assert_eq!(back.watched_len(), 0);
+    }
+
+    #[test]
+    fn having_scanned_the_genesis_is_not_the_same_as_having_scanned_nothing() {
+        // **ここを 0 で潰すと、毎回ジェネシスを見直すか、見ていない
+        // ブロックを見たことにするかのどちらかになる。**
+        let mut t = CoinTracker::new();
+        t.connect(&block(0, vec![coinbase(0, &lock())]));
+        assert_eq!(t.scanned_to(), Some(0));
+        assert_eq!(
+            CoinTracker::decode(&t.encode()).unwrap().scanned_to(),
+            Some(0)
+        );
+
+        let fresh = CoinTracker::new();
+        assert_eq!(fresh.scanned_to(), None);
+        assert_eq!(
+            CoinTracker::decode(&fresh.encode()).unwrap().scanned_to(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_same_state_always_writes_the_same_bytes() {
+        // HashSet と HashMap の並びは走るたびに変わる。並べてから書かないと、
+        // 中身が同じでもファイルが毎回書き換わる。
+        let mine = lock();
+        let mut t = CoinTracker::new();
+        for _ in 0..8 {
+            t.watch(lock());
+        }
+        t.watch(mine.clone());
+        for h in 1..6u64 {
+            t.connect(&block(h, vec![coinbase(h, &mine)]));
+        }
+        let once = t.encode();
+        let twice = CoinTracker::decode(&once).unwrap().encode();
+        assert_eq!(once, twice, "the same state wrote different bytes");
+    }
+
+    #[test]
+    fn a_different_format_is_refused() {
+        let t = CoinTracker::new();
+        let mut bytes = t.encode();
+        bytes[0] = TRACKER_FORMAT + 1;
+        assert!(matches!(
+            CoinTracker::decode(&bytes),
+            Err(TrackerError::WrongFormat { .. })
+        ));
+    }
+
+    #[test]
+    fn a_truncated_save_is_refused() {
+        // 途中で電源が落ちた書きかけを、黙って半分だけ読まない。
+        let mine = lock();
+        let mut t = CoinTracker::new();
+        t.watch(mine.clone());
+        t.connect(&block(1, vec![coinbase(1, &mine)]));
+        let bytes = t.encode();
+        assert!(CoinTracker::decode(&bytes[..bytes.len() - 3]).is_err());
+    }
+
+    #[test]
+    fn trailing_rubbish_is_refused() {
+        let mut bytes = CoinTracker::new().encode();
+        bytes.push(0xff);
+        assert!(CoinTracker::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn a_saved_scan_can_tell_whether_the_watch_list_changed() {
+        // **ここが緩いと、足したアドレスへの入金が永久に抜け落ちる。**
+        // 続きから数えてよいかどうかは、これで決まる。
+        let a = lock();
+        let b = lock();
+        let mut t = CoinTracker::new();
+        t.watch(a.clone());
+        t.watch(b.clone());
+
+        assert!(t.watches_exactly(&[a.clone(), b.clone()]));
+        assert!(
+            t.watches_exactly(&[b.clone(), a.clone()]),
+            "order should not matter"
+        );
+        // 足された。やり直しが要る。
+        assert!(!t.watches_exactly(&[a.clone(), b.clone(), lock()]));
+        // 減らされた。これも続きからでは答えが変わる。
+        assert!(!t.watches_exactly(std::slice::from_ref(&a)));
+        // 入れ替わった。数は同じでも別物である。
+        assert!(!t.watches_exactly(&[a, lock()]));
+    }
+
+    #[test]
+    fn a_resumed_scan_keeps_counting_from_where_it_stopped() {
+        let mine = lock();
+        let mut t = CoinTracker::new();
+        t.watch(mine.clone());
+        t.connect(&block(1, vec![coinbase(1, &mine)]));
+
+        // 落として、読み戻して、続ける。
+        let mut back = CoinTracker::decode(&t.encode()).unwrap();
+        assert_eq!(back.scanned_to(), Some(1));
+        back.connect(&block(2, vec![coinbase(2, &mine)]));
+
+        assert_eq!(back.len(), 2);
+        assert_eq!(back.scanned_to(), Some(2));
+        // 続けて走査した分と、止めずに走査した分が一致すること。
+        t.connect(&block(2, vec![coinbase(2, &mine)]));
+        assert_eq!(back.total().unwrap(), t.total().unwrap());
     }
 
     // ━━━━━━━━ 巻き戻し ━━━━━━━━

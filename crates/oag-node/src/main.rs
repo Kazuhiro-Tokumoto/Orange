@@ -571,7 +571,11 @@ fn run() -> Result<(), String> {
         Command::Info { common } => {
             let network = common.network()?;
             let node = Node::open(network, &common.datadir).map_err(|e| e.to_string())?;
-            print_node_status(&node)
+            print_node_status(&node)?;
+            // 軽量モードの走査結果は台帳の外にある。**動かさずに読める。**
+            // 残高を見るためだけにノードを起こす必要はない。
+            print_saved_scan(&common.datadir);
+            Ok(())
         }
         Command::Keygen { network, out } => {
             let network: Network = network
@@ -608,6 +612,36 @@ fn run() -> Result<(), String> {
 /// Wait until it finishes.
 ///
 /// Ctrl-C ends it. With a mining limit, it also ends when that is reached.
+/// SIGTERM を待つ。
+///
+/// # なぜ Ctrl-C だけでは足りないのか
+///
+/// **置いたまま動かしてもらうことを目指している。** そうすると起動は
+/// systemd などに任されることになり、止めるときに来るのは SIGTERM で
+/// ある。これを受けないと、終了処理を通らずにいきなり消える。
+///
+/// 台帳のほうはトランザクションで守られているので落としても壊れないが、
+/// 軽量モードの走査結果は別に書き出しているので、通らないと捨てられる。
+/// 次の起動でチェーンを落とし直すことになる。
+///
+/// Windows にはこの信号が無い。あちらでは永久に待つ (= 効かない) ように
+/// して、`select!` の他の枝に任せる。
+async fn terminated() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                term.recv().await;
+            }
+            // 受け口を作れないなら、他の枝に任せる。
+            Err(_) => std::future::pending::<()>().await,
+        }
+    }
+    #[cfg(not(unix))]
+    std::future::pending::<()>().await
+}
+
 /// With `exit_after`, it then waits that many more seconds (the grace
 /// period for handing what was mined to peers).
 async fn wait_for_shutdown(handle: &NodeHandle, mining_limited: bool, exit_after: Option<u64>) {
@@ -629,6 +663,7 @@ async fn wait_for_shutdown(handle: &NodeHandle, mining_limited: bool, exit_after
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => println!("interrupt received"),
+        _ = terminated() => println!("termination requested"),
         _ = mining_done => println!("mined the requested number of blocks"),
     }
 
@@ -648,6 +683,38 @@ fn print_node_status(node: &Node) -> Result<(), String> {
     let s = node.status().map_err(|e| e.to_string())?;
     print_status_lines(&s);
     Ok(())
+}
+
+/// 保存してある走査結果があれば出す。無ければ黙る。
+///
+/// 軽量モードで動かしていない記憶域には無い。**無いことは異常ではない**
+/// ので、何も言わない。
+fn print_saved_scan(datadir: &std::path::Path) {
+    let Ok(saved) = std::fs::read(datadir.join("light.scan")) else {
+        return;
+    };
+    match oag_wallet::scan::CoinTracker::decode(&saved) {
+        Ok(tracker) => {
+            let height = tracker.scanned_to();
+            println!(
+                "  scanned to       {}",
+                height.map_or("(nothing yet)".to_string(), |h| h.to_string())
+            );
+            println!("  watching         {} addresses", tracker.watched_len());
+            println!("  coins            {}", tracker.len());
+            let total = tracker.total();
+            let spendable = tracker.spendable(height.unwrap_or(0));
+            match (total, spendable) {
+                (Some(total), Some(spendable)) => {
+                    println!("  balance          {total} ({spendable} spendable)");
+                }
+                // 足して溢れるなら黙る。嘘の残高を出すよりよい。
+                _ => println!("  balance          (cannot be summed)"),
+            }
+        }
+        // **読めないことは黙らない。** 次の起動で数え直しになる。
+        Err(e) => println!("  scan             unreadable ({e})"),
+    }
 }
 
 fn print_status_lines(s: &node::NodeStatus) {

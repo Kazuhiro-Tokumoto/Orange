@@ -80,6 +80,15 @@ pub struct Scanned {
     pub changes: BlockChanges,
 }
 
+/// 保存されたバイト列から、走査済みの高さだけを読む。
+///
+/// 再開する位置をチェーンから引き直すために要る。**全部を復号する前に
+/// 高さだけ要る**ので、ここだけを覗く。読めなければ `None`。
+#[must_use]
+pub fn saved_height(saved: &[u8]) -> Option<u64> {
+    CoinTracker::decode(saved).ok()?.scanned_to()
+}
+
 /// 軽量モードの状態。
 ///
 /// ヘッダの木は [`Chain`] が持っている。ここが持つのは「どこまで走査したか」
@@ -237,6 +246,54 @@ impl LightNode {
             // 本体はここで落ちる。**保存しない。** それが軽量モードである。
         }
         Ok(out)
+    }
+
+    /// 保存してあった走査結果から起こす。
+    ///
+    /// `watch` が前回と違えば、**保存を捨ててジェネシスからやり直す。**
+    /// 続きから数えると、足したアドレスへの入金が永久に抜け落ちる。
+    /// 減らした場合も、残っている硬貨がどこから来たのか辻褄が合わなくなる。
+    ///
+    /// 読めなかったときも作り直す。**読めない保存を黙って半分使わない。**
+    /// 理由は `note` に入れて返す。
+    pub fn restore(
+        saved: &[u8],
+        genesis: Hash,
+        cursor: Hash,
+        watch: Vec<Lock>,
+    ) -> (LightNode, Option<String>) {
+        let tracker = match CoinTracker::decode(saved) {
+            Ok(tracker) if tracker.watches_exactly(&watch) => tracker,
+            Ok(_) => {
+                return (
+                    LightNode::new(genesis, watch),
+                    Some("the watched addresses changed; scanning again from the start".into()),
+                )
+            }
+            Err(e) => {
+                return (
+                    LightNode::new(genesis, watch),
+                    Some(format!(
+                        "the saved scan cannot be read ({e}); scanning again"
+                    )),
+                )
+            }
+        };
+        (
+            LightNode {
+                tracker,
+                cursor,
+                pending: BTreeMap::new(),
+            },
+            None,
+        )
+    }
+
+    /// 走査結果をバイト列にする。
+    ///
+    /// 順番待ちは入れない。**確かめ終わって数え込んだものだけ**を残す。
+    pub fn encode(&self) -> Vec<u8> {
+        self.tracker.encode()
     }
 
     /// 走査済みの印を、この高さの手前まで戻す。
@@ -522,6 +579,103 @@ mod tests {
             before,
             "scanning grew the UTXO set"
         );
+    }
+
+    // ━━━━━━━━ 保存と読み戻し ━━━━━━━━
+
+    #[test]
+    fn a_saved_scan_resumes_where_it_stopped() {
+        // **これが無いと、再起動のたびにチェーンを落とし直す。** 置いた
+        // まま動かしてもらうには、再起動が再同期を意味してはならない。
+        let mine = a_lock();
+        let mut chain = open(MemoryStore::new());
+        let mut parent = chain.tip().unwrap().hash;
+        let mut blocks = Vec::new();
+        for i in 0..4u64 {
+            let b = paying(build_on(&chain, parent, i + 1), &mine);
+            parent = b.header.hash();
+            push_header(&mut chain, &b);
+            blocks.push(b);
+        }
+        let genesis = chain.hash_at_height(0).unwrap().unwrap();
+
+        let mut node = LightNode::new(genesis, vec![mine.clone()]);
+        node.offer(blocks[0].clone(), &chain).unwrap();
+        node.offer(blocks[1].clone(), &chain).unwrap();
+        let saved = node.encode();
+        let before = node.tracker().total().unwrap();
+
+        // 落として、読み戻す。走査を再開する位置はチェーンから引き直す。
+        let resume = chain
+            .ancestor_hash_at(&chain.best_header().unwrap().hash, 2)
+            .unwrap()
+            .unwrap();
+        let (mut back, note) = LightNode::restore(&saved, genesis, resume, vec![mine]);
+        assert_eq!(note, None, "a clean resume should not complain");
+        assert_eq!(back.tracker().total().unwrap(), before);
+        assert_eq!(back.tracker().scanned_to(), Some(2));
+
+        // **既に見たものは頼み直さない。**
+        let want = back.wanted(&chain, 10).unwrap();
+        assert_eq!(want.len(), 2, "it asked for blocks it had already scanned");
+        assert_eq!(want[0], blocks[2].header.hash());
+
+        back.offer(blocks[2].clone(), &chain).unwrap();
+        back.offer(blocks[3].clone(), &chain).unwrap();
+        assert_eq!(back.tracker().len(), 4);
+    }
+
+    #[test]
+    fn changing_the_watched_addresses_forces_a_rescan() {
+        // **ここが緩いと、足したアドレスへの入金が永久に抜け落ちる。**
+        // 続きから数えると、そのアドレスが載っていたブロックは二度と
+        // 見直されない。
+        let first = a_lock();
+        let mut chain = open(MemoryStore::new());
+        let blocks = headers_only(&mut chain, 2, 1);
+        let genesis = chain.hash_at_height(0).unwrap().unwrap();
+
+        let mut node = LightNode::new(genesis, vec![first.clone()]);
+        node.offer(blocks[0].clone(), &chain).unwrap();
+        let saved = node.encode();
+
+        // 見張る先が増えた。
+        let (back, note) = LightNode::restore(
+            &saved,
+            genesis,
+            blocks[0].header.hash(),
+            vec![first, a_lock()],
+        );
+        assert!(note.is_some(), "it resumed despite the watch list changing");
+        assert_eq!(back.cursor(), genesis, "it did not go back to the start");
+        assert_eq!(back.tracker().scanned_to(), None);
+        assert_eq!(back.tracker().watched_len(), 2);
+    }
+
+    #[test]
+    fn an_unreadable_save_starts_over_rather_than_guessing() {
+        let mine = a_lock();
+        let chain = open(MemoryStore::new());
+        let genesis = chain.hash_at_height(0).unwrap().unwrap();
+
+        let (back, note) = LightNode::restore(b"not a scan", genesis, genesis, vec![mine]);
+        assert!(note.is_some(), "it said nothing about an unreadable save");
+        assert_eq!(back.cursor(), genesis);
+        assert!(back.tracker().is_empty());
+    }
+
+    #[test]
+    fn the_saved_height_can_be_read_without_decoding_everything() {
+        // 再開位置をチェーンから引き直すのに、高さだけ先に要る。
+        let mine = a_lock();
+        let mut chain = open(MemoryStore::new());
+        let blocks = headers_only(&mut chain, 2, 1);
+        let genesis = chain.hash_at_height(0).unwrap().unwrap();
+        let mut node = LightNode::new(genesis, vec![mine]);
+        node.offer(blocks[0].clone(), &chain).unwrap();
+
+        assert_eq!(saved_height(&node.encode()), Some(1));
+        assert_eq!(saved_height(b"rubbish"), None);
     }
 
     // ━━━━━━━━ 巻き戻し ━━━━━━━━

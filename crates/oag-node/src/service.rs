@@ -820,6 +820,10 @@ struct Service {
     mining: Option<Lock>,
     /// 軽量モードの状態。`None` なら通常のノードである。
     light: Option<crate::light::LightNode>,
+    /// 走査結果の置き場。軽量モードのときだけ入る。
+    light_path: Option<std::path::PathBuf>,
+    /// 最後に保存したときの走査済み高さ。
+    light_saved_at: u64,
     events: broadcast::Sender<NodeEvent>,
     /// これまでに掘れたブロックの数。
     mined: u64,
@@ -919,14 +923,33 @@ impl NodeService {
                         return;
                     }
                 };
+                let light_path = light_mode.then(|| data_dir.join("light.scan"));
                 let light = light_mode.then(|| {
-                    let genesis = node
-                        .chain()
-                        .hash_at_height(0)
-                        .ok()
-                        .flatten()
-                        .unwrap_or(Hash::ZERO);
-                    crate::light::LightNode::new(genesis, watch)
+                    let chain = node.chain();
+                    let genesis = chain.hash_at_height(0).ok().flatten().unwrap_or(Hash::ZERO);
+                    let saved = light_path
+                        .as_ref()
+                        .and_then(|p| std::fs::read(p).ok())
+                        .unwrap_or_default();
+                    if saved.is_empty() {
+                        return crate::light::LightNode::new(genesis, watch);
+                    }
+                    // 走査を再開する位置は、保存した高さからチェーンに
+                    // 引き直す。**ハッシュは保存しない。** 保存すると、
+                    // その枝が消えていたときに辻褄の合わない状態から
+                    // 始めることになる。
+                    let resume = crate::light::saved_height(&saved)
+                        .and_then(|h| {
+                            let tip = chain.best_header().ok()?;
+                            chain.ancestor_hash_at(&tip.hash, h).ok().flatten()
+                        })
+                        .unwrap_or(genesis);
+                    let (light, note) =
+                        crate::light::LightNode::restore(&saved, genesis, resume, watch);
+                    if let Some(note) = note {
+                        crate::log_warn!("{note}");
+                    }
+                    light
                 });
                 Service {
                     node,
@@ -934,6 +957,8 @@ impl NodeService {
                     tx_requests: TxRequests::new(),
                     mining: None,
                     light,
+                    light_path,
+                    light_saved_at: 0,
                     events: events_for_thread,
                     mined: 0,
                     own_addresses: Vec::new(),
@@ -1031,10 +1056,16 @@ impl Service {
             // 溜まっている要求を先に捌く。
             loop {
                 match rx.try_recv() {
-                    Ok(Request::Shutdown) => return,
+                    Ok(Request::Shutdown) => {
+                        self.save_light();
+                        return;
+                    }
                     Ok(request) => self.handle(request),
                     Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => return,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        self.save_light();
+                        return;
+                    }
                 }
             }
 
@@ -1044,7 +1075,10 @@ impl Service {
                 // 掘らないなら、採掘スレッドを畳んで次の要求まで眠る。
                 self.retire_pool();
                 match rx.blocking_recv() {
-                    Some(Request::Shutdown) | None => return,
+                    Some(Request::Shutdown) | None => {
+                        self.save_light();
+                        return;
+                    }
                     Some(request) => self.handle(request),
                 }
             }
@@ -1686,10 +1720,62 @@ impl Service {
                 step.changes.spent.len()
             );
         }
+        // **自分の硬貨が動いたら、頃合いを待たずに書く。** 入出金は滅多に
+        // 起きないので書き込みが増えることはなく、落とすと痛い。
+        if scanned.iter().any(|s| !s.changes.is_empty()) {
+            self.save_light();
+        } else if !scanned.is_empty() {
+            self.save_light_if_due();
+        }
         Ok(BlockAccepted {
             outcome: None,
             moved_tip: false,
         })
+    }
+
+    /// 走査結果を書き出す。
+    ///
+    /// # なぜ書き換えてから名前を付け替えるのか
+    ///
+    /// 上書きの途中で電源が落ちると、**半分書けたファイルが残る。** それを
+    /// 次に読むと、形式の検査に引っかかって走査をやり直すことになる。
+    /// 別名に書いてから名前を付け替えれば、残るのは前のか新しいかの
+    /// どちらかだけになる。
+    ///
+    /// 失敗しても止めない。**保存できないことは、動かない理由にはならない。**
+    /// 次の起動で数え直すだけである。
+    fn save_light(&mut self) {
+        let (Some(light), Some(path)) = (&self.light, &self.light_path) else {
+            return;
+        };
+        let bytes = light.encode();
+        let tmp = path.with_extension("scan.tmp");
+        let wrote = std::fs::write(&tmp, &bytes).and_then(|()| std::fs::rename(&tmp, path));
+        match wrote {
+            Ok(()) => {
+                self.light_saved_at = light.tracker().scanned_to().unwrap_or(0);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                crate::log_warn!("cannot write the scan to {}: {e}", path.display());
+            }
+        }
+    }
+
+    /// 走査が進んだので、頃合いなら書き出す。
+    ///
+    /// **1 ブロックごとには書かない。** 追いつく間は毎秒何十ブロックも
+    /// 進むので、そのたびに書けば置いてある機械に負担をかける。置きっぱなし
+    /// にしてもらうための機能で、置いておくのが嫌になっては本末転倒である。
+    fn save_light_if_due(&mut self) {
+        /// この本数進むごとに書き出す。60 秒ブロックなら約 8 時間分。
+        const SAVE_EVERY: u64 = 500;
+
+        let Some(light) = &self.light else { return };
+        let at = light.tracker().scanned_to().unwrap_or(0);
+        if at.saturating_sub(self.light_saved_at) >= SAVE_EVERY {
+            self.save_light();
+        }
     }
 
     /// 先端が動いたことを記録に出す。
