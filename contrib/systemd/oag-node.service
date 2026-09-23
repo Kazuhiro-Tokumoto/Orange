@@ -1,0 +1,92 @@
+# Run an Orange node in the background, politely.
+#
+#   sudo cp oag-node /usr/local/bin/
+#   sudo cp contrib/systemd/oag-node.service /etc/systemd/system/
+#   sudo cp contrib/systemd/oag-node.env /etc/default/oag-node   # edit this
+#   sudo systemctl enable --now oag-node
+#
+# Watch it with `journalctl -u oag-node -f`.
+#
+# The point of this file is that the person whose machine it is should not
+# have to think about it. It yields CPU and disk to whatever they are doing,
+# it comes back after a reboot, and it stops cleanly.
+
+[Unit]
+Description=Orange (OAG) node
+Documentation=https://github.com/Kazuhiro-Tokumoto/Orange/blob/main/docs/COMMANDS.md
+# The node resolves the seed hostnames at startup, so it wants DNS to work.
+# It survives starting too early -- it just retries -- but this is tidier.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+
+# Everything about *what* to run lives here, so this unit does not need
+# editing. See oag-node.env for the choices (full / pruned / light).
+EnvironmentFile=/etc/default/oag-node
+ExecStart=/usr/local/bin/oag-node run --datadir %S/oag-node $OAG_FLAGS
+
+# --- getting out of the way -------------------------------------------
+#
+# Both of these matter. Nice is per-thread and CPUWeight is per-cgroup;
+# under systemd the cgroup one is what actually decides against other
+# services, and Nice is what decides against the desktop session.
+Nice=10
+CPUWeight=20
+
+# Disk, same idea. **Not IOSchedulingClass=idle:** on a busy machine that
+# can starve the initial sync for hours, and a node that never catches up
+# is worse than a node that is slightly rude. Lowest best-effort instead.
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# --- stopping ---------------------------------------------------------
+#
+# SIGTERM (the default) is handled: the node closes the ledger and, in
+# light mode, writes out how far it has scanned. Give it room to finish --
+# killing it early costs the scan, which then has to be redone.
+TimeoutStopSec=120
+
+Restart=on-failure
+RestartSec=30
+
+# --- who it runs as ---------------------------------------------------
+#
+# A user is made for it and thrown away on stop. The data survives in
+# /var/lib/oag-node, which systemd keeps owned by that user.
+#
+# The P2P port is 9444, above 1024, so **no capability is needed** to
+# listen. Nothing here runs as root.
+DynamicUser=yes
+StateDirectory=oag-node
+
+# --- hardening --------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+PrivateDevices=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# AF_UNIX is for the resolver, not for the node's own sockets.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# **Do not add MemoryDenyWriteExecute=yes.** RandomX compiles its program
+# at runtime; forbidding writable-then-executable memory does not stop the
+# node, it silently drops it into the interpreter and validation gets about
+# ten times slower. The node says so in the log when it happens. The same
+# goes for SELinux deny_execmem.
+
+[Install]
+WantedBy=multi-user.target

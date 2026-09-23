@@ -159,6 +159,27 @@ PoW・merkle root・金額・二重使用・成熟・大きさは全部確かめ
 
 ---
 
+### 置きっぱなしにする (systemd)
+
+`contrib/systemd/` に unit がある。優先度を下げて動かし、再起動で戻り、
+止めるときは SIGTERM を送る。**軽量モードは SIGTERM で走査結果を書く**ので、
+ここが噛み合っていないと止めるたびに数え直しになる。
+
+```sh
+sudo cp target/release/oag-node /usr/local/bin/
+sudo cp contrib/systemd/oag-node.service /etc/systemd/system/
+sudo cp contrib/systemd/oag-node.env /etc/default/oag-node   # 旗はここで選ぶ
+sudo systemctl enable --now oag-node
+journalctl -u oag-node -f
+```
+
+`--datadir` は unit 側が `/var/lib/oag-node` を渡す。それ以外の旗は
+`/etc/default/oag-node` に書く。
+
+**`MemoryDenyWriteExecute=yes` は足さないこと。** RandomX は実行時に
+プログラムを組み立てるので、これを禁じると止まりはしないが黙って
+インタプリタに落ちて 10 倍遅くなる。SELinux の `deny_execmem` も同じ。
+
 ## oag-wallet
 
 | コマンド | すること |

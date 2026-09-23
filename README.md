@@ -281,6 +281,57 @@ its own external address, so state it explicitly.**
 `--no-discovery` skips both the address book and the seed, connecting only to
 the peers named with `--connect`.
 
+### Leaving it running
+
+The network is worth something only if nodes stay up, and a node stays up only
+if the person whose machine it is stops noticing it. `contrib/systemd/` has a
+unit that runs the node in the background at low priority, brings it back after
+a reboot, and stops it cleanly.
+
+```sh
+sudo cp target/release/oag-node /usr/local/bin/
+sudo cp contrib/systemd/oag-node.service /etc/systemd/system/
+sudo cp contrib/systemd/oag-node.env /etc/default/oag-node   # pick your flags here
+sudo systemctl enable --now oag-node
+journalctl -u oag-node -f
+```
+
+It runs as a throwaway user with no privileges and keeps its data in
+`/var/lib/oag-node`. Port 9444 is above 1024, so **nothing needs to run as
+root.**
+
+Three kinds of node, costing different things:
+
+| | Disk | Validates | Can serve |
+| --- | --- | --- | --- |
+| full | grows forever | everything | every block |
+| `--prune` | bounded by the window | everything, identically | recent blocks only |
+| `--light --watch` | headers only (100 bytes each, ~53 MB a year) | headers, and that bodies match them | nothing |
+
+**`--prune` gives up nothing in validation.** It keeps the whole UTXO set and
+checks each new block exactly as a full node does; what it gives up is being
+able to hand old blocks to somebody else, and being able to reorganise deeper
+than the window. If disk is the reason you were not going to run a node, run
+this one.
+
+`--light` is a different trade: it never builds a UTXO set, so it cannot check
+anyone else's transactions, only that its own coins are on a chain with real
+work behind it. It is for watching your own money on a small machine, not for
+supporting the network.
+
+#### What it costs no matter which you pick
+
+**256 MB, for RandomX.** Checking that a header carries the work it claims
+means running the RandomX program, and the smallest way to do that needs a
+256 MB cache. There is no configuration that makes it smaller; the only way
+down from there is to stop checking proof-of-work and take somebody's word for
+it, which is the one thing none of these nodes do.
+
+Beyond that a node is cheap. The node thread blocks until something asks it for
+something; it does not spin waiting for work. Each open connection wakes on a
+two-second timer to do its housekeeping, and a block arrives about once a
+minute. On an idle chain that is close to nothing.
+
 ### Two nodes on one machine
 
 Have one listen and the other `--connect` to it.
