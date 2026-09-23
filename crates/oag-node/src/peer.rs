@@ -29,7 +29,7 @@
 use crate::service::NodeHandle;
 use oag_net::message::{
     effective_services, GetHeaders, InvItem, InvKind, Message, VersionMessage, MAX_HEADERS,
-    PROTOCOL_VERSION, SERVICE_FULL_NODE,
+    PROTOCOL_VERSION,
 };
 use oag_net::sync::PeerId;
 use oag_net::transport::{Connection, TransportError};
@@ -69,9 +69,10 @@ fn now() -> i64 {
 async fn our_version(handle: &NodeHandle) -> Result<VersionMessage, String> {
     Ok(VersionMessage {
         protocol_version: PROTOCOL_VERSION,
-        // 本ノードは創世からすべてのブロックを配れる。剪定を入れるときは
-        // ここを名乗り分ける (SPEC §14.5)。
-        services: SERVICE_FULL_NODE,
+        // 剪定していれば SERVICE_LIMITED、していなければ
+        // SERVICE_FULL_NODE になる (SPEC §14.5)。**配れないものを配れると
+        // 名乗ってはならない。**
+        services: handle.services(),
         timestamp: now(),
         nonce: handle.nonce(),
         user_agent: USER_AGENT.to_string(),

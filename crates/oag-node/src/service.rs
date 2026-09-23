@@ -34,6 +34,7 @@ use oag_miner::pool::{HasherFactory, MiningPool};
 use oag_miner::PowHasher;
 use oag_net::message::NetAddress;
 use oag_net::message::MAX_HEADERS;
+use oag_net::message::{SERVICE_FULL_NODE, SERVICE_LIMITED};
 use oag_net::sync::{BlockDownload, PeerId, TxRequests};
 use oag_pow::randomx::{RandomXMiner, RandomXVerifier};
 use oag_primitives::{Hash, Network};
@@ -391,6 +392,26 @@ pub struct NodeHandle {
     events: broadcast::Sender<NodeEvent>,
     network: Network,
     nonce: u64,
+    services: u64,
+}
+
+/// このノードが名乗る提供機能を決める。
+///
+/// # なぜ「剪定する設定なら」で名乗り分けるのか
+///
+/// まだ 1 つも捨てていなくても、`--prune` を付けて動いているノードは
+/// いずれ捨てる。同期の途中で名乗りが変わると、**繋いだときに聞いた話と
+/// 後の挙動が食い違う。** 相手はハンドシェイクの 1 回しか聞かない。
+///
+/// 配れるのに [`SERVICE_LIMITED`] と名乗るのは控えめすぎる側の誤りであり、
+/// 相手は深い同期の相手に選ばないだけである。逆は SPEC §14.5 の
+/// MUST NOT に触れる。**控えめな側へ倒す。**
+fn services_for(block_keep: Option<u64>, blocks_from: u64) -> u64 {
+    if block_keep.is_some() || blocks_from > 0 {
+        SERVICE_LIMITED
+    } else {
+        SERVICE_FULL_NODE
+    }
 }
 
 /// 自己接続を見分けるための乱数を作る。
@@ -419,6 +440,11 @@ impl NodeHandle {
     /// 自己接続を見分けるための乱数。
     pub fn nonce(&self) -> u64 {
         self.nonce
+    }
+
+    /// このノードが名乗る提供機能 (SPEC §14.5)。
+    pub fn services(&self) -> u64 {
+        self.services
     }
 
     /// 報せを受け取る口を開く。
@@ -821,7 +847,18 @@ impl NodeService {
             .spawn(move || {
                 let node = match Node::open_with(network, &data_dir, options) {
                     Ok(node) => {
-                        let _ = ready_tx.send(Ok(()));
+                        // 名乗りを決めるのに要る。**取っ手を作る前に
+                        // 分かっていなければならない。** ハンドシェイクは
+                        // 最初の接続で走る。
+                        match node.chain().store().blocks_from() {
+                            Ok(from) => {
+                                let _ = ready_tx.send(Ok(from));
+                            }
+                            Err(e) => {
+                                let _ = ready_tx.send(Err(NodeError::from(e)));
+                                return;
+                            }
+                        }
                         node
                     }
                     Err(e) => {
@@ -852,12 +889,13 @@ impl NodeService {
             .map_err(|e| NodeError::Thread(e.to_string()))?;
 
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(NodeService {
+            Ok(Ok(blocks_from)) => Ok(NodeService {
                 handle: NodeHandle {
                     tx,
                     events,
                     network,
                     nonce: make_nonce(),
+                    services: services_for(options.block_keep, blocks_from),
                 },
                 thread: Some(thread),
             }),
@@ -909,6 +947,21 @@ fn now() -> i64 {
 }
 
 impl Service {
+    /// まだ本体が追いついていないか。
+    ///
+    /// ヘッダの先端より本体の先端が低ければ、まだ引くものが残っている。
+    ///
+    /// **読めなければ「追いついていない」と答える。** 絞り込みが厳しい
+    /// ほうへ倒れるだけで、繋ぎ先が無くなるわけではない。名乗りの
+    /// 分からない相手は元から外さない。
+    fn is_behind(&self) -> bool {
+        let chain = self.node.chain();
+        match (chain.tip(), chain.best_header()) {
+            (Ok(tip), Ok(header)) => header.height() > tip.height(),
+            _ => true,
+        }
+    }
+
     fn run(mut self, mut rx: mpsc::Receiver<Request>) {
         loop {
             // 溜まっている要求を先に捌く。
@@ -1225,7 +1278,19 @@ impl Service {
                 let _ = reply.send(Ok(addrs));
             }
             Request::AddressCandidates { want, busy, reply } => {
-                let picked = self.node.addresses().candidates(now(), want, &busy);
+                // **まだ追いついていない間は、創世から配れる相手を選ぶ。**
+                // 剪定ノードは古いブロックを持っていない。外向きの枠は
+                // 8 本しかないので、配れないと分かっている相手にそれを
+                // 使わない。追いついた後は絞らない (SPEC §14.5)。
+                let require = if self.is_behind() {
+                    SERVICE_FULL_NODE
+                } else {
+                    oag_net::SERVICE_NONE
+                };
+                let picked = self
+                    .node
+                    .addresses()
+                    .candidates_offering(now(), want, &busy, require);
                 // 繋ぎに行くと決めた時点で印を付ける。付けないと、
                 // 結果が返るまでの間に同じ住所をもう一度選んでしまう。
                 let at = now();
@@ -1671,5 +1736,40 @@ mod tests {
     fn the_mode_carries_over_when_the_thread_count_changes() {
         assert!(MiningMode::fast().with_threads(8).fast);
         assert!(!MiningMode::light().with_threads(8).fast);
+    }
+
+    // ━━━━━━━━ 名乗り ━━━━━━━━
+
+    #[test]
+    fn a_node_that_keeps_everything_says_so() {
+        assert_eq!(services_for(None, 0), SERVICE_FULL_NODE);
+    }
+
+    #[test]
+    fn a_node_set_to_prune_says_limited_before_it_has_pruned_anything() {
+        // **同期の途中で名乗りが変わってはならない。** 相手が聞くのは
+        // 握手の 1 回だけである。いずれ捨てるのだから、最初からそう言う。
+        assert_eq!(services_for(Some(4320), 0), SERVICE_LIMITED);
+    }
+
+    #[test]
+    fn a_store_that_was_pruned_before_says_limited_even_without_the_flag() {
+        // `--prune` を外して起動し直しても、捨てたブロックは戻らない。
+        // 設定ではなく実績で名乗る (SPEC §14.5 の MUST NOT)。
+        assert_eq!(services_for(None, 1), SERVICE_LIMITED);
+    }
+
+    #[test]
+    fn the_two_service_bits_are_never_claimed_at_once() {
+        // 「創世から全部配れる」と「直近しか配れない」は同時に真に
+        // ならない。どちらか一方だけを名乗る。
+        for (keep, from) in [(None, 0), (Some(4320), 0), (None, 1), (Some(144), 9)] {
+            let services = services_for(keep, from);
+            assert_ne!(
+                services & SERVICE_FULL_NODE != 0,
+                services & SERVICE_LIMITED != 0,
+                "keep={keep:?} from={from} named {services}"
+            );
+        }
     }
 }

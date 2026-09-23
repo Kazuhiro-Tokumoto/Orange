@@ -786,6 +786,23 @@ impl AddressBook {
     ///
     /// `services` は [`oag_net::effective_services`] を通した後の値を渡す。
     /// 版数 1 の相手はフルノードとして記録される。
+    ///
+    /// # なぜ `addr` で聞いた名乗りは覚えないのか
+    ///
+    /// [`NetAddress`] は `services` を運んでおり、[`add_many`] はそれを
+    /// 受け取っている。**それでも捨てている。**
+    ///
+    /// 人づての名乗りは確かめようがない。覚えると、正直なフルノードの
+    /// 住所を「剪定ノードである」と言って回るだけで、
+    /// [`candidates_offering`] がそこを外すようになる。繋ぎ先を選ばせない
+    /// のは日蝕攻撃の下ごしらえである。**握手で自分の耳に入ったものしか
+    /// 覚えない。**
+    ///
+    /// 握手した相手も嘘はつける。しかし嘘をつけるのは自分の名乗りだけで
+    /// あり、他人の評判は動かせない。
+    ///
+    /// [`add_many`]: AddressBook::add_many
+    /// [`candidates_offering`]: AddressBook::candidates_offering
     pub fn set_services(&mut self, addr: &SocketAddr, services: u64) {
         let Some(info) = self.entries.get_mut(addr) else {
             return;
@@ -949,6 +966,36 @@ impl AddressBook {
     ///
     /// 選ぶ順は乱数で決める。順序が読めると、狙って先頭に居座られる。
     pub fn candidates(&self, now: i64, want: usize, busy: &[SocketAddr]) -> Vec<SocketAddr> {
+        self.candidates_offering(now, want, busy, oag_net::SERVICE_NONE)
+    }
+
+    /// `require` の機能を名乗っている相手に絞って選ぶ。
+    ///
+    /// [`candidates`](Self::candidates) と同じだが、**名乗りが分かっていて
+    /// 足りない相手を外す。**
+    ///
+    /// # まだ名乗りを聞いていない相手は外さない
+    ///
+    /// 名乗りは握手で初めて分かる。聞いたことのない住所を外すと、
+    /// **住所帳が空の状態から 1 本も繋げなくなる。** 起動直後はすべてが
+    /// それである。分からないものは「試す価値がある」として残し、繋いで
+    /// から分かったことを次に活かす。
+    ///
+    /// # 何のために要るのか
+    ///
+    /// 剪定ノードは古いブロックを配れない。同期の途中でそこを引くと、
+    /// `notfound` が返るまで待って引き直すことになる。**外向きの枠は
+    /// 8 本しかない。** 配れないと分かっている相手にそれを使わない。
+    ///
+    /// 追いついた後は絞らない。新しいブロックはどのノードも配れるし、
+    /// 剪定ノードを締め出す理由もない。
+    pub fn candidates_offering(
+        &self,
+        now: i64,
+        want: usize,
+        busy: &[SocketAddr],
+        require: u64,
+    ) -> Vec<SocketAddr> {
         if want == 0 || self.entries.is_empty() {
             return Vec::new();
         }
@@ -983,6 +1030,11 @@ impl AddressBook {
                 continue;
             };
             if !info.entry.is_ready(now) || info.entry.is_terrible(now) {
+                continue;
+            }
+            // 0 は「まだ聞いていない」である。聞いた上で足りない相手だけ
+            // を外す。
+            if info.entry.services != 0 && info.entry.services & require != require {
                 continue;
             }
             let group = group_of(&addr);
@@ -1386,6 +1438,66 @@ mod tests {
         assert!(
             (rounds / 4..=rounds * 3 / 4).contains(&hits),
             "the share from tried is {hits}/{rounds}, which is not half and half"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_cannot_serve_the_old_blocks_is_not_picked_for_a_sync() {
+        // 剪定ノードは古いブロックを配れない。外向きの枠は 8 本しかない。
+        let mut b = book();
+        let pruned = addr(104, 16, 1, 1);
+        b.add(pruned, NOW, NOW);
+        b.mark_success(&pruned, NOW);
+        b.set_services(&pruned, oag_net::SERVICE_LIMITED);
+
+        // 絞らなければ出てくる。
+        assert_eq!(b.candidates(NOW, 4, &[]), vec![pruned]);
+        // 創世から配れる相手を求めると出てこない。
+        assert!(b
+            .candidates_offering(NOW, 4, &[], oag_net::SERVICE_FULL_NODE)
+            .is_empty());
+    }
+
+    #[test]
+    fn a_peer_whose_services_we_have_never_heard_is_still_worth_a_try() {
+        // **名乗りは握手で初めて分かる。** 聞いていない住所を外すと、
+        // 住所帳が空の状態から 1 本も繋げない。起動直後はすべてそれである。
+        let mut b = book();
+        let unknown = addr(104, 16, 1, 1);
+        b.add(unknown, NOW, NOW);
+        b.mark_success(&unknown, NOW);
+        assert_eq!(b.get(&unknown).unwrap().services, 0, "the premise differs");
+
+        assert_eq!(
+            b.candidates_offering(NOW, 4, &[], oag_net::SERVICE_FULL_NODE),
+            vec![unknown]
+        );
+    }
+
+    #[test]
+    fn a_full_node_passes_the_filter() {
+        let mut b = book();
+        let full = addr(104, 16, 1, 1);
+        b.add(full, NOW, NOW);
+        b.mark_success(&full, NOW);
+        b.set_services(&full, oag_net::SERVICE_FULL_NODE);
+        assert_eq!(
+            b.candidates_offering(NOW, 4, &[], oag_net::SERVICE_FULL_NODE),
+            vec![full]
+        );
+    }
+
+    #[test]
+    fn once_caught_up_a_pruned_peer_is_welcome_again() {
+        // 新しいブロックはどのノードも配れる。締め出す理由がない。
+        let mut b = book();
+        let pruned = addr(104, 16, 1, 1);
+        b.add(pruned, NOW, NOW);
+        b.mark_success(&pruned, NOW);
+        b.set_services(&pruned, oag_net::SERVICE_LIMITED);
+        assert_eq!(
+            b.candidates_offering(NOW, 4, &[], oag_net::SERVICE_NONE),
+            vec![pruned]
         );
     }
 

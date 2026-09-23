@@ -93,6 +93,8 @@ pub struct NodeStatus {
     pub mempool_len: usize,
     /// 住所帳に覚えているピアの数。
     pub known_addresses: usize,
+    /// ブロック本体を持っている一番低い高さ。剪定していなければ 0。
+    pub blocks_from: u64,
 }
 
 /// 掘れて、先端になったブロック。
@@ -153,6 +155,19 @@ pub struct NodeOptions {
     pub assume_valid: AssumeValidSetting,
     /// 巻き戻し情報を残す深さ。`None` なら捨てない (既定)。
     pub undo_keep: Option<u64>,
+    /// ブロック本体を残す深さ。`None` なら捨てない (既定)。
+    ///
+    /// **`undo_keep` と同じ値を渡すこと。** 片方だけ深く持っても、戻れる
+    /// 深さは浅いほうで決まる。`--prune` は両方を一度に決める。
+    pub block_keep: Option<u64>,
+    /// 開いた直後に取引索引を捨てる。
+    ///
+    /// **剪定より先に行う。** 索引は本体を読んで答えるので、剪定した記憶域
+    /// に残っていると、捨てた範囲の照会が「その取引は存在しない」に化ける。
+    /// `block_keep` を付けて索引の残った記憶域を開くと断られるため、
+    /// `--prune --drop-index` を 1 回で通すにはここで順序を決める必要が
+    /// ある。
+    pub drop_index: bool,
 }
 
 impl Node {
@@ -170,7 +185,22 @@ impl Node {
         let genesis = crate::genesis::genesis_for(network);
         std::fs::create_dir_all(data_dir)
             .map_err(|e| StoreError::Io(format!("cannot create {}: {e}", data_dir.display())))?;
-        let store = Store::open(data_dir.join("chain.redb"))?.with_undo_keep(options.undo_keep);
+        let store = Store::open(data_dir.join("chain.redb"))?;
+        // 剪定の可否を見る前に捨てる。順序が逆だと `--prune --drop-index`
+        // が 1 回で通らない。
+        if options.drop_index {
+            store.drop_index()?;
+        }
+        let store = store
+            .with_undo_keep(options.undo_keep)
+            .with_block_keep(options.block_keep)?;
+        // 既に同期済みの記憶域に後から `--prune` を付けた場合、1 ブロック
+        // ずつ落とすのを待っていたら縮み始めるのは数日先になる。開いた
+        // ところで一度追いつかせる。
+        let pruned = store.prune_stale_blocks()?;
+        if pruned > 0 {
+            crate::log_warn!("pruned {pruned} old block bodies");
+        }
         let retarget = if network.retargets() {
             Retarget::Enabled
         } else {
@@ -226,6 +256,7 @@ impl Node {
             indexed_blocks: self.chain.indexed_blocks()?,
             mempool_len: self.mempool.len(),
             known_addresses: self.addresses.len(),
+            blocks_from: self.chain.store().blocks_from()?,
         })
     }
 

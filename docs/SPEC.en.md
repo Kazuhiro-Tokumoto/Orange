@@ -3134,7 +3134,7 @@ entries. At this chain's 60-second interval the same approach does not hold.
 | Partially signed transaction format | include it; the same roles as PSBT (BIP174) | [§16.8](#168-partially-signed-transactions-pst) |
 | Transaction index | **not provided.** Added as an optional feature when needed | below |
 | Coinbase maturity | **stays at 120 blocks.** Unchanged | below |
-| Maximum reorg depth | **not provided.** Pruning rollback data is an option the operator chooses | below |
+| Maximum reorg depth | **not provided.** Pruning rollback data and block bodies is an option the operator chooses | below |
 | Multi-threaded mining | **included.** The dataset is not shared; one per thread | [§11.2](#112-modes) |
 | Resident size of the block index | **not proportional to height.** Storage holds the objects; only tip candidates and a bounded cache stay resident | below |
 
@@ -3322,6 +3322,48 @@ applies to a cap that is a consensus rule. A node that discarded storage
 
 `oag-node` enables it with `--prune-undo <blocks>`; leaving the number out
 keeps 4320 (three days at one minute per block).
+
+#### Block bodies may go on the same terms
+
+A body is **only held in order to hand it to somebody else**. What a node needs
+to verify with is the UTXO set, and that survives pruning whole.
+
+An implementation may prune bodies. On top of the conditions for rollback data:
+
+- A node that has pruned MUST NOT announce `SERVICE_FULL_NODE`
+  ([§14.5](#145-p2p-protocol)). It announces `SERVICE_LIMITED`.
+- A body it does not have MUST be answered with `notfound`. **Saying nothing is
+  the worst of it**: the peer waits out its timeout, and since blocks only
+  connect in order from the parent, more than that one block stalls.
+- The chain of headers MUST NOT be broken. The headers and the parent links in
+  the index are not pruned. Break them and a node can no longer walk back to the
+  genesis block to confirm which chain it is on.
+- Verification MUST NOT change. A pruned node still checks every signature,
+  amount, double spend, maturity and proof of work on a new block. Pruning is
+  about what it can serve, not about what it takes on trust. This is where it
+  parts from a light client.
+- The genesis block may be kept. It costs one block.
+
+A pruned store MUST NOT build the transaction index. There is no way to index
+transactions in bodies that were thrown away, and an index with holes returned
+as a complete one is believed. Only "complete" and "absent" are states worth
+having.
+
+Having pruned MUST be recorded in the store. Turning the setting off and
+restarting does not bring the blocks back. Deciding what to announce from the
+setting alone would mean claiming to serve what cannot be served.
+
+When choosing who to sync from, a node whose bodies have not caught up may
+prefer peers announcing `SERVICE_FULL_NODE`. **It MUST NOT skip an address
+whose announcement it has never heard**, though: an announcement is only known
+from a handshake, so skipping them leaves a node with an empty address book
+unable to make a single connection.
+
+`oag-node` enables it with `--prune <blocks>`; leaving the number out keeps
+4320. It prunes bodies and rollback data to the same depth, so it cannot be
+combined with `--prune-undo`, nor with `--index`, `--explorer` or `--wallet`,
+which need the index. The shallowest depth it accepts is 144; below that the
+one- and two-block reorganisations of ordinary operation would leave it stuck.
 
 ---
 

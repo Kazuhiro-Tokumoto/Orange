@@ -68,6 +68,45 @@ const UNDO: TableDefinition<'static, Bytes, Bytes> = TableDefinition::new("undo"
 /// 捨てた先へは戻れない。戻ろうとしたときは
 /// [`StoreError::MissingUndo`] として**黙らずに断る**。
 pub const SUGGESTED_UNDO_KEEP: u64 = 4320;
+
+/// ブロック本体を剪定するときの、勧める深さ。
+///
+/// **既定では剪定しない。** これは `--prune` を値なしで渡したときに使う値
+/// である。
+///
+/// # なぜ巻き戻し情報と同じ 4320 なのか
+///
+/// 別々の数にできるようにはしていない。本体と巻き戻し情報は**同じ深さまで
+/// 戻るために要る**からである。片方だけ深く持っても、戻れる深さは浅いほうで
+/// 決まる。深いほうに払った分はそのまま無駄になる。
+///
+/// 本体のほうが嵩む点には注意がいる。巻き戻し情報は「そのブロックが使った
+/// 分」だけだが、本体は取引すべてである。満杯のブロック (200 KB) が
+/// 4320 個続けば 864 MB になる。空に近いうちは 1 MB にも満たない。
+///
+/// # 何を手放すのか
+///
+/// この深さより古いブロックを**他のノードへ配れなくなる**。求められたら
+/// `notfound` を返す。名乗りも `SERVICE_FULL_NODE` から `SERVICE_LIMITED`
+/// に変わる (SPEC §14.5)。
+///
+/// 手放すのは配る能力だけで、検証する能力ではない。UTXO セットは丸ごと
+/// 持っているので、**新しいブロックの検証は剪定していないノードと 1 ビットも
+/// 変わらない。** 軽量ノードとはそこが違う。
+pub const SUGGESTED_BLOCK_KEEP: u64 = 4320;
+
+/// ブロック本体を剪定するときに、これより浅い深さは受け付けない。
+///
+/// # なぜ下限が要るのか
+///
+/// 剪定した深さは、そのまま**追従できる再編成の深さの上限**になる。
+/// `rollback` は元のチェーンへ戻すときに本体を読み直す。浅く刈りすぎると、
+/// 日常的に起きる 1〜2 ブロックの入れ替わりで戻れなくなる。
+///
+/// `RECOMMENDED_CONFIRMATIONS` は 10 である。その 14 倍あれば、
+/// 「確定と見なした取引が戻る」場面で本体が無いということは起きない。
+/// 節約したいという理由でここを割る設定には、断るだけの理由がある。
+pub const MIN_BLOCK_KEEP: u64 = 144;
 /// UTXO セット。出力参照 → UTXO の内容。
 const UTXO: TableDefinition<'static, Bytes, Bytes> = TableDefinition::new("utxo");
 /// アクティブチェーン。高さ → ハッシュ。
@@ -112,6 +151,20 @@ const STORE_FORMAT: u32 = 2;
 /// 作られた索引」であり、照会は答えを返してはならない。足りない範囲を
 /// 黙って省いた履歴は、無い履歴より悪い。利用者はそれを信じてしまう。
 const META_INDEX_FROM: &str = "index_from";
+
+/// ブロック本体をどの高さから持っているか。**この鍵が無ければ全部ある。**
+///
+/// 値 0 は「創世から揃っている」であり、鍵が無いのと同じ意味である。
+/// 0 でない値は剪定した跡であり、そこより下を求められたら持っていないと
+/// 答える。
+///
+/// # なぜ記録するのか
+///
+/// 剪定は設定であって状態ではない。`--prune` を外して起動し直しても、
+/// **消したブロックは戻らない。** 設定だけを見て「全部ある」と名乗ると、
+/// 配れないものを配れると言うことになる (SPEC §14.5 の MUST NOT)。
+/// 起きたことは記憶域の側に残す。
+const META_BLOCKS_FROM: &str = "blocks_from";
 
 /// 親から子への線を 1 本張る。**同じ子を二重に入れない。**
 ///
@@ -161,6 +214,29 @@ pub enum StoreError {
     /// 巻き戻し情報を保持していない。
     #[error("the undo information for block {0} is not held")]
     MissingUndo(Hash),
+    /// 剪定して捨てた範囲を求められた。
+    #[error(
+        "block bodies below height {have_from} were pruned away; \
+         restart without --prune and sync again to get them back"
+    )]
+    Pruned {
+        /// 本体を持っている一番低い高さ。
+        have_from: u64,
+    },
+    /// 索引を持ったまま剪定しようとした。
+    #[error(
+        "this store holds a transaction index, which pruning would leave with \
+         holes; pass --drop-index to throw it away first"
+    )]
+    IndexedStoreCannotPrune,
+    /// 剪定の深さが浅すぎる。
+    #[error("keeping only {asked} blocks is too shallow; the least is {least}")]
+    PruneTooShallow {
+        /// 頼まれた深さ。
+        asked: u64,
+        /// 受け付ける一番浅い深さ。
+        least: u64,
+    },
     /// 入出力に失敗した。
     #[error("I/O failed: {0}")]
     Io(String),
@@ -346,6 +422,20 @@ fn erase_index(
 }
 
 /// META から索引の状態を読む。
+/// ブロック本体を持っている一番低い高さ。鍵が無ければ 0 (全部ある)。
+fn blocks_from_in<T: ReadableTable<&'static str, Bytes>>(meta: &T) -> Result<u64, StoreError> {
+    match meta.get(META_BLOCKS_FROM).map_err(db_err)? {
+        Some(guard) => {
+            let bytes: [u8; 8] = guard
+                .value()
+                .try_into()
+                .map_err(|_| StoreError::Db("the pruning record is corrupt".to_string()))?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+        None => Ok(0),
+    }
+}
+
 fn index_from_in<T: ReadableTable<&'static str, Bytes>>(
     meta: &T,
 ) -> Result<Option<u64>, StoreError> {
@@ -419,6 +509,8 @@ pub struct Store {
     path: std::path::PathBuf,
     /// 巻き戻し情報を何ブロック分持っておくか。`None` なら捨てない。
     undo_keep: Option<u64>,
+    /// ブロック本体を何ブロック分持っておくか。`None` なら捨てない。
+    block_keep: Option<u64>,
 }
 
 impl Store {
@@ -442,6 +534,7 @@ impl Store {
             db,
             path,
             undo_keep: None,
+            block_keep: None,
         };
         store.check_format()?;
         store.rebuild_children_if_missing()?;
@@ -544,6 +637,132 @@ impl Store {
     pub fn with_undo_keep(mut self, blocks: Option<u64>) -> Store {
         self.undo_keep = blocks;
         self
+    }
+
+    /// ブロック本体を残す深さを決める。
+    ///
+    /// **既定は `None` で、捨てない。** 値を渡すとその深さより古い本体を
+    /// 落とす。[`MIN_BLOCK_KEEP`] より浅い値は受け付けない。
+    ///
+    /// 勧める値は [`SUGGESTED_BLOCK_KEEP`]。
+    ///
+    /// # 巻き戻し情報も一緒に刈ること
+    ///
+    /// 本体だけ刈って巻き戻し情報を残しても、戻れる深さは変わらない。
+    /// [`with_undo_keep`](Store::with_undo_keep) に同じ値を渡す。
+    /// 呼び出し側で揃えるのは `oag-node` の `--prune` の仕事である。
+    ///
+    /// # 誤り
+    ///
+    /// 浅すぎる値には [`StoreError::PruneTooShallow`] を返す。**黙って
+    /// 深いほうへ丸めない。** 頼んだ深さで刈られていないことに気づけない
+    /// ほうが困る。
+    ///
+    /// 既に取引索引を持っている記憶域には
+    /// [`StoreError::IndexedStoreCannotPrune`] を返す。索引を先に捨てる。
+    pub fn with_block_keep(mut self, blocks: Option<u64>) -> Result<Store, StoreError> {
+        if let Some(keep) = blocks {
+            if keep < MIN_BLOCK_KEEP {
+                return Err(StoreError::PruneTooShallow {
+                    asked: keep,
+                    least: MIN_BLOCK_KEEP,
+                });
+            }
+            // 索引は本体を読んで答える。剪定した範囲にあたる照会は
+            // `Ok(None)` を返し、**呼び出し側はそれを「その取引は存在
+            // しない」と受け取る。** 欠けた履歴は、無い履歴より悪い。
+            //
+            // `build_index` は剪定済みの記憶域で断るが、逆の順序
+            // (索引を作ってから剪定を始める) はここでしか止められない。
+            if self.index_from()?.is_some() {
+                return Err(StoreError::IndexedStoreCannotPrune);
+            }
+        }
+        self.block_keep = blocks;
+        Ok(self)
+    }
+
+    /// ブロック本体を持っている一番低い高さ。剪定していなければ 0。
+    ///
+    /// これは**設定ではなく実績**である。`--prune` を外して起動し直しても、
+    /// 既に捨てたものは戻らないのでこの値は下がらない。
+    pub fn blocks_from(&self) -> Result<u64, StoreError> {
+        let txn = self.db.begin_read().map_err(db_err)?;
+        let meta = txn.open_table(META).map_err(db_err)?;
+        blocks_from_in(&meta)
+    }
+
+    /// 一度でも剪定したことがあるか。
+    pub fn is_pruned(&self) -> Result<bool, StoreError> {
+        Ok(self.blocks_from()? > 0)
+    }
+
+    /// 設定した深さに合うまで、古いブロック本体をまとめて落とす。
+    ///
+    /// 消した件数を返す。[`with_block_keep`](Store::with_block_keep) を
+    /// 呼んでいなければ何もしない。
+    ///
+    /// # なぜ起動時に要るのか
+    ///
+    /// [`connect_block`](Store::connect_block) は 1 ブロック進むごとに
+    /// 1 ブロック分しか落とさない。既に同期済みの記憶域に後から `--prune`
+    /// を付けても、**追いつくのに捨てたい分と同じだけのブロックがかかる。**
+    /// 高さ 10000 で 4320 を残すなら、実際に縮み始めるのは 5680 ブロック
+    /// 先、つまり 4 日後である。それでは設定した意味がない。
+    ///
+    /// # なぜ小分けにするのか
+    ///
+    /// 1 つのトランザクションで全部消すと、鍵の一覧がそのままメモリに載る。
+    /// 高さに比例して伸びるものをメモリに置かない、という §19 の方針に
+    /// 従って区切る。**区切っても危険はない。** 落とすのは古いほうから
+    /// 順であり、途中で止まっても「そこまでは消えた」という状態は
+    /// `blocks_from` と食い違わない。
+    pub fn prune_stale_blocks(&self) -> Result<u64, StoreError> {
+        let Some(keep) = self.block_keep else {
+            return Ok(0);
+        };
+        let Some(height) = self.height()? else {
+            return Ok(0);
+        };
+        // 残す一番低い高さ。ここより下を落とす。ジェネシスは触らない。
+        let Some(floor) = height.checked_sub(keep) else {
+            return Ok(0);
+        };
+        if floor == 0 {
+            return Ok(0);
+        }
+
+        /// 1 回のトランザクションで扱う高さの数。
+        const BATCH: u64 = 10_000;
+
+        let mut removed = 0u64;
+        let mut from = self.blocks_from()?.max(1);
+        while from <= floor {
+            let upto = (from + BATCH).min(floor + 1);
+            let txn = self.db.begin_write().map_err(db_err)?;
+            {
+                let active = txn.open_table(ACTIVE).map_err(db_err)?;
+                let mut blocks = txn.open_table(BLOCKS).map_err(db_err)?;
+                let mut keys = Vec::new();
+                for row in active.range(from..upto).map_err(db_err)? {
+                    let (_, hash) = row.map_err(db_err)?;
+                    keys.push(hash.value().to_vec());
+                }
+                for key in &keys {
+                    if blocks.remove(key.as_slice()).map_err(db_err)?.is_some() {
+                        removed += 1;
+                    }
+                }
+                let mut meta = txn.open_table(META).map_err(db_err)?;
+                if upto > blocks_from_in(&meta)? {
+                    meta.insert(META_BLOCKS_FROM, upto.to_le_bytes().as_slice())
+                        .map_err(db_err)?;
+                }
+            }
+            txn.commit().map_err(db_err)?;
+            from = upto;
+        }
+        Ok(removed)
     }
 
     /// 形式の版数を確かめ、空の記憶域には書き込む。
@@ -854,9 +1073,11 @@ impl Store {
             index_from_in(&meta)?.is_some()
         };
 
+        let mut pruned_to: Option<u64> = None;
         {
             let key = hash.to_bytes();
             let mut undo_table = txn.open_table(UNDO).map_err(db_err)?;
+            let mut blocks_table = txn.open_table(BLOCKS).map_err(db_err)?;
             undo_table
                 .insert(key.as_slice(), undo.encode().as_slice())
                 .map_err(db_err)?;
@@ -875,8 +1096,42 @@ impl Store {
                 }
             }
 
+            // 古くなったブロック本体を落とす。理由は巻き戻し情報と同じで、
+            // 同じトランザクションの中で行う。
+            //
+            // **索引は消さない。** 索引が持つのはヘッダと親子関係であって、
+            // 本体ではない。ヘッダの連なりは剪定しても切らさない
+            // (SPEC §19)。切らすと、自分がどのチェーンに居るのかを
+            // 創世まで辿って確かめられなくなる。
+            //
+            // **ジェネシスは残す。** 費用は 1 ブロック分しかなく、
+            // 「創世だけはどのノードも配れる」ほうが説明が要らない。
+            if let Some(stale) = self.block_keep.and_then(|keep| height.checked_sub(keep)) {
+                if stale > 0 {
+                    if let Some(guard) = active.get(stale).map_err(db_err)? {
+                        let old_key = guard.value().to_vec();
+                        drop(guard);
+                        blocks_table.remove(old_key.as_slice()).map_err(db_err)?;
+                    }
+                    // 実際に消した高さを記録する。**設定ではなく実績を
+                    // 書く。** 次に `--prune` 無しで起動しても、消えたものは
+                    // 戻らない。
+                    pruned_to = Some(stale + 1);
+                }
+            }
+
             let mut meta = txn.open_table(META).map_err(db_err)?;
             meta.insert(META_TIP, key.as_slice()).map_err(db_err)?;
+
+            // **決して下げない。** 深い `--prune` へ変えると `stale` は
+            // 下がるが、既に捨てた範囲は戻らない。低いほうを書くと、
+            // 持っていないブロックを持っていると名乗ることになる。
+            if let Some(from) = pruned_to {
+                if from > blocks_from_in(&meta)? {
+                    meta.insert(META_BLOCKS_FROM, from.to_le_bytes().as_slice())
+                        .map_err(db_err)?;
+                }
+            }
         }
 
         // 索引も同じトランザクションの中で更新する。**別に分けてはならない。**
@@ -986,6 +1241,13 @@ impl Store {
     /// 1 つにまとめておけば、索引は必ず「完全にある」か「まったく無い」かの
     /// どちらかになる。区別のつく状態しか作らない。
     pub fn build_index(&self) -> Result<IndexStats, StoreError> {
+        // 剪定した記憶域では作れない。捨てた本体の取引は索引に入れようが
+        // ない。**ここで断らないと、欠けた索引を完全なものとして返す**
+        // ことになる。上の「完全にあるか、まったく無いか」を守る。
+        let have_from = self.blocks_from()?;
+        if have_from > 0 {
+            return Err(StoreError::Pruned { have_from });
+        }
         let txn = self.db.begin_write().map_err(db_err)?;
         let mut stats = IndexStats::default();
 
@@ -1303,6 +1565,10 @@ impl oag_chain::store::ChainStore for Store {
         Store::block(self, hash)
     }
 
+    fn blocks_from(&self) -> Result<u64, StoreError> {
+        Store::blocks_from(self)
+    }
+
     fn index_entry(&self, hash: &Hash) -> Result<Option<BlockIndexEntry>, StoreError> {
         Store::index_entry(self, hash)
     }
@@ -1406,7 +1672,7 @@ mod tests {
         }
     }
 
-    fn block_at(height: u64, prev: Hash, salt: u64) -> Block {
+    pub(super) fn block_at(height: u64, prev: Hash, salt: u64) -> Block {
         let cb = coinbase(height, salt);
         let merkle_root = merkle::merkle_root(&[cb.txid()]).unwrap();
         Block {
@@ -1423,7 +1689,7 @@ mod tests {
         }
     }
 
-    fn entry_for(block: &Block, work: u128) -> BlockIndexEntry {
+    pub(super) fn entry_for(block: &Block, work: u128) -> BlockIndexEntry {
         BlockIndexEntry {
             hash: block.header.hash(),
             header: block.header,
@@ -2134,7 +2400,7 @@ mod tests {
 
 #[cfg(test)]
 mod storage_shape_tests {
-    use super::tests::{build, TempDb};
+    use super::tests::{block_at, build, entry_for, TempDb};
     use super::*;
 
     // ━━━━━━━━ 巻き戻し情報の剪定 ━━━━━━━━
@@ -2223,6 +2489,233 @@ mod storage_shape_tests {
             }
         }
         assert!(failed, "it rolled back further than the undo it kept");
+    }
+
+    // ━━━━━━━━ ブロック本体の剪定 ━━━━━━━━
+
+    /// 下限を通さずに深さを決める。
+    ///
+    /// [`MIN_BLOCK_KEEP`] は 144 あり、試験で 145 個積むのは待ち時間に
+    /// 見合わない。**下限そのものは
+    /// [`the_floor_on_how_shallow_you_can_prune`] で確かめている。**
+    fn keeping(store: Store, blocks: u64) -> Store {
+        let mut store = store;
+        store.block_keep = Some(blocks);
+        store
+    }
+
+    #[test]
+    fn old_block_bodies_are_dropped() {
+        let tmp = TempDb::new();
+        let store = keeping(Store::open(tmp.db_path()).unwrap(), 5);
+        let blocks = build(&store, 12);
+
+        // 先端から 5 個分は残っている。
+        for block in blocks.iter().rev().take(5) {
+            assert!(
+                store.block(&block.header.hash()).unwrap().is_some(),
+                "the body at height {} was dropped too early",
+                block.header.height
+            );
+        }
+
+        // それより古いものは消えている。ジェネシスを除く。
+        for block in blocks.iter().take(6).skip(1) {
+            assert_eq!(
+                store.block(&block.header.hash()).unwrap(),
+                None,
+                "the body at height {} is still held",
+                block.header.height
+            );
+        }
+    }
+
+    #[test]
+    fn the_genesis_body_is_never_dropped() {
+        // 費用は 1 ブロック分しかない。「創世だけはどのノードも配れる」
+        // ほうが、説明も繋ぎ直しも楽である。
+        let tmp = TempDb::new();
+        let store = keeping(Store::open(tmp.db_path()).unwrap(), 5);
+        let blocks = build(&store, 30);
+        assert!(
+            store.block(&blocks[0].header.hash()).unwrap().is_some(),
+            "the genesis body was pruned"
+        );
+    }
+
+    #[test]
+    fn by_default_no_body_is_dropped() {
+        // **既定の挙動を変えないこと。** 剪定は選んだ人だけのものである。
+        let tmp = TempDb::new();
+        let store = Store::open(tmp.db_path()).unwrap();
+        let blocks = build(&store, 12);
+        for block in &blocks {
+            assert!(
+                store.block(&block.header.hash()).unwrap().is_some(),
+                "the body at height {} was dropped without being asked",
+                block.header.height
+            );
+        }
+        assert_eq!(store.blocks_from().unwrap(), 0);
+        assert!(!store.is_pruned().unwrap());
+    }
+
+    #[test]
+    fn the_floor_on_how_shallow_you_can_prune() {
+        let tmp = TempDb::new();
+        // 浅すぎる値は断る。**黙って深いほうへ丸めない。**
+        assert!(matches!(
+            Store::open(tmp.db_path())
+                .unwrap()
+                .with_block_keep(Some(MIN_BLOCK_KEEP - 1)),
+            Err(StoreError::PruneTooShallow { .. })
+        ));
+        // 下限そのものは通る。
+        assert!(Store::open(tmp.db_path())
+            .unwrap()
+            .with_block_keep(Some(MIN_BLOCK_KEEP))
+            .is_ok());
+        // 剪定しないのはいつでも通る。
+        assert!(Store::open(tmp.db_path())
+            .unwrap()
+            .with_block_keep(None)
+            .is_ok());
+    }
+
+    #[test]
+    fn what_was_pruned_is_remembered_across_a_restart() {
+        // 剪定は設定ではなく実績である。外して開き直しても戻らない。
+        let tmp = TempDb::new();
+        {
+            let store = keeping(Store::open(tmp.db_path()).unwrap(), 5);
+            build(&store, 12);
+            assert_eq!(store.blocks_from().unwrap(), 7);
+        }
+        let plain = Store::open(tmp.db_path()).unwrap();
+        assert_eq!(
+            plain.blocks_from().unwrap(),
+            7,
+            "the store forgot that it had been pruned"
+        );
+        assert!(plain.is_pruned().unwrap());
+    }
+
+    #[test]
+    fn a_deeper_setting_never_lowers_what_we_claim_to_have() {
+        // 深い `--prune` に変えると落とす高さは下がるが、既に捨てた分は
+        // 戻らない。低いほうを書くと、無いものを有ると名乗ることになる。
+        let tmp = TempDb::new();
+        {
+            let store = keeping(Store::open(tmp.db_path()).unwrap(), 5);
+            build(&store, 12);
+            assert_eq!(store.blocks_from().unwrap(), 7);
+        }
+        {
+            let store = keeping(Store::open(tmp.db_path()).unwrap(), 10);
+            let mut prev = store.tip().unwrap().unwrap();
+            for height in 12..15u64 {
+                let block = block_at(height, prev, height);
+                prev = block.header.hash();
+                store
+                    .put_block(&block, &entry_for(&block, u128::from(height) + 1))
+                    .unwrap();
+                store.connect_block(&block).unwrap();
+            }
+            assert_eq!(
+                store.blocks_from().unwrap(),
+                7,
+                "it claimed to have blocks it had already thrown away"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shallow_rollback_still_works_after_pruning() {
+        // 残している深さの中でなら、剪定を入れても従来どおり戻れる。
+        // ここが崩れると、日常の 1 ブロックの入れ替わりで詰まる。
+        let tmp = TempDb::new();
+        let store = keeping(Store::open(tmp.db_path()).unwrap(), 5);
+        let blocks = build(&store, 12);
+        let tip = store.tip().unwrap().unwrap();
+        assert_eq!(tip, blocks[11].header.hash());
+
+        assert_eq!(store.disconnect_tip().unwrap(), tip);
+        assert_eq!(store.tip().unwrap().unwrap(), blocks[10].header.hash());
+        // 戻した先の本体は読める。再接続に要る。
+        assert!(store.block(&blocks[11].header.hash()).unwrap().is_some());
+        store.connect_block(&blocks[11]).unwrap();
+        assert_eq!(store.tip().unwrap().unwrap(), tip);
+    }
+
+    #[test]
+    fn a_later_prune_catches_up_in_one_pass() {
+        // 既に同期済みの記憶域に後から `--prune` を付ける場合。
+        // 1 ブロックずつ落とすのを待っていたら、縮み始めるのは数日先になる。
+        let tmp = TempDb::new();
+        let blocks = {
+            let store = Store::open(tmp.db_path()).unwrap();
+            build(&store, 30)
+        };
+        let store = keeping(Store::open(tmp.db_path()).unwrap(), 5);
+        let removed = store.prune_stale_blocks().unwrap();
+        // 高さ 1..=24 の 24 個。ジェネシスは残る。
+        assert_eq!(removed, 24);
+        assert_eq!(store.blocks_from().unwrap(), 25);
+        assert!(store.block(&blocks[0].header.hash()).unwrap().is_some());
+        assert_eq!(store.block(&blocks[24].header.hash()).unwrap(), None);
+        assert!(store.block(&blocks[25].header.hash()).unwrap().is_some());
+
+        // 二度目は何も残っていない。
+        assert_eq!(store.prune_stale_blocks().unwrap(), 0);
+    }
+
+    #[test]
+    fn catching_up_does_nothing_without_the_setting() {
+        let tmp = TempDb::new();
+        let store = Store::open(tmp.db_path()).unwrap();
+        build(&store, 30);
+        assert_eq!(store.prune_stale_blocks().unwrap(), 0);
+        assert_eq!(store.blocks_from().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_store_that_holds_an_index_refuses_to_start_pruning() {
+        // 逆の順序である。索引を先に作ってから剪定を始めると、`build_index`
+        // の門は通らない。**捨てた範囲の照会は `Ok(None)` になり、呼び出し
+        // 側はそれを「その取引は存在しない」と読む。**
+        let tmp = TempDb::new();
+        {
+            let store = Store::open(tmp.db_path()).unwrap();
+            build(&store, 12);
+            store.build_index().unwrap();
+        }
+
+        assert!(matches!(
+            Store::open(tmp.db_path())
+                .unwrap()
+                .with_block_keep(Some(MIN_BLOCK_KEEP)),
+            Err(StoreError::IndexedStoreCannotPrune)
+        ));
+
+        // 索引を捨てれば通る。`--prune --drop-index` が通る道である。
+        let store = Store::open(tmp.db_path()).unwrap();
+        store.drop_index().unwrap();
+        assert!(store.with_block_keep(Some(MIN_BLOCK_KEEP)).is_ok());
+    }
+
+    #[test]
+    fn the_index_refuses_to_be_built_on_a_pruned_store() {
+        // 捨てた本体の取引は索引に入れようがない。**半分の索引を完全な
+        // ものとして返すくらいなら、作らないほうがよい。**
+        let tmp = TempDb::new();
+        let store = keeping(Store::open(tmp.db_path()).unwrap(), 5);
+        build(&store, 12);
+        assert!(matches!(
+            store.build_index(),
+            Err(StoreError::Pruned { have_from: 7 })
+        ));
+        // 索引は作られていない。「無い」と答えられる状態のままである。
+        assert_eq!(store.index_from().unwrap(), None);
     }
 
     // ━━━━━━━━ ブロックの持ち方 ━━━━━━━━

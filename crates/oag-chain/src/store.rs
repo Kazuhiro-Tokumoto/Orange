@@ -44,6 +44,17 @@ pub trait ChainStore {
     /// ブロック本体。
     fn block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error>;
 
+    /// ブロック本体を持っている一番低い高さ。剪定していなければ 0。
+    ///
+    /// 剪定しない記憶域は既定のままでよい。
+    ///
+    /// **設定ではなく実績である。** 剪定をやめて開き直しても、捨てたものは
+    /// 戻らないのでこの値は下がらない。ここを見て `SERVICE_FULL_NODE` を
+    /// 名乗ってよいかを決める (SPEC §14.5)。
+    fn blocks_from(&self) -> Result<u64, Self::Error> {
+        Ok(0)
+    }
+
     /// インデックスの 1 件。
     fn index_entry(&self, hash: &Hash) -> Result<Option<BlockIndexEntry>, Self::Error>;
 

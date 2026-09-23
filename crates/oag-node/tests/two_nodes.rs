@@ -14,6 +14,7 @@ use oag_consensus::tx::{TxInput, CURRENT_TX_VERSION, SEQUENCE_FINAL};
 use oag_consensus::{Transaction, TxOutput};
 use oag_net::magic::magic_for;
 use oag_net::transport::Listener;
+use oag_node::node::NodeOptions;
 use oag_node::service::{MiningMode, NodeHandle, NodeService};
 use oag_node::{accept_loop, dial};
 use oag_primitives::{Address, Amount, Network, SecretKey};
@@ -65,6 +66,21 @@ fn payout() -> Lock {
 fn start(tag: &str) -> (TempDir, NodeService) {
     let dir = TempDir::new(tag);
     let service = NodeService::start(NETWORK, &dir.0).expect("a node can be started");
+    (dir, service)
+}
+
+/// 剪定するノードを 1 台起こす。
+///
+/// `--prune` と同じく、本体と巻き戻し情報を同じ深さで刈る。
+fn start_pruned(tag: &str, keep: u64) -> (TempDir, NodeService) {
+    let dir = TempDir::new(tag);
+    let options = NodeOptions {
+        undo_keep: Some(keep),
+        block_keep: Some(keep),
+        ..NodeOptions::default()
+    };
+    let service =
+        NodeService::start_with(NETWORK, &dir.0, options).expect("a pruned node can be started");
     (dir, service)
 }
 
@@ -623,5 +639,71 @@ fn a_block_travels_to_a_node_that_is_not_directly_connected() {
 
         assert_same_tip(&a, &c).await;
         assert_same_tip(&b, &c).await;
+    });
+}
+
+/// 剪定するノードは、自分を「フルノード」と名乗らないこと。
+///
+/// 名乗りは相手が繋ぎ先を選ぶための手がかりである。配れないものを配れると
+/// 言うと、同期しようとした相手の枠をひとつ潰す (SPEC §14.5 の MUST NOT)。
+///
+/// **まだ 1 つも捨てていなくても限定と名乗る。** 相手が名乗りを聞くのは
+/// 握手の 1 回だけであり、途中で変わると聞いた話と後の挙動が食い違う。
+#[test]
+fn a_pruning_node_does_not_call_itself_a_full_node() {
+    let (_dir_full, service_full) = start("prune-name-full");
+    let (_dir_pruned, service_pruned) = start_pruned("prune-name-limited", 144);
+
+    assert_eq!(
+        service_full.handle().services(),
+        oag_net::SERVICE_FULL_NODE,
+        "a node that keeps everything should say so"
+    );
+    assert_eq!(
+        service_pruned.handle().services(),
+        oag_net::SERVICE_LIMITED,
+        "a node set to prune called itself a full node"
+    );
+}
+
+/// 剪定するノードも、これまでどおり同期できること。
+///
+/// **剪定で変わるのは配る側だけである。** UTXO セットは丸ごと持っている
+/// ので、受け取ったブロックの検証は剪定していないノードと 1 ビットも
+/// 変わらない。軽量ノードとはそこが違う。
+///
+/// 名乗りを変えた以上、ここが通らなくなる可能性がある。握手で弾かれたり、
+/// 自分が限定であることを理由に相手を選べなくなったりすれば、剪定ノードは
+/// 起動しても永遠に高さ 0 のままになる。
+#[test]
+fn a_pruning_node_still_syncs_from_a_full_node() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (_dir_a, service_a) = start("prune-sync-src");
+    let (_dir_b, service_b) = start_pruned("prune-sync-dst", 144);
+    let a = service_a.handle();
+    let b = service_b.handle();
+
+    runtime.block_on(async {
+        a.start_mining(payout(), Some(5), MiningMode::light())
+            .await
+            .unwrap();
+        wait_for_mining(&a, 5).await;
+
+        let addr = listen(a.clone()).await;
+        tokio::spawn(dial(b.clone(), addr));
+
+        wait_for_height(&b, 5, "a pruning node catching up").await;
+        assert_same_tip(&a, &b).await;
+
+        // 深さ 144 に届いていないので、まだ何も捨てていない。
+        assert_eq!(
+            b.status().await.unwrap().blocks_from,
+            0,
+            "it threw blocks away before it was deep enough to"
+        );
     });
 }

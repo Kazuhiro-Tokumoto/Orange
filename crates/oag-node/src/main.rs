@@ -159,8 +159,36 @@ enum Command {
         /// Passing it without a number keeps 4320 blocks, three days at one minute
         /// each.
         #[arg(long, value_name = "blocks", num_args = 0..=1,
-              default_missing_value = "4320")]
+              default_missing_value = "4320", conflicts_with = "prune")]
         prune_undo: Option<u64>,
+        /// Keep only this many recent blocks on disk. Off by default.
+        ///
+        /// A full node keeps every block it has ever seen so that it can hand them
+        /// to somebody who is syncing. This throws the old ones away once they are
+        /// this far behind the tip, along with the rollback data for them, and keeps
+        /// the genesis block. It is the same thing `--prune-undo` does, applied to
+        /// the block bodies as well, so the two cannot be combined.
+        ///
+        /// **Verification does not change.** The UTXO set is still complete, so
+        /// every new block is checked exactly as it is on a node that keeps
+        /// everything. This is not a light client; nothing is taken on trust.
+        ///
+        /// **What you give up is serving and depth.** Blocks older than this are
+        /// answered with `notfound`, so this node stops being somewhere others can
+        /// sync from, and it announces itself as a limited node rather than a full
+        /// one (`docs/SPEC.md` §14.5). Past this depth it can also no longer follow
+        /// a reorganisation on its own; recovering means syncing again.
+        ///
+        /// It cannot be combined with `--index`, and so not with `--explorer` or
+        /// `--wallet` either: those read transactions out of blocks this would have
+        /// thrown away.
+        ///
+        /// Passing it without a number keeps 4320 blocks, three days at one minute
+        /// each. The least it accepts is 144.
+        #[arg(long, value_name = "blocks", num_args = 0..=1,
+              default_missing_value = "4320",
+              conflicts_with_all = ["index", "explorer", "wallet"])]
+        prune: Option<u64>,
         /// Skip checking signatures at and below this block. `0` turns it off.
         ///
         /// Most of an initial sync is spent re-checking every signature from the
@@ -269,6 +297,7 @@ fn run() -> Result<(), String> {
             tls_cert,
             tls_key,
             prune_undo,
+            prune,
             assumevalid,
             exit_after,
         } => {
@@ -293,9 +322,13 @@ fn run() -> Result<(), String> {
                 ),
             };
 
+            // `--prune` は本体と巻き戻し情報の両方を同じ深さで刈る。
+            // 片方だけ深く持っても、戻れる深さは浅いほうで決まる。
             let options = NodeOptions {
                 assume_valid,
-                undo_keep: prune_undo,
+                undo_keep: prune_undo.or(prune),
+                block_keep: prune,
+                drop_index,
             };
             let service = NodeService::start_with(network, &common.datadir, options)
                 .map_err(|e| e.to_string())?;
@@ -325,6 +358,16 @@ fn run() -> Result<(), String> {
                     );
                 }
 
+                // 同じく黙って効かせてはならない。こちらは**他のノードへの
+                // 配り方が変わる**ので、なおさら言う。
+                if let Some(keep) = prune {
+                    oag_node::log_warn!(
+                        "keeping only the most recent {keep} blocks; older ones are \
+                         answered with notfound and this node announces itself as \
+                         limited rather than full"
+                    );
+                }
+
                 if let Some(hash) = assume_valid.resolve(network) {
                     oag_node::log_warn!(
                         "taking signatures at and below {hash} as settled; \
@@ -344,8 +387,10 @@ fn run() -> Result<(), String> {
                     tokio::spawn(accept_loop(handle.clone(), listener));
                 }
 
+                // 捨てるのは記憶域を開いたところで済んでいる
+                // (`NodeOptions::drop_index`)。剪定の可否を見る前に
+                // 行う必要があるためである。
                 if drop_index {
-                    handle.drop_index().await?;
                     println!("dropped the index");
                 }
 
@@ -555,6 +600,10 @@ fn print_status_lines(s: &node::NodeStatus) {
     println!("  next difficulty  {}", s.next_difficulty);
     println!("  UTXO count       {}", s.utxo_count);
     println!("  blocks known     {}", s.indexed_blocks);
+    // 剪定していないノードでは黙っている。全員に関係する行ではない。
+    if s.blocks_from > 0 {
+        println!("  bodies from      {} (pruned below)", s.blocks_from);
+    }
     println!("  mempool         {}", s.mempool_len);
     println!("  peers known      {}", s.known_addresses);
 }

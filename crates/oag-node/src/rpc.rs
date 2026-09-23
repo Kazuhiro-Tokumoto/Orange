@@ -7,7 +7,7 @@
 //!
 //! | 名前 | 引数 | 返すもの |
 //! | --- | --- | --- |
-//! | `getinfo` | なし | ネットワーク・高さ・先端・難易度など |
+//! | `getinfo` | なし | ネットワーク・高さ・先端・難易度・剪定の有無など |
 //! | `getblockcount` | なし | アクティブチェーンの高さ |
 //! | `getbestblockhash` | なし | 先端のブロックハッシュ |
 //! | `getblockhash` | `[高さ]` | その高さのブロックハッシュ |
@@ -209,6 +209,10 @@ async fn get_info(handle: &NodeHandle) -> Result<Value, RpcError> {
         "indexedblocks": status.indexed_blocks,
         "mempoolsize": status.mempool_len,
         "knownaddresses": status.known_addresses,
+        // 剪定していなければ 0 で、「創世から全部ある」を意味する。
+        // 0 でなければ、それより下のブロックは配れない (SPEC §14.5)。
+        "blocksfrom": status.blocks_from,
+        "pruned": status.blocks_from > 0,
     }))
 }
 
