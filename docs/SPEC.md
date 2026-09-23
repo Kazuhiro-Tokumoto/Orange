@@ -2051,8 +2051,8 @@ txid を「消えた」と知らせる手立ては無い。** 各ノードが自
 
 | ネットワーク | ホスト名 |
 | --- | --- |
-| mainnet | `seed.manh2309.org` |
-| testnet | `testnet-seed.manh2309.org` |
+| mainnet | `seed.oagcoin.org` |
+| testnet | `testnet-seed.oagcoin.org` |
 | regtest | なし |
 
 ホスト名を引くと、稼働中のノードの IP が A / AAAA レコードで返る。

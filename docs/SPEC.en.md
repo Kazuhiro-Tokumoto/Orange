@@ -2133,8 +2133,8 @@ set while skipping an unvalidated block.
 
 | Network | Hostname |
 | --- | --- |
-| mainnet | `seed.manh2309.org` |
-| testnet | `testnet-seed.manh2309.org` |
+| mainnet | `seed.oagcoin.org` |
+| testnet | `testnet-seed.oagcoin.org` |
 | regtest | none |
 
 Resolving the hostname returns the IPs of running nodes in A / AAAA records. The

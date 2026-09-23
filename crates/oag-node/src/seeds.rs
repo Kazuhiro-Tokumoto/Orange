@@ -32,14 +32,14 @@ use oag_primitives::Network;
 use std::net::SocketAddr;
 
 /// mainnet のシード。
-pub const MAINNET_SEEDS: &[&str] = &["seed.manh2309.org"];
+pub const MAINNET_SEEDS: &[&str] = &["seed.oagcoin.org"];
 
 /// testnet のシード。
 ///
 /// mainnet と分ける。同じホスト名にすると、testnet のノードが mainnet の
 /// ノードに繋ぎに行く。マジックバイトで弾かれるので実害は無いが、
 /// 無駄な接続を撒くことになる。
-pub const TESTNET_SEEDS: &[&str] = &["testnet-seed.manh2309.org"];
+pub const TESTNET_SEEDS: &[&str] = &["testnet-seed.oagcoin.org"];
 
 /// そのネットワークのシードのホスト名。
 pub fn seeds_for(network: Network) -> &'static [&'static str] {

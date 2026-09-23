@@ -265,7 +265,7 @@ keeps just the trouble in its own file.
 ### Connecting to the public network
 
 On mainnet and testnet, a node finds peers by itself unless you name them. It
-queries the DNS seed (`seed.manh2309.org`) only when its address book is empty;
+queries the DNS seed (`seed.oagcoin.org`) only when its address book is empty;
 after that, nodes tell each other about addresses. It keeps 8 outbound
 connections.
 
