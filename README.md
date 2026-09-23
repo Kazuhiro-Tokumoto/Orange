@@ -60,6 +60,10 @@ numbering is identical, so "§10.2" points to the same rule in both. **The
 Japanese remains normative** — if the two disagree, that is a bug in the
 translation, and reporting it is welcome.
 
+For what the commands do rather than why, see
+[`docs/COMMANDS.md`](docs/COMMANDS.md): every `oag-node` and `oag-wallet`
+subcommand and flag on one page, plus the RPC methods and the port numbers.
+
 ## Progress
 
 | Phase | Item | Status |

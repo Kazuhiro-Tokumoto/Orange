@@ -1,0 +1,193 @@
+name: Release
+
+# タグを打つと走る。`v` から始まるものだけを見る。
+#
+# **ここで作るのは「落として叩けるもの」である。** 出来合いのものが無いと、
+# 試してみようとした人は Rust の導入と 10 分の組み立てを先に通される。
+# そこで大半が閉じる。入口の敷居はここで決まる。
+on:
+  push:
+    tags: ["v*"]
+  # 手で試せるようにしておく。タグを打つ前に通るか見たい。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "付ける名前 (例 v0.1.0)。空なら下書きのまま置く"
+        required: false
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # **1 つこけても他は出す。** 全部揃わないと何も出ない作りにすると、
+      # 一番人が多い環境の分まで道連れになる。
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          # ラズパイと ARM の VPS 向け。**シードが実際にラズパイである。**
+          - label: linux-aarch64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - label: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - label: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+          - label: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ツールチェーンは rust-toolchain.toml で固定されている。
+      - name: Rust ツールチェーンを用意する
+        run: rustup show && cargo --version
+
+      # RandomX は C++ で書かれており、randomx-rs が cmake で建てる。
+      # ノードは `randomx` feature を常に有効にしているため、ここは
+      # 任意ではない。GitHub のランナーには既に入っているが、入って
+      # いない機械で拾えるよう名前を出しておく。
+      - name: cmake があることを確かめる
+        run: cmake --version
+
+      - name: キャッシュ
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: 組み立てる
+        run: cargo build --release --locked -p oag-node -p oag-wallet
+
+      # 出来たものが動くことを確かめてから配る。**動かないものを配るのが
+      # 一番悪い。** 落とした人はビルドし直す道を持っていない。
+      - name: 動くことを確かめる (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          ./target/release/oag-node --version
+          ./target/release/oag-wallet --version
+          # regtest で鍵を 1 つ作る。RandomX の初期化までは通らないが、
+          # 署名まわりが繋がっていることはここで分かる。
+          ./target/release/oag-node keygen --network regtest > /dev/null
+          echo "動いた"
+
+      - name: 動くことを確かめる (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          .\target\release\oag-node.exe --version
+          .\target\release\oag-wallet.exe --version
+          .\target\release\oag-node.exe keygen --network regtest | Out-Null
+          echo "動いた"
+
+      - name: まとめる (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          dir="orange-${{ matrix.label }}"
+          mkdir "$dir"
+          cp target/release/oag-node target/release/oag-wallet "$dir"/
+          cp README.md LICENSE "$dir"/ 2>/dev/null || cp README.md "$dir"/
+          cp docs/COMMANDS.md "$dir"/ 2>/dev/null || true
+          tar czf "$dir.tar.gz" "$dir"
+          # 落としたものが本物か確かめられるようにする。
+          shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
+
+      - name: まとめる (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "orange-${{ matrix.label }}"
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item target\release\oag-node.exe, target\release\oag-wallet.exe $dir
+          Copy-Item README.md $dir
+          if (Test-Path LICENSE) { Copy-Item LICENSE $dir }
+          if (Test-Path docs\COMMANDS.md) { Copy-Item docs\COMMANDS.md $dir }
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower() + "  $dir.zip" |
+            Out-File -Encoding ascii "$dir.zip.sha256"
+
+      - name: 置いておく
+        uses: actions/upload-artifact@v4
+        with:
+          name: orange-${{ matrix.label }}
+          path: |
+            orange-${{ matrix.label }}.tar.gz
+            orange-${{ matrix.label }}.tar.gz.sha256
+            orange-${{ matrix.label }}.zip
+            orange-${{ matrix.label }}.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    name: リリースに載せる
+    needs: build
+    runs-on: ubuntu-latest
+    # 1 つこけても、出来たものは配る。落とせる環境が増えるほうが良い。
+    if: always() && needs.build.result != 'cancelled'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 集める
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 並べる
+        run: ls -la dist
+
+      # **下書きで出す。** 中身を見てから公開の判断をしたい。
+      # 自動で公開まで進めると、こけた環境の分が欠けたまま世に出る。
+      - name: リリースを作る (下書き)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          files: dist/*
+          body: |
+            ## 入れ方
+
+            自分の環境のものを落として、展開して、`oag-node` を叩くだけです。
+            Rust を入れる必要はありません。
+
+            | 環境 | ファイル |
+            | --- | --- |
+            | Windows | `orange-windows-x86_64.zip` |
+            | macOS (Apple Silicon) | `orange-macos-aarch64.tar.gz` |
+            | macOS (Intel) | `orange-macos-x86_64.tar.gz` |
+            | Linux | `orange-linux-x86_64.tar.gz` |
+            | ラズパイ / ARM | `orange-linux-aarch64.tar.gz` |
+
+            ### 動かす
+
+            ```
+            oag-node run --datadir ./orange-data
+            ```
+
+            繋ぎ先は自動で探します。設定は要りません。
+
+            ### 落としたものを確かめる
+
+            ```
+            sha256sum -c orange-linux-x86_64.tar.gz.sha256
+            ```
+
+            ### コマンド一覧
+
+            同梱の `COMMANDS.md`、または
+            [docs/COMMANDS.md](https://github.com/Kazuhiro-Tokumoto/Orange/blob/main/docs/COMMANDS.md)。
