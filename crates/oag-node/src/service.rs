@@ -39,6 +39,7 @@ use oag_net::sync::{BlockDownload, PeerId, TxRequests};
 use oag_pow::randomx::{RandomXMiner, RandomXVerifier};
 use oag_primitives::{Hash, Network};
 use oag_store::{BlockSummary, IndexStats, TxLocation};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -381,6 +382,43 @@ pub struct TxRecord {
     /// `OutPoint` しか持たず、指している出力は UTXO セットから消えて
     /// いるためである。コインベースでは `None` が並ぶ。
     pub spent: Vec<Option<TxOutput>>,
+}
+
+/// ハッシュレートを測る窓の長さ。
+///
+/// # なぜ窓で測るのか
+///
+/// 通算平均にすると、**起動直後の遅い時間がいつまでも残る。** 立ち上がりは
+/// ピアとの接続・ヘッダ同期・ブロック検証が同じコアを使うので、本来の速さは
+/// 出ない。その数分がずっと平均を押し下げ続ける。
+///
+/// # なぜ 60 秒なのか
+///
+/// 目標ブロック間隔と同じにしてある。これより短くすると、標本
+/// (ブロックを見つけた時点) が窓に 1 つも入らないことが増える。
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+/// 標本の列から、窓ぶんのハッシュレートを出す。
+///
+/// `attempts` を新しい標本として足し、窓から外れた古いものを落としてから、
+/// 窓の入口と今との間で割る。測れなければ `None`。
+///
+/// **`rate_suffix` と試験はどちらもここを通る。** 計算を 2 か所に書くと、
+/// 試験が通ったまま表示だけ間違うことが起こりうる。
+fn window_rate(samples: &mut VecDeque<(Instant, u64)>, now: Instant, attempts: u64) -> Option<f64> {
+    samples.push_back((now, attempts));
+    // 窓から外れた標本を落とす。**窓の入口より 1 つ古いものは残す。**
+    // 残さないと、標本が疎なときに窓が潰れて何も測れなくなる。
+    while samples.len() > 2 && now.duration_since(samples[1].0) > RATE_WINDOW {
+        samples.pop_front();
+    }
+    match samples.front() {
+        Some(&(at, base)) if at < now && attempts > base => {
+            let seconds = now.duration_since(at).as_secs_f64();
+            (seconds > 0.0).then(|| (attempts - base) as f64 / seconds)
+        }
+        _ => None,
+    }
 }
 
 /// 非同期側から専用スレッドを使うための取っ手。
@@ -784,6 +822,8 @@ struct Service {
     /// 逆算すると振れが大きすぎて比較にならない** (難易度 1,000 で
     /// 5 ブロックなら 1 標準偏差が 45 % ある)。試行回数を直接数える。
     attempts_base: u64,
+    /// ハッシュレートを出すための標本。(時刻, その時点の累計試行数)。
+    rate_samples: VecDeque<(Instant, u64)>,
     /// 数え始めた時刻。**採掘器が建ってから**である。
     mining_since: Option<Instant>,
     /// 掘った数がここに達したら止める。
@@ -875,6 +915,7 @@ impl NodeService {
                     mined: 0,
                     own_addresses: Vec::new(),
                     attempts_base: 0,
+                    rate_samples: VecDeque::new(),
                     mining_since: None,
                     mine_until: None,
                     pool: None,
@@ -1147,20 +1188,44 @@ impl Service {
             .saturating_add(self.pool.as_ref().map_or(0, MiningPool::attempts))
     }
 
-    /// 「  12,345 回、40 H/s」のような後置き。まだ数えていなければ空。
-    fn rate_suffix(&self) -> String {
+    /// 「  12,345 attempts, 40 H/s」のような後置き。まだ数えていなければ空。
+    ///
+    /// # なぜ通算平均ではないのか
+    ///
+    /// 通算平均は**起動直後の遅い時間をいつまでも引きずる。** 立ち上がりは
+    /// ピアとの接続・ヘッダ同期・ブロック検証が同じコアを奪うので、本来の
+    /// 何分の 1 かしか出ない。実測では、通算 119 H/s と出ている機械の
+    /// いまの速さが 128〜133 H/s だった。**自分の機械を過小評価したまま
+    /// になる。**
+    ///
+    /// そこで直近 [`RATE_WINDOW`] 分だけを見る。ここが呼ばれるのは
+    /// ブロックを見つけたときだけなので、標本は疎である。窓に 1 つしか
+    /// 入らなければ、実質「前に見つけてから今まで」の速さになる。
+    /// **知りたいのはそちらである。**
+    ///
+    /// 試した回数のほうは通算で出す。こちらは累計に意味がある。
+    fn rate_suffix(&mut self) -> String {
         let Some(started) = self.mining_since else {
             return String::new();
         };
-        let seconds = started.elapsed().as_secs_f64();
         let attempts = self.attempts();
-        if seconds <= 0.0 || attempts == 0 {
+        if attempts == 0 {
             return String::new();
         }
-        format!(
-            "  ({attempts} attempts, {:.0} H/s)",
-            attempts as f64 / seconds
-        )
+
+        let now = Instant::now();
+        let rate = match window_rate(&mut self.rate_samples, now, attempts) {
+            Some(rate) => rate,
+            // 標本がまだ 1 つ。立ち上がりなので通算で出すしかない。
+            None => {
+                let seconds = started.elapsed().as_secs_f64();
+                if seconds <= 0.0 {
+                    return format!("  ({attempts} attempts)");
+                }
+                attempts as f64 / seconds
+            }
+        };
+        format!("  ({attempts} attempts, {rate:.0} H/s)")
     }
 
     fn stop_mining(&mut self) {
@@ -1263,6 +1328,7 @@ impl Service {
                 // ([`Service::ensure_pool`])。
                 self.attempts_base = 0;
                 self.mining_since = None;
+                self.rate_samples.clear();
                 if self.mining.is_none() {
                     self.retire_pool();
                 }
@@ -1736,6 +1802,117 @@ mod tests {
     fn the_mode_carries_over_when_the_thread_count_changes() {
         assert!(MiningMode::fast().with_threads(8).fast);
         assert!(!MiningMode::light().with_threads(8).fast);
+    }
+
+    // ━━━━━━━━ ハッシュレートの窓 ━━━━━━━━
+
+    /// 表示が通るのと**同じ関数**を呼ぶ。別に書き写すと、試験が通ったまま
+    /// 表示だけ間違うことが起こりうる。
+    use super::window_rate as windowed;
+
+    #[test]
+    fn the_first_sample_cannot_measure_a_window_yet() {
+        // 立ち上がりでは通算に落ちるしかない。
+        let mut samples = VecDeque::new();
+        let t0 = Instant::now();
+        assert_eq!(windowed(&mut samples, t0, 100), None);
+    }
+
+    #[test]
+    fn the_rate_comes_from_the_gap_not_the_lifetime() {
+        // **これが直したかったことである。** 立ち上がりが遅くても、
+        // いまの速さはいまの速さとして出る。
+        let mut samples = VecDeque::new();
+        let t0 = Instant::now();
+        // 最初の 100 秒で 1,000 回 (10 H/s)。同期でコアを取られている。
+        assert_eq!(windowed(&mut samples, t0, 1_000), None);
+        // 次の 50 秒で 5,000 回 (100 H/s)。
+        let rate = windowed(&mut samples, t0 + Duration::from_secs(50), 6_000).unwrap();
+        assert!(
+            (rate - 100.0).abs() < 1.0,
+            "the window measured {rate} H/s, not the recent 100"
+        );
+        // 通算なら (6000 / 150) = 40 H/s にしかならない。
+        assert!(rate > 40.0, "it fell back to the lifetime average");
+    }
+
+    #[test]
+    fn samples_outside_the_window_are_dropped() {
+        let mut samples = VecDeque::new();
+        let t0 = Instant::now();
+        windowed(&mut samples, t0, 0);
+        windowed(&mut samples, t0 + Duration::from_secs(30), 3_000);
+        windowed(&mut samples, t0 + Duration::from_secs(60), 6_000);
+        // 窓 (60 秒) に入らない古い標本は落ちる。
+        windowed(&mut samples, t0 + Duration::from_secs(200), 20_000);
+        assert!(
+            samples.len() <= 3,
+            "old samples piled up: {} kept",
+            samples.len()
+        );
+        assert!(
+            samples.front().unwrap().0 >= t0 + Duration::from_secs(30),
+            "a sample far outside the window was kept"
+        );
+    }
+
+    #[test]
+    fn a_sparse_sample_still_measures_something() {
+        // **標本はブロックを見つけたときにしか増えない。** 窓より間隔が
+        // 空いたら、実質「前に見つけてから今まで」の速さになる。
+        // 窓が潰れて何も測れない、にはならないこと。
+        let mut samples = VecDeque::new();
+        let t0 = Instant::now();
+        windowed(&mut samples, t0, 0);
+        let rate = windowed(&mut samples, t0 + Duration::from_secs(300), 30_000).unwrap();
+        assert!(
+            (rate - 100.0).abs() < 1.0,
+            "a sparse pair measured {rate} H/s"
+        );
+    }
+
+    #[test]
+    fn the_real_log_that_read_119_was_really_faster() {
+        // 実際の採掘ログから起こした。**表示は 119 H/s だったが、その
+        // ときの機械は 128 H/s 出していた。** 立ち上がりの 178 秒
+        // (2,495 回, 約 16 H/s) が通算平均をずっと押し下げていた。
+        let mut samples = VecDeque::new();
+        let t0 = Instant::now();
+
+        // 立ち上がり。2 コアを同期と検証に取られている。
+        windowed(&mut samples, t0, 2_495);
+        // そこから 90 秒で 11,520 回。
+        let at = t0 + Duration::from_secs(90);
+        let rate = windowed(&mut samples, at, 2_495 + 11_520).unwrap();
+
+        assert!(
+            (128.0..=129.0).contains(&rate),
+            "the window read {rate} H/s; the log's own numbers say 128"
+        );
+
+        // 同じ時点の通算平均。**これが表示されていた値である。**
+        let lifetime = (2_495 + 11_520) as f64 / (178.0 + 90.0);
+        assert!(
+            lifetime < 60.0,
+            "the premise differs: the lifetime average was {lifetime}"
+        );
+        assert!(
+            rate > lifetime * 2.0,
+            "the window should be well above the lifetime average here"
+        );
+    }
+
+    #[test]
+    fn a_stalled_counter_reads_as_no_measurement() {
+        // 試行数が 1 つも増えていないなら、速さは出さない。0 と言うより
+        // 黙るほうがよい。
+        let mut samples = VecDeque::new();
+        let t0 = Instant::now();
+        windowed(&mut samples, t0, 500);
+        assert_eq!(
+            windowed(&mut samples, t0 + Duration::from_secs(10), 500),
+            None
+        );
     }
 
     // ━━━━━━━━ 名乗り ━━━━━━━━
