@@ -136,6 +136,7 @@ const GATE = [
   ["tab-open", "pane-open"],
   ["tab-new", "pane-new"],
   ["tab-restore", "pane-restore"],
+  ["tab-verify", "pane-verify"],
 ];
 
 function gateReady() {
@@ -278,6 +279,7 @@ const PANES = [
   ["tab-recv", "pane-recv"],
   ["tab-send", "pane-send"],
   ["tab-coins", "pane-coins"],
+  ["tab-sign", "pane-sign"],
 ];
 
 async function enterWallet(addresses) {
@@ -441,6 +443,51 @@ async function boot() {
   gateReady();
 }
 
+// ======== signing a message ========
+
+// The message is signed as the UTF-8 bytes of exactly what is in the box.
+// **Nothing is trimmed and no newline is added**, so that the CLI's
+// `--message` and this agree byte for byte.
+function doSign() {
+  const message = $("sign-msg").value;
+  show("sign-copy-row", false);
+  $("sign-sig").textContent = "";
+  if (!message) return say("sign-out", "there is nothing to sign", true);
+
+  // One look before it happens. The signature cannot move coins, but it can
+  // be shown to others as proof, so it should not leave without being read.
+  const shown = message.length > 300 ? `${message.slice(0, 300)}…` : message;
+  if (!confirm(`Sign this?\n\n${shown}\n\nAnyone can then show that this address signed it.`)) return;
+
+  try {
+    const out = call({ cmd: "sign_message", message });
+    say("sign-out", `${out.address} signed ${out.bytes} bytes`);
+    $("sign-sig").textContent = out.signature;
+    show("sign-copy-row", true);
+  } catch (e) {
+    say("sign-out", e.message, true);
+  }
+}
+
+// Verification needs no wallet, so this runs whether or not one is open.
+function doVerify() {
+  const address = $("ver-addr").value.trim();
+  const signature = $("ver-sig").value.trim();
+  const message = $("ver-msg").value;
+  try {
+    const out = call({ cmd: "verify_message", address, signature, message });
+    say("ver-msg-out", `ok — ${out.address} signed these ${out.bytes} bytes on ${out.network}`);
+    $("ver-msg-out").className = "ok";
+  } catch (e) {
+    // The usual reason is that the message changed on its way here.
+    // **It is not repaired and retried** — what was signed is what is here.
+    let hint = "";
+    if (message.includes("\r\n")) hint = " (the message has CRLF line endings; a copy through Windows or a chat client may have rewritten them)";
+    else if (message.endsWith("\n")) hint = " (the message ends with a newline; check whether it should)";
+    say("ver-msg-out", e.message + hint, true);
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   for (const [tab] of GATE) $(tab).onclick = () => tabs(GATE, tab);
   for (const [tab] of PANES) $(tab).onclick = () => tabs(PANES, tab);
@@ -450,6 +497,9 @@ document.addEventListener("DOMContentLoaded", () => {
   $("do-restore").onclick = doRestore;
   $("do-send").onclick = doSend;
   $("do-sweep").onclick = doSweep;
+  $("do-sign").onclick = doSign;
+  $("do-verify").onclick = doVerify;
+  $("do-copysig").onclick = () => navigator.clipboard.writeText($("sign-sig").textContent);
   $("do-refresh").onclick = () => refresh();
   $("do-newaddr").onclick = doNewAddress;
   $("do-lock").onclick = doLock;

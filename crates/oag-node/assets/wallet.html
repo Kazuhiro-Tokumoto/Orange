@@ -64,6 +64,7 @@ footer{padding:20px 16px;color:var(--dim);font-size:12px;text-align:center;borde
     <button id="tab-open" role="tab" aria-selected="true">Open</button>
     <button id="tab-new" role="tab" aria-selected="false">Create</button>
     <button id="tab-restore" role="tab" aria-selected="false">Restore from phrase</button>
+    <button id="tab-verify" role="tab" aria-selected="false">Verify</button>
   </div>
 
   <p class="note" style="margin:-4px 0 14px">
@@ -124,6 +125,26 @@ footer{padding:20px 16px;color:var(--dim);font-size:12px;text-align:center;borde
       After restoring, the chain is queried to find how far the wallet had been used.
     </p>
   </div>
+  <div id="pane-verify" class="card hidden">
+    <p class="note" style="margin-top:0">
+      Check that whoever holds an address really signed a message.
+      <b>No wallet is needed for this</b> — paste the three things below.
+    </p>
+    <label for="ver-addr">Address</label>
+    <input id="ver-addr" autocomplete="off" spellcheck="false" placeholder="oag1…">
+    <label for="ver-msg">Message</label>
+    <textarea id="ver-msg" autocomplete="off" spellcheck="false" placeholder="exactly as it was signed"></textarea>
+    <label for="ver-sig">Signature</label>
+    <textarea id="ver-sig" autocomplete="off" spellcheck="false" placeholder="128 hex characters"></textarea>
+    <div class="row" style="margin-top:14px"><button id="do-verify" class="primary">Check</button></div>
+    <p id="ver-msg-out" class="note"></p>
+    <p class="note">
+      A match says the key is held — nothing about when it was signed, and
+      nothing about the balance. If you are checking who someone is,
+      <b>you should be the one choosing the message</b>, with something
+      unguessable in it.
+    </p>
+  </div>
   <p id="gate-msg" class="bad"></p>
 </section>
 
@@ -159,6 +180,7 @@ footer{padding:20px 16px;color:var(--dim);font-size:12px;text-align:center;borde
     <button id="tab-recv" role="tab" aria-selected="true">Receive</button>
     <button id="tab-send" role="tab" aria-selected="false">Send</button>
     <button id="tab-coins" role="tab" aria-selected="false">Unspent outputs</button>
+    <button id="tab-sign" role="tab" aria-selected="false">Sign</button>
   </div>
 
   <div id="pane-recv" class="card">
@@ -190,6 +212,21 @@ footer{padding:20px 16px;color:var(--dim);font-size:12px;text-align:center;borde
       <button id="do-refresh">Reload</button>
     </div>
     <p id="sweep-msg" class="note"></p>
+  </div>
+
+  <div id="pane-sign" class="card hidden">
+    <p class="note" style="margin-top:0">
+      Sign a message to show you hold this address. <b>This moves no coins</b>,
+      and the signature cannot stand in for a transaction.
+    </p>
+    <label for="sign-msg">Message</label>
+    <textarea id="sign-msg" autocomplete="off" spellcheck="false" placeholder="signed exactly as typed, with no trailing newline"></textarea>
+    <div class="row" style="margin-top:14px"><button id="do-sign" class="primary">Sign</button></div>
+    <p id="sign-out" class="note"></p>
+    <p id="sign-sig" class="mono"></p>
+    <div class="row hidden" id="sign-copy-row">
+      <button id="do-copysig">Copy the signature</button>
+    </div>
   </div>
 
   <div class="row" style="margin-top:18px">

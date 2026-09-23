@@ -41,6 +41,7 @@ use oag_consensus::tx::{OutPoint, TxOutput};
 use oag_primitives::{Address, Amount, Hash, Network};
 use oag_wallet::build::{build, consolidate, sign, Coin, Consolidate, Draft, Spend};
 use oag_wallet::keystore::{Keystore, NONCE_LEN, SALT_LEN};
+use oag_wallet::message;
 use oag_wallet::Mnemonic;
 use serde_json::{json, Value};
 
@@ -138,6 +139,8 @@ fn dispatch(text: &str) -> Result<Value, String> {
         "phrase" => cmd_phrase(),
         "pay" => cmd_pay(&request),
         "sweep" => cmd_sweep(&request),
+        "sign_message" => cmd_sign_message(&request),
+        "verify_message" => cmd_verify_message(&request),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -309,6 +312,57 @@ fn cmd_sweep(request: &Value) -> Result<Value, String> {
 }
 
 /// 署名して、画面に出すための数字を添える。
+/// メッセージに署名する。
+///
+/// **これは送金ではない。** 返るのは署名だけで、チェーンには何も起きない。
+///
+/// 署名対象は取引の sighash とタグが分かれているので (`oag_wallet::message`)、
+/// ここで作った署名が硬貨を動かすことはない。**それでも「このアドレスの
+/// 持ち主である」という主張だけは偽造に使えるので**、何に署名するのかは
+/// 呼んだ側が利用者に見せること。
+fn cmd_sign_message(request: &Value) -> Result<Value, String> {
+    // **UTF-8 のバイト列そのものに署名する。** CLI の `--message` と同じ
+    // 扱いであり、末尾に改行を足さない。片方だけ整形したら噛み合わない。
+    let text = str_field(request, "message")?;
+    with_open(|store| {
+        let address = match request.get("address").and_then(Value::as_str) {
+            Some(text) => Address::decode_on(store.network(), text)
+                .map_err(|e| format!("the address is invalid: {e}"))?,
+            None => store
+                .default_address()
+                .map_err(|e| format!("cannot look up the address: {e}"))?,
+        };
+        let key = store
+            .key_for(&Lock::from_address(&address))
+            .ok_or("this wallet holds no key for that address")?;
+        let signature = message::sign(&key, text.as_bytes());
+        Ok(json!({
+            "address": address.encode(),
+            "signature": message::encode_signature(&signature),
+            "bytes": text.len(),
+        }))
+    })
+}
+
+/// 署名されたメッセージを確かめる。
+///
+/// **財布を開いている必要がない。** アドレスが公開鍵を含んでいるので、
+/// 確かめる側に要るのはアドレスとメッセージと署名の 3 つだけである。
+/// ウォレットを持っていない人が、貼られた署名をその場で確かめられる。
+fn cmd_verify_message(request: &Value) -> Result<Value, String> {
+    let text = str_field(request, "message")?;
+    let address = Address::decode(&str_field(request, "address")?)
+        .map_err(|e| format!("the address is invalid: {e}"))?;
+    let signature =
+        message::decode_signature(&str_field(request, "signature")?).map_err(|e| e.to_string())?;
+    message::verify(&address, text.as_bytes(), &signature).map_err(|e| e.to_string())?;
+    Ok(json!({
+        "address": address.encode(),
+        "network": address.network().to_string(),
+        "bytes": text.len(),
+    }))
+}
+
 fn finish(store: &Keystore, draft: &Draft) -> Result<Value, String> {
     let signed = sign(draft, |lock| store.key_for(lock)).map_err(|e| e.to_string())?;
     let raw = signed.encode();
