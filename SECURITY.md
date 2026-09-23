@@ -2,7 +2,7 @@
 
 [English](SECURITY.md) · [日本語](SECURITY.jp.md)
 
-Send it to `manh@manh2309.org`.
+Send it to `contact@oagcoin.org`.
 
 **Please do not open a public Issue.** Anything that lets someone steal funds or
 break the chain gets read before it gets fixed. Everything else — crashes,

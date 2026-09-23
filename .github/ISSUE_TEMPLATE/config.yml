@@ -1,7 +1,7 @@
 blank_issues_enabled: true
 contact_links:
   - name: "Email / メールで話す"
-    url: mailto:manh@manh2309.org
+    url: mailto:contact@oagcoin.org
     about: "Anything too small for an Issue, vulnerabilities, or just chat. Issue にするほどでもないこと、脆弱性、雑談。どれでも構いません。"
   - name: "Why this was built, in Japanese (Qiita) / 作った経緯"
     url: https://qiita.com/Kazuhiro-Tokumoto/items/99e8cde9065d9ceda266

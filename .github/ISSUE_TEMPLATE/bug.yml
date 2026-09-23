@@ -8,11 +8,11 @@ body:
         **English or Japanese is fine. 英語でも日本語でも構いません。**
 
         Anything that lets someone steal funds or break the chain goes to
-        `manh@manh2309.org` instead of here
+        `contact@oagcoin.org` instead of here
         ([SECURITY.md](https://github.com/Kazuhiro-Tokumoto/Orange/blob/HEAD/SECURITY.md)).
 
         資金を盗める・鎖を壊せる類のものは、ここではなく
-        `manh@manh2309.org` へお願いします。
+        `contact@oagcoin.org` へお願いします。
 
   - type: textarea
     id: what

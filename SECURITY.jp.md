@@ -2,7 +2,7 @@
 
 [English](SECURITY.md) · [日本語](SECURITY.jp.md)
 
-`manh@manh2309.org` に送ってください。
+`contact@oagcoin.org` に送ってください。
 
 **公開の Issue には書かないでください。** 資金を盗める・鎖を壊せる類のものは、
 直るより先に読まれます。それ以外 (落ちる、同期が止まる、表示がおかしい) は

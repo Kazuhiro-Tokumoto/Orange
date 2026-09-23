@@ -9,7 +9,7 @@ are part of the network. Whether it worked or not, one line in an
 [Issue](https://github.com/Kazuhiro-Tokumoto/Orange/issues) shows us something
 we cannot see from here.
 
-Email is fine too: `manh@manh2309.org`
+Email is fine too: `contact@oagcoin.org`
 
 **Write in English or Japanese — either is read.** The project's own documents
 include Japanese-only parts (see

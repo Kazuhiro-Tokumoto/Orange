@@ -691,7 +691,7 @@ we cannot see from here.
 | | |
 |---|---|
 | Reports, questions, corrections | [Issues](https://github.com/Kazuhiro-Tokumoto/Orange/issues) |
-| Anything else | `manh@manh2309.org` |
+| Anything else | `contact@oagcoin.org` |
 | Vulnerabilities | [`SECURITY.md`](SECURITY.md) (**please do not open a public Issue**) |
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) explains how to write things up. You are

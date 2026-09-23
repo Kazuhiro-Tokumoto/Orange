@@ -603,7 +603,7 @@ MSRV (最低必要バージョン) は **1.90** で、CI が毎回検証して�
 | | |
 |---|---|
 | 報告・質問・指摘 | [Issues](https://github.com/Kazuhiro-Tokumoto/Orange/issues) |
-| それ以外・雑談 | `manh@manh2309.org` |
+| それ以外・雑談 | `contact@oagcoin.org` |
 | 脆弱性 | [`SECURITY.jp.md`](SECURITY.jp.md) (**公開の Issue には書かないでください**) |
 
 書き方は [`CONTRIBUTING.jp.md`](CONTRIBUTING.jp.md) にあります。分からないまま

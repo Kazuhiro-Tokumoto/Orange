@@ -9,7 +9,7 @@
 [Issue](https://github.com/Kazuhiro-Tokumoto/Orange/issues) に一行書いて
 もらえると、こちらからは見えないものが見えます。
 
-メールでも構いません。`manh@manh2309.org`
+メールでも構いません。`contact@oagcoin.org`
 
 ## 繋ぐ
 
