@@ -66,6 +66,13 @@ footer{padding:20px 16px;color:var(--dim);font-size:12px;text-align:center;borde
     <button id="tab-restore" role="tab" aria-selected="false">Restore from phrase</button>
   </div>
 
+  <p class="note" style="margin:-4px 0 14px">
+    <b>This is not a website.</b> The page was served by the Orange node you
+    pointed this browser at, it runs entirely inside this browser, and
+    <a href="https://github.com/Kazuhiro-Tokumoto/Orange">every line of it is public</a>.
+    Nothing here is a service, and there is nobody to sign up with.
+  </p>
+
   <div id="pane-open" class="card">
     <p id="no-record" class="note hidden">There is no record on this machine yet. Go to Create or Restore from phrase.</p>
     <div id="have-record">
@@ -89,6 +96,11 @@ footer{padding:20px 16px;color:var(--dim);font-size:12px;text-align:center;borde
     <label for="new-words">Word count</label>
     <select id="new-words"><option value="24">24 words</option><option value="12">12 words</option></select>
     <div class="row" style="margin-top:14px"><button id="do-new" class="primary">Create</button></div>
+    <p class="note" style="margin-top:12px">
+      The key is made here, in this browser, from randomness this machine
+      produces. It is never sent anywhere, so nobody — including whoever runs
+      the node serving this page — can know it.
+    </p>
   </div>
 
   <div id="pane-restore" class="card hidden">
@@ -98,6 +110,17 @@ footer{padding:20px 16px;color:var(--dim);font-size:12px;text-align:center;borde
     <input id="res-pass" type="password" autocomplete="new-password">
     <div class="row" style="margin-top:14px"><button id="do-restore" class="primary">Restore</button></div>
     <p class="note" style="margin-top:12px">
+      <b>These words stay in this browser.</b> They are turned into keys here.
+      They are not sent to the node, and the node has no use for them if it had
+      them — it never sees a key, only finished signatures.
+    </p>
+    <p class="note">
+      <b>Nobody honest will ever ask you for these words.</b> Not by mail, not
+      in a chat, not on a page that says it will check your balance or fix your
+      wallet. Anything that asks is taking your money. If you did not type this
+      address in yourself, close the tab.
+    </p>
+    <p class="note">
       After restoring, the chain is queried to find how far the wallet had been used.
     </p>
   </div>
@@ -180,6 +203,8 @@ footer{padding:20px 16px;color:var(--dim);font-size:12px;text-align:center;borde
 
 <footer>
   Signing happens only inside this machine. The keys reach neither the node nor the network.
+  <br>
+  Orange is free software — <a href="https://github.com/Kazuhiro-Tokumoto/Orange">read it, build it, check that this page is the one in the repository</a>.
 </footer>
 
 <script src="/app.js"></script>
