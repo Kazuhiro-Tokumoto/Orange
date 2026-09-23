@@ -60,6 +60,35 @@ struct Common {
 ///
 /// **The default is the empty string.** Not using one is normal; only
 /// those who decide to use one state it.
+/// 署名するバイト列を決める。
+///
+/// **ここで整形しない。** `--message` は与えられた文字列そのもので、末尾に
+/// 改行を足さない。ファイルと標準入力は中身をそのまま使う。署名する側と
+/// 確かめる側のどちらかが気を利かせた瞬間に、両者は永久に噛み合わなくなる。
+fn message_bytes(message: Option<String>, file: Option<PathBuf>) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    match (message, file) {
+        (Some(text), _) => Ok(text.into_bytes()),
+        (None, Some(path)) if path.as_os_str() == "-" => {
+            let mut buf = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("cannot read stdin: {e}"))?;
+            Ok(buf)
+        }
+        (None, Some(path)) => {
+            std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+        }
+        (None, None) => {
+            let mut buf = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("cannot read stdin: {e}"))?;
+            Ok(buf)
+        }
+    }
+}
+
 #[derive(clap::Args)]
 struct MnemonicPassphrase {
     /// Ask for the BIP39 optional passphrase in the terminal.
@@ -169,6 +198,39 @@ enum Command {
     },
     /// Show the node's state.
     Info,
+    /// Sign a message with one of this wallet's keys.
+    ///
+    /// It shows that the key is held. **It moves no coins**, and the signature
+    /// it produces can never stand in for a transaction signature.
+    Sign {
+        /// The message. Note that this adds no trailing newline.
+        #[arg(long, conflicts_with = "file")]
+        message: Option<String>,
+        /// Read the message from a file, byte for byte. Use `-` for stdin.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Which address to sign with. Defaults to the receiving address.
+        #[arg(long)]
+        address: Option<String>,
+    },
+    /// Check a signed message.
+    ///
+    /// **No wallet, no passphrase and no node are needed**, and the network is
+    /// read from the address. Anyone can run this against anyone's signature.
+    Verify {
+        /// The address said to have signed.
+        #[arg(long)]
+        address: String,
+        /// The signature, in hex.
+        #[arg(long)]
+        signature: String,
+        /// The message. Note that this adds no trailing newline.
+        #[arg(long, conflicts_with = "file")]
+        message: Option<String>,
+        /// Read the message from a file, byte for byte. Use `-` for stdin.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -746,6 +808,78 @@ async fn run() -> Result<(), String> {
                 serde_json::to_string_pretty(&info).unwrap_or_default()
             );
             Ok(())
+        }
+
+        Command::Sign {
+            message,
+            file,
+            address,
+        } => {
+            // 記憶域を開く前に読む。開いてから断るのは無駄である。
+            let msg = message_bytes(message, file)?;
+            if msg.is_empty() {
+                eprintln!(
+                    "warning: signing an empty message. It is a valid signature, \
+                     but it says nothing about what was agreed to."
+                );
+            }
+            let pass = passphrase(&cli.common.passphrase_file, "passphrase: ")?;
+            let store =
+                Keystore::open(&cli.common.wallet, network, &pass).map_err(|e| e.to_string())?;
+            let addr = match address {
+                Some(text) => Address::decode_on(network, &text)
+                    .map_err(|e| format!("the address is invalid: {e}"))?,
+                None => store.default_address().map_err(|e| e.to_string())?,
+            };
+            let key = store
+                .key_for(&Lock::from_address(&addr))
+                .ok_or_else(|| format!("this wallet holds no key for {addr}"))?;
+            let sig = oag_wallet::message::sign(&key, &msg);
+            println!("address    {addr}");
+            println!("message    {} bytes", msg.len());
+            println!("signature  {}", oag_wallet::message::encode_signature(&sig));
+            Ok(())
+        }
+
+        Command::Verify {
+            address,
+            signature,
+            message,
+            file,
+        } => {
+            let msg = message_bytes(message, file)?;
+            // **`--network` は見ない。** どのネットワークのものかはアドレス
+            // 自身が名乗っている。確かめる側に指定させる理由がない。
+            let addr =
+                Address::decode(&address).map_err(|e| format!("the address is invalid: {e}"))?;
+            let sig =
+                oag_wallet::message::decode_signature(&signature).map_err(|e| format!("{e}"))?;
+            match oag_wallet::message::verify(&addr, &msg, &sig) {
+                Ok(()) => {
+                    println!("ok        {addr}");
+                    println!("signed    {} bytes", msg.len());
+                    println!("network   {}", addr.network());
+                    Ok(())
+                }
+                Err(e) => {
+                    // 落ちたときに、よくある原因を一度だけ告げる。
+                    // **勝手に直して通すことはしない。** 署名されたのは
+                    // 手元のバイト列そのものであって、直したものではない。
+                    if msg.windows(2).any(|w| w == b"\r\n") {
+                        eprintln!(
+                            "note: the message contains CRLF line endings. If it travelled \
+                             through Windows or a chat client, the newlines may have been \
+                             rewritten, which changes what is being checked."
+                        );
+                    } else if msg.last() == Some(&b'\n') {
+                        eprintln!(
+                            "note: the message ends with a newline. --message adds none, \
+                             so a file or a shell redirect may have added one."
+                        );
+                    }
+                    Err(format!("{e}"))
+                }
+            }
         }
     }
 }

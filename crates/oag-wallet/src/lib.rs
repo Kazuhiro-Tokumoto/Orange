@@ -16,6 +16,7 @@ pub mod bip32;
 pub mod bip39;
 pub mod build;
 pub mod keystore;
+pub mod message;
 pub mod pst;
 pub mod scan;
 pub mod seed;

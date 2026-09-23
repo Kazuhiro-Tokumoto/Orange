@@ -589,6 +589,7 @@ dependencies = [
  "blake3",
  "chacha20poly1305",
  "clap",
+ "hex",
  "hmac",
  "oag-consensus",
  "oag-node",
