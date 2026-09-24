@@ -140,6 +140,48 @@ protocol rules themselves are usable without any feature.
 cargo test -p oag-net --features tokio
 ```
 
+## Getting the binaries
+
+Prebuilt binaries are on the [latest release](https://github.com/Kazuhiro-Tokumoto/Orange/releases/latest).
+Unpack one and run it. **You do not need Rust or a compiler.**
+
+| Machine | File |
+| --- | --- |
+| Linux (x86_64) | `orange-linux-x86_64.tar.gz` |
+| Raspberry Pi, ARM VPS | `orange-linux-aarch64.tar.gz` |
+| Windows | `orange-windows-x86_64.zip` |
+
+Each archive holds `oag-node`, `oag-wallet`, this README and `COMMANDS.md`.
+
+**Check what you downloaded before you run it.** A `.sha256` sits next to every
+archive.
+
+```sh
+sha256sum -c orange-linux-x86_64.tar.gz.sha256
+```
+
+That tells you the file arrived intact. It does not tell you who built it — the
+checksum comes from the same page as the archive, so anyone who could replace
+one could replace the other.
+
+### macOS, or anything else
+
+**No macOS build is published.** Nobody leaves a node running on a Mac, and the
+macOS runners GitHub offers are retired on a rolling schedule — a label that has
+expired does not fail the build, it queues forever and the release never
+appears. Carrying that for a handful of users is not worth it.
+
+Build from source instead. This is also the path for any machine not in the
+table above.
+
+```sh
+cargo build --release -p oag-node -p oag-wallet
+```
+
+You need a Rust toolchain and `cmake` (RandomX is C++ and is built by
+`randomx-rs`). The version of Rust is pinned in `rust-toolchain.toml`, so
+`rustup` will fetch the right one on its own.
+
 ## Running a node
 
 mainnet, testnet and regtest all start. **If you want to try things locally,

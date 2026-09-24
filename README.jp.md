@@ -116,6 +116,48 @@ cargo test -p oag-pow --features randomx
 cargo test -p oag-net --features tokio
 ```
 
+## 出来合いを落とす
+
+[最新のリリース](https://github.com/Kazuhiro-Tokumoto/Orange/releases/latest)
+に組み立て済みのものを置いています。展開して叩くだけです。**Rust もコンパイラも
+要りません。**
+
+| 機械 | ファイル |
+| --- | --- |
+| Linux (x86_64) | `orange-linux-x86_64.tar.gz` |
+| ラズパイ / ARM の VPS | `orange-linux-aarch64.tar.gz` |
+| Windows | `orange-windows-x86_64.zip` |
+
+中身は `oag-node`、`oag-wallet`、この README、`COMMANDS.md` です。
+
+**叩く前に、落ちてきたものを確かめてください。** どの書庫にも `.sha256` を
+並べてあります。
+
+```sh
+sha256sum -c orange-linux-x86_64.tar.gz.sha256
+```
+
+これで分かるのは**欠けずに届いたか**だけです。**誰が組み立てたかは分かりません。**
+チェックサムは書庫と同じ場所に置いてあるので、片方を差し替えられる者は
+もう片方も差し替えられます。
+
+### macOS とそれ以外
+
+**macOS 向けの出来合いは配っていません。** ノードを置きっぱなしにする機械として
+Mac を選ぶ人がいないのと、GitHub の macOS 走者はラベルごとに廃止されていくためです。
+**切れたラベルはこけません。永久に queued のまま座り、リリースが永遠に出てこない。**
+使う人の少ない環境のためにこれを毎年抱えるのは釣り合いません。
+
+ソースから建ててください。上の表に無い機械も同じです。
+
+```sh
+cargo build --release -p oag-node -p oag-wallet
+```
+
+Rust のツールチェーンと `cmake` が要ります (RandomX は C++ で、`randomx-rs` が
+建てます)。Rust の版数は `rust-toolchain.toml` で固定してあるので、`rustup` が
+勝手に正しいものを拾います。
+
 ## 動かす
 
 mainnet / testnet / regtest のいずれも起動します。**手元で試すなら
