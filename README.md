@@ -13,6 +13,11 @@ Based on [chroma](https://github.com/kusogakiller/chroma).
 > public yet** (its DNS seed record is not set up). It is not listed on any
 > exchange, so **there is no price.** This is still the stage where you mine
 > it yourself and try it yourself.
+>
+> **Prebuilt binaries are on the
+> [latest release](https://github.com/Kazuhiro-Tokumoto/Orange/releases/latest).**
+> You do not need Rust to try it — see
+> [Getting the binaries](#getting-the-binaries).
 
 | | |
 | --- | --- |
@@ -63,82 +68,6 @@ translation, and reporting it is welcome.
 For what the commands do rather than why, see
 [`docs/COMMANDS.md`](docs/COMMANDS.md): every `oag-node` and `oag-wallet`
 subcommand and flag on one page, plus the RPC methods and the port numbers.
-
-## Progress
-
-| Phase | Item | Status |
-| ---: | --- | --- |
-| 0 | Workspace, CI, specification | done |
-| 1 | Primitive types (amount, hash, address, keys) | done |
-| 2 | Transactions, blocks, serialization, sighash | done |
-| 3 | Validation logic, UTXO set | done |
-| 4 | RandomX, difficulty adjustment (LWMA) | done |
-| 5 | Chain state, reorgs | done |
-| 5b | Persistence (redb), wiring it to the chain | done |
-| 6 | Mempool, fee policy | done |
-| 7a | P2P protocol (framing, messages, handshake) | done |
-| 7b | Block locators, download scheduling | done |
-| 7c | Compact blocks | done |
-| 7d | TCP transport | done |
-| 8 | Miner | done |
-| 9a | Node (oag-node) — storage, chain, mining, CLI | done |
-| 9b | P2P wired into the node (two nodes syncing) | done |
-| 10a | JSON-RPC (node side) | done |
-| 10b | CLI wallet (keys, balance, payments) | done |
-| 10c | Hardening (key encryption, seed derivation) | done |
-| 11a | Incremental candidate search for chain selection | done |
-| 11b | Genesis fixed (all three networks) | done |
-| 11c | RandomX fast mode (mining) | done |
-| 11d | Peer discovery (address book, `addr`, seed nodes) | done |
-| 11e | BIP39 / BIP32 / BIP44 (recovery phrase) | done |
-| 11f | Public testnet | not started |
-| 12a | Transaction index, address index (optional) | done |
-| 12b | Block explorer | done |
-
-Phase numbering stops here. Everything after this was added as it became
-necessary, so it is not numbered.
-
-| Item | Status |
-| --- | --- |
-| Partially signed transactions (PST) | done |
-| UTXO consolidation (`consolidate`) | done |
-| Browser wallet (wasm) | done |
-| **mainnet launched and running** | **done** |
-
-## Crate layout
-
-```
-crates/
-├── oag-primitives/   amounts (u128), BLAKE3, merkle, varint, keys, addresses
-├── oag-consensus/    encoding, parameters, transactions, blocks,
-│                     sighash, UTXO set, validation
-├── oag-pow/          difficulty, target, LWMA, seed epochs, RandomX
-├── oag-chain/        block index, best-chain selection, reorgs, genesis,
-│                     storage abstraction (ChainStore) and in-memory impl
-├── oag-store/        persistence (redb)
-├── oag-mempool/      mempool, relay policy
-├── oag-net/          P2P protocol (framing, messages, handshake,
-│                     locators, download scheduling, compact blocks, TCP)
-├── oag-miner/        block template assembly and nonce search
-├── oag-rpc/          JSON-RPC 2.0, minimal HTTP, cookie auth, client
-├── oag-node/         the node itself, dedicated threads, peer handling, binary
-├── oag-wallet/       key storage, payment construction and signing, binary
-└── oag-wallet-wasm/  the shell that runs the above in a browser (wasm)
-```
-
-RandomX in `oag-pow` sits behind the `randomx` feature. Building the C++
-implementation needs cmake and a C++ compiler, so it is off by default.
-
-```sh
-cargo test -p oag-pow --features randomx
-```
-
-Likewise, the TCP layer in `oag-net` sits behind the `tokio` feature. The
-protocol rules themselves are usable without any feature.
-
-```sh
-cargo test -p oag-net --features tokio
-```
 
 ## Getting the binaries
 
@@ -391,6 +320,82 @@ Have one listen and the other `--connect` to it.
 Sync is headers-first: collect headers, confirm the shape of the chain, then
 fetch bodies. **Every block received is validated locally**, and the UTXO set is
 built by the node itself rather than accepted from a peer.
+
+## Progress
+
+| Phase | Item | Status |
+| ---: | --- | --- |
+| 0 | Workspace, CI, specification | done |
+| 1 | Primitive types (amount, hash, address, keys) | done |
+| 2 | Transactions, blocks, serialization, sighash | done |
+| 3 | Validation logic, UTXO set | done |
+| 4 | RandomX, difficulty adjustment (LWMA) | done |
+| 5 | Chain state, reorgs | done |
+| 5b | Persistence (redb), wiring it to the chain | done |
+| 6 | Mempool, fee policy | done |
+| 7a | P2P protocol (framing, messages, handshake) | done |
+| 7b | Block locators, download scheduling | done |
+| 7c | Compact blocks | done |
+| 7d | TCP transport | done |
+| 8 | Miner | done |
+| 9a | Node (oag-node) — storage, chain, mining, CLI | done |
+| 9b | P2P wired into the node (two nodes syncing) | done |
+| 10a | JSON-RPC (node side) | done |
+| 10b | CLI wallet (keys, balance, payments) | done |
+| 10c | Hardening (key encryption, seed derivation) | done |
+| 11a | Incremental candidate search for chain selection | done |
+| 11b | Genesis fixed (all three networks) | done |
+| 11c | RandomX fast mode (mining) | done |
+| 11d | Peer discovery (address book, `addr`, seed nodes) | done |
+| 11e | BIP39 / BIP32 / BIP44 (recovery phrase) | done |
+| 11f | Public testnet | not started |
+| 12a | Transaction index, address index (optional) | done |
+| 12b | Block explorer | done |
+
+Phase numbering stops here. Everything after this was added as it became
+necessary, so it is not numbered.
+
+| Item | Status |
+| --- | --- |
+| Partially signed transactions (PST) | done |
+| UTXO consolidation (`consolidate`) | done |
+| Browser wallet (wasm) | done |
+| **mainnet launched and running** | **done** |
+
+## Crate layout
+
+```
+crates/
+├── oag-primitives/   amounts (u128), BLAKE3, merkle, varint, keys, addresses
+├── oag-consensus/    encoding, parameters, transactions, blocks,
+│                     sighash, UTXO set, validation
+├── oag-pow/          difficulty, target, LWMA, seed epochs, RandomX
+├── oag-chain/        block index, best-chain selection, reorgs, genesis,
+│                     storage abstraction (ChainStore) and in-memory impl
+├── oag-store/        persistence (redb)
+├── oag-mempool/      mempool, relay policy
+├── oag-net/          P2P protocol (framing, messages, handshake,
+│                     locators, download scheduling, compact blocks, TCP)
+├── oag-miner/        block template assembly and nonce search
+├── oag-rpc/          JSON-RPC 2.0, minimal HTTP, cookie auth, client
+├── oag-node/         the node itself, dedicated threads, peer handling, binary
+├── oag-wallet/       key storage, payment construction and signing, binary
+└── oag-wallet-wasm/  the shell that runs the above in a browser (wasm)
+```
+
+RandomX in `oag-pow` sits behind the `randomx` feature. Building the C++
+implementation needs cmake and a C++ compiler, so it is off by default.
+
+```sh
+cargo test -p oag-pow --features randomx
+```
+
+Likewise, the TCP layer in `oag-net` sits behind the `tokio` feature. The
+protocol rules themselves are usable without any feature.
+
+```sh
+cargo test -p oag-net --features tokio
+```
 
 ## The block explorer
 
