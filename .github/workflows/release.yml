@@ -42,22 +42,16 @@ jobs:
           - label: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-          # **macOS の走者には寿命がある。** 切れたラベルを書くと、こけずに
-          # 永久に queued のまま座る。publish は matrix 全部の完了を待つので、
-          # 1 つ座っただけで下書きが出てこない。**気付きにくい壊れ方をする。**
+          # **macOS は配らない。** ノードを置きっぱなしにする機械として
+          # Mac を選ぶ人がいない。ウォレットのために残す手はあるが、
+          # macOS の走者はラベルごとに寿命があり (macos-13 は既に廃止、
+          # macos-14 も 2026-11-02 に終わる)、**切れたラベルはこけずに
+          # 永久に queued のまま座る。** publish は matrix 全部の完了を
+          # 待つので、1 つ座るだけで下書きが一切出てこない。
           #
-          #   macos-13        2025-12-08 に廃止済み
-          #   macos-14        2026-11-02 に廃止。10 月中は断続的に落ちる
-          #   macos-15        現役
-          #   macos-15-intel  2027-08 まで。Intel の Mac はここで終わる
-          - label: macos-aarch64
-            os: macos-15
-            target: aarch64-apple-darwin
-          # Apple が x86_64 を切ったので、GitHub 側も macos-15 の退役で
-          # 打ち止めになる。**2027 年の秋に、この行は置き換え先を失う。**
-          - label: macos-x86_64
-            os: macos-15-intel
-            target: x86_64-apple-darwin
+          # 気付きにくい壊れ方を、使う人の少ない環境のために抱え続ける
+          # 釣り合いが取れていない。Mac の人はソースから建てる。
+          # 手順は README にある。
 
     steps:
       - uses: actions/checkout@v4
@@ -178,10 +172,12 @@ jobs:
             | 環境 | ファイル |
             | --- | --- |
             | Windows | `orange-windows-x86_64.zip` |
-            | macOS (Apple Silicon) | `orange-macos-aarch64.tar.gz` |
-            | macOS (Intel) | `orange-macos-x86_64.tar.gz` |
             | Linux | `orange-linux-x86_64.tar.gz` |
             | ラズパイ / ARM | `orange-linux-aarch64.tar.gz` |
+
+            macOS 向けの出来合いは配っていません。ソースから建ててください。
+            手順は [README](https://github.com/Kazuhiro-Tokumoto/Orange#readme)
+            にあります。
 
             ### 動かす
 
