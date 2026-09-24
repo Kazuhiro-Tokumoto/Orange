@@ -42,11 +42,21 @@ jobs:
           - label: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+          # **macOS の走者には寿命がある。** 切れたラベルを書くと、こけずに
+          # 永久に queued のまま座る。publish は matrix 全部の完了を待つので、
+          # 1 つ座っただけで下書きが出てこない。**気付きにくい壊れ方をする。**
+          #
+          #   macos-13        2025-12-08 に廃止済み
+          #   macos-14        2026-11-02 に廃止。10 月中は断続的に落ちる
+          #   macos-15        現役
+          #   macos-15-intel  2027-08 まで。Intel の Mac はここで終わる
           - label: macos-aarch64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
+          # Apple が x86_64 を切ったので、GitHub 側も macos-15 の退役で
+          # 打ち止めになる。**2027 年の秋に、この行は置き換え先を失う。**
           - label: macos-x86_64
-            os: macos-13
+            os: macos-15-intel
             target: x86_64-apple-darwin
 
     steps:
