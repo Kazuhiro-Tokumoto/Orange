@@ -140,21 +140,21 @@ cargo run --release -p oag-pow --features randomx --example hashrate
     --mine --payout <アドレス> --mining-threads 4
 ```
 
-**本数を増やすと memory も増えます。** RandomX の採掘器はスレッドを
-またげないので、1 本ごとに自分の分を建てます。
+fast モードでは **2 GB のデータセットを全スレッドで 1 本共有します。**
+本数を増やしても memory はほとんど増えません (1 本あたり 2 MB)。light
+モードは 1 本ごとに 256 MB 要ります。
 
-| モード | 1 本あたり | 4 本なら |
+| モード | 1 本 | 4 本なら |
 | --- | ---: | ---: |
 | light | 256 MB | 1 GB |
-| fast | 2 GB | 8 GB |
+| fast | 2 GB | 2 GB |
 
-`--fast` と `--mining-threads 0` を同時に渡しても 1 本のままにします。
-積んでいる memory が分からないのに、2 GB ずつ確保しにいかないためです。
-fast を何本も建てたいときは本数を明示してください。
+なので `--fast` なら、`--mining-threads 0` で全コアを使えば十分です。
 
-light を何本も建てるのと fast を 1 本建てるのは、どちらも 2 GB 前後に
-なります。**どちらが速いかは機械によります。** 上の `hashrate` で
-light の 1 本あたりの速さを測り、本数を掛けて比べてください。
+データセットは、OS が許せば大きなページ (large pages) に置きます。その方が
+速くなります。機械側で 1 度だけ設定が要ります。手順は
+[docs/COMMANDS.md](docs/COMMANDS.md) の「大きなページ (large pages)」に
+あります。設定しなくても、普通のページで掘れます。
 
 ```sh
 cargo build --release -p oag-node

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/oag-primitives", "crates/oag-consensus", "crates/oag-pow", "crates/oag-chain", "crates/oag-store", "crates/oag-mempool", "crates/oag-net", "crates/oag-miner", "crates/oag-rpc", "crates/oag-node", "crates/oag-wallet", "crates/oag-wallet-wasm"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.90"
 license = "MIT"
@@ -11,18 +11,18 @@ repository = "https://github.com/manh923/Orange"
 authors = ["Orange contributors"]
 
 [workspace.dependencies]
-oag-primitives = { path = "crates/oag-primitives", version = "0.1.0" }
-oag-consensus = { path = "crates/oag-consensus", version = "0.1.0" }
-oag-pow = { path = "crates/oag-pow", version = "0.1.0" }
-oag-chain = { path = "crates/oag-chain", version = "0.1.0" }
-oag-mempool = { path = "crates/oag-mempool", version = "0.1.0" }
-oag-miner = { path = "crates/oag-miner", version = "0.1.0" }
-oag-net = { path = "crates/oag-net", version = "0.1.0" }
-oag-store = { path = "crates/oag-store", version = "0.1.0" }
-oag-rpc = { path = "crates/oag-rpc", version = "0.1.0" }
-oag-node = { path = "crates/oag-node", version = "0.1.0" }
-oag-wallet = { path = "crates/oag-wallet", version = "0.1.0", default-features = false }
-oag-wallet-wasm = { path = "crates/oag-wallet-wasm", version = "0.1.0" }
+oag-primitives = { path = "crates/oag-primitives", version = "0.1.1" }
+oag-consensus = { path = "crates/oag-consensus", version = "0.1.1" }
+oag-pow = { path = "crates/oag-pow", version = "0.1.1" }
+oag-chain = { path = "crates/oag-chain", version = "0.1.1" }
+oag-mempool = { path = "crates/oag-mempool", version = "0.1.1" }
+oag-miner = { path = "crates/oag-miner", version = "0.1.1" }
+oag-net = { path = "crates/oag-net", version = "0.1.1" }
+oag-store = { path = "crates/oag-store", version = "0.1.1" }
+oag-rpc = { path = "crates/oag-rpc", version = "0.1.1" }
+oag-node = { path = "crates/oag-node", version = "0.1.1" }
+oag-wallet = { path = "crates/oag-wallet", version = "0.1.1", default-features = false }
+oag-wallet-wasm = { path = "crates/oag-wallet-wasm", version = "0.1.1" }
 bech32 = "0.12"
 clap = { version = "4", features = ["derive"] }
 blake3 = "1"

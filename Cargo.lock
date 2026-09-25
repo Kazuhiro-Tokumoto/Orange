@@ -463,7 +463,7 @@ dependencies = [
 
 [[package]]
 name = "oag-chain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hex",
  "oag-consensus",
@@ -474,7 +474,7 @@ dependencies = [
 
 [[package]]
 name = "oag-consensus"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hex",
  "oag-primitives",
@@ -483,7 +483,7 @@ dependencies = [
 
 [[package]]
 name = "oag-mempool"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "oag-consensus",
  "oag-primitives",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "oag-miner"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "oag-consensus",
  "oag-mempool",
@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "oag-net"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "oag-consensus",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "oag-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "hex",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "oag-pow"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hex",
  "oag-consensus",
@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "oag-primitives"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bech32",
  "blake3",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "oag-rpc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "oag-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "oag-chain",
  "oag-consensus",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "oag-wallet"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "blake3",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "oag-wallet-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "getrandom 0.3.4",

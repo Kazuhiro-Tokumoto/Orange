@@ -74,9 +74,10 @@ fn main() {
         match RandomXMiner::new(&seed, 0) {
             Ok(fast) => {
                 println!(
-                    "fast initialisation: {:.1} s ({} bytes)",
+                    "fast initialisation: {:.1} s ({} bytes, large pages: {})",
                     started.elapsed().as_secs_f64(),
-                    RandomXMiner::dataset_bytes().unwrap_or(0)
+                    RandomXMiner::dataset_bytes().unwrap_or(0),
+                    if fast.uses_large_pages() { "yes" } else { "no" }
                 );
                 let rate = measure(|h| {
                     std::hint::black_box(fast.hash_header(h).unwrap());

@@ -23,7 +23,9 @@
 //!
 //! # ここは crate の中で唯一 `unsafe` に接している場所である
 //!
-//! 全 crate に `#![forbid(unsafe_code)]` を置いてあるが、それが縛るのは
+//! この crate は `#![deny(unsafe_code)]`、他の crate は全部
+//! `#![forbid(unsafe_code)]` である。自分で書いた `unsafe` は
+//! [`SharedDataset`] の `unsafe impl` 2 行だけである。ただしそれらが縛るのは
 //! **自分が書いたコードだけ**である。`randomx-rs` の中の `unsafe` も、その
 //! 先の C++ も縛らない。したがってメモリ安全は、この境界で相手に何を渡し、
 //! 相手から何を受け取るかで決まる。以下は `randomx-rs` 1.6.0 を読んだうえで
@@ -68,23 +70,42 @@
 //!
 //! **1 スレッドにつき 1 個の VM を持つこと。**
 //!
-//! ## データセットはスレッドをまたげない
+//! ## データセットは共有する
 //!
-//! [`RandomXDataset`] も生ポインタを持つため `Send` ではない。つまり
-//! 「2 GB のデータセットを 1 個だけ建てて、複数のスレッドで使い回す」ことは
-//! **安全な Rust では書けない**。`unsafe` を禁じている以上、できない。
+//! [`RandomXDataset`] も生ポインタを持つため `Send` ではない。そのままでは
+//! 「2 GB のデータセットを 1 個だけ建てて、複数のスレッドで使い回す」ことが
+//! 安全な Rust では書けない。
 //!
-//! [`RandomXMiner::sharing_dataset_with`] が役に立つのは、**同じスレッドの
-//! 中で** VM をもう 1 個作るときだけである。
+//! 以前はそれを避けて、スレッドごとにデータセットを 1 本ずつ建てていた。
+//! **6 スレッドなら 12 GB である。** 構築も 6 回走り、大きなページも
+//! 現実的でなくなる。Monero も XMRig も 1 本を全スレッドで共有している。
 //!
-//! 複数スレッドで掘るときは、**共有しない**。`oag-miner` の `pool`
-//! モジュールは採掘器を配らず、作り方を配る。スレッド境界を越えるのは
-//! シードの値だけで、[`RandomXMiner`] も [`RandomXVerifier`] も
-//! それぞれの作業スレッドの上で建ち、そこから動かない。代わりに memory は
-//! 本数だけ要る (light で 1 本 256 MB、fast で 1 本 2 GB)。
+//! そこで [`SharedDataset`] に `unsafe impl Send / Sync` を 2 行だけ書いた。
+//! この crate で `unsafe` と書いてあるのはそこだけである。引き受けている
+//! 事柄は [`SharedDataset`] に書いてある。要点は、**データセットは初期化が
+//! 済めば読むだけのものであり、RandomX 自身が複数の VM での共有を想定して
+//! いる**ことである。
 //!
-//! 上流が `Send` を足せば共有できるようになる。このファイル末尾の
-//! `const _` が、足された瞬間にビルドを失敗させて知らせる。
+//! VM は相変わらず共有しない。スクラッチパッドを書き換えるからである。
+//! 各作業スレッドは [`SharedDataset::miner`] で自分の VM を建てる。
+//! スレッド境界を越えるのは [`SharedDataset`] だけで、[`RandomXMiner`] も
+//! [`RandomXVerifier`] もそれぞれのスレッドの上で建ち、そこから動かない。
+//!
+//! ## 大きなページ
+//!
+//! データセットとキャッシュは、まず大きなページ (Linux の hugetlb、
+//! Windows の large pages) で確保を試みる。データセットへの読み出しは
+//! 2 GB の中を飛び回るので、4 KB のページでは TLB が足りない。大きな
+//! ページで確保できれば、その分速くなる。
+//!
+//! **確保できなければ、黙って普通のページに退く。** 何もしていない機械
+//! ではまず確保できない。OS 側で用意が要る (Linux は `vm.nr_hugepages`、
+//! Windows は「メモリ内のページのロック」の権限)。どちらになったかは
+//! [`SharedDataset::uses_large_pages`] で分かる。
+//!
+//! VM のスクラッチパッド (2 MB) には大きなページを使わない。VM の確保に
+//! 失敗すると、NULL の VM と一緒にデータセットの参照を手放せなくなる
+//! (`create_vm` を見よ)。失敗しうる試みを VM の側に増やさないためである。
 //!
 //! 参照: `docs/SPEC.md` §11
 
@@ -377,10 +398,181 @@ impl PowVerifier for RandomXVerifier {
 /// [`RandomXMiner::dataset_bytes`] が返す。
 pub const DATASET_BYTES: u64 = 2_181_038_080;
 
+/// 確保の候補それぞれの前に、大きなページを付けたものを差し込む。
+///
+/// `[a, b]` は `[a | 大きなページ, a, b | 大きなページ, b]` になる。
+/// 速い順は崩れない。大きなページが取れない機械では、付けた方の候補が
+/// その場で失敗して次に進むだけである (`mmap` や `VirtualAlloc` が
+/// 断るだけなので、試すのは安い)。
+///
+/// **キャッシュとデータセットにだけ使う。** VM には使わない
+/// (モジュールの説明の「大きなページ」を見よ)。
+fn with_large_pages(steps: &[RandomXFlag]) -> Vec<RandomXFlag> {
+    let mut out = Vec::with_capacity(steps.len() * 2);
+    for &flags in steps {
+        out.push(flags | RandomXFlag::FLAG_LARGE_PAGES);
+        out.push(flags);
+    }
+    out.dedup();
+    out
+}
+
+/// 採掘スレッドの間で共有できる、fast モードのデータセット。
+///
+/// 1 つのシードエポックに対応する。**2 GB を 1 本だけ建て、何本の
+/// スレッドからでも使う。** 各スレッドは [`SharedDataset::miner`] で
+/// 自分の VM を建てる。
+///
+/// 安く複製できる (中身は参照の数を数えているだけである)。最後の
+/// 複製が消えたときにデータセットが解放される。
+///
+/// # `unsafe impl Send / Sync` が引き受けていること
+///
+/// この crate で `unsafe` と書いてあるのはこの 2 行だけである。
+/// 以下は `randomx-rs` 1.6.0 と、その中の tevador/RandomX を読んだうえで
+/// 言えることである。
+///
+/// 1. **初期化が済めば、データセットは読むだけである。**
+///    `RandomXDataset::new` は確保と初期化 (`randomx_init_dataset`) を
+///    終えてから値を返す。その後に書き換える API は `randomx-rs` に無い。
+///    VM はデータセットをポインタで受け取って読むだけである
+///    (`randomx_create_vm` / `randomx_calculate_hash`)。読むだけのメモリを
+///    複数のスレッドから同時に読むのは競合ではない。
+/// 2. **RandomX 自身がこの使い方をしている。** 同梱のベンチマーク
+///    (`src/tests/benchmark.cpp`) は、データセットを 1 つだけ確保し、
+///    スレッドごとに建てた VM へ同じものを渡して並行に回している。
+///    README も fast モードの 2080 MiB を「共有メモリ」と書いている。
+///    Monero も XMRig もそうしている。
+/// 3. **解放は 1 回だけ、どのスレッドで起きてもよい。** `RandomXDataset`
+///    は中身を `Arc` で持つ。数えるのは不可分操作であり、最後の 1 つが
+///    消えたときに `randomx_release_dataset` が 1 回だけ走る。解放は
+///    `free` / `munmap` / `VirtualFree` であって、確保したスレッドを
+///    問わない。データセットが抱えているキャッシュも同じである。
+/// 4. **VM は越えさせない。** ここで `Send` にしているのはデータセット
+///    だけである。スクラッチパッドを書き換える [`RandomXMiner`] は
+///    `Send` でも `Sync` でもないままであり、このファイル末尾の `const _`
+///    がそれを固定している。
+///
+/// `randomx-rs` が `RandomXDataset` に `Send` / `Sync` を足せば、この
+/// 2 行は要らなくなる。末尾の `const _` がそのときにビルドを落として
+/// 知らせる。
+#[derive(Clone)]
+pub struct SharedDataset {
+    seed_height: u64,
+    seed: Hash,
+    /// VM を建てるときのフラグ。建てる前に 1 度だけ確かめておく。
+    vm_flags: RandomXFlag,
+    /// データセットを大きなページで確保できたか。
+    large_pages: bool,
+    dataset: RandomXDataset,
+}
+
+// 上の説明の 1〜4 を引き受けている。
+#[allow(unsafe_code)]
+unsafe impl Send for SharedDataset {}
+#[allow(unsafe_code)]
+unsafe impl Sync for SharedDataset {}
+
+impl SharedDataset {
+    /// データセットを構築する。**1 分前後かかる。**
+    ///
+    /// 引数の意味は [`RandomXVerifier::new`] と同じである。
+    ///
+    /// 2 GB を確保できなければ誤りを返す。落ちはしないので、呼び出し側で
+    /// light モードに退避できる。
+    pub fn new(seed: &Hash, seed_height: u64) -> Result<SharedDataset, RandomXPowError> {
+        // キャッシュのフラグで意味を持つのは FLAG_JIT・FLAG_LARGE_PAGES と
+        // Argon2 の実装選択だけである。いずれも速さの指定であって、でき
+        // あがるキャッシュの中身は変わらない。JIT を拒む環境や大きなページ
+        // が無い環境では、その候補がすぐ失敗するので、順に試すのは安い。
+        let (_, cache) = try_each(&with_large_pages(&flag_ladder(false)), |flags| {
+            RandomXCache::new(flags, seed.as_bytes())
+                .map_err(|e| format!("cannot allocate the cache: {e}"))
+        })?;
+
+        // VM のフラグをここで 1 度だけ決める。
+        //
+        // 作業スレッドの上で候補を順に試すと、失敗した候補ごとに
+        // データセットの参照を 1 つ手放せなくなる (`create_vm` を見よ)。
+        // すなわち 2 GB が二度と解放されない。そこでキャッシュを使った
+        // light の VM で先に試す。JIT とハードウェア AES が使えるかは、
+        // light と fast で変わらない。失敗しても手放せなくなるのは
+        // キャッシュの参照だけであり、それはどのみちデータセットが
+        // 抱えている。
+        let (probed, probe) = try_each(&flag_ladder(false), |flags| {
+            create_vm(flags, Some(cache.clone()), None)
+        })?;
+        drop(probe);
+        let vm_flags = probed | RandomXFlag::FLAG_FULL_MEM;
+
+        // データセットのフラグで意味を持つのは FLAG_LARGE_PAGES だけである。
+        //
+        // start は 0 でなければならない。0 以外を渡すと、先頭が未初期化の
+        // ままのデータセットができ、他の実装と食い違うハッシュを黙って返す。
+        let dataset_steps = [RandomXFlag::FLAG_LARGE_PAGES, RandomXFlag::FLAG_DEFAULT];
+        let (dataset_flags, dataset) = try_each(&dataset_steps, |flags| {
+            RandomXDataset::new(flags, cache.clone(), 0)
+                .map_err(|e| format!("cannot allocate the dataset: {e}"))
+        })?;
+
+        Ok(SharedDataset {
+            seed_height,
+            seed: *seed,
+            vm_flags,
+            large_pages: dataset_flags.contains(RandomXFlag::FLAG_LARGE_PAGES),
+            dataset,
+        })
+    }
+
+    /// このデータセットを使う採掘器を 1 つ建てる。
+    ///
+    /// **呼んだスレッドの上で建ち、そこから動かない。** 採掘スレッドの
+    /// それぞれが自分の分を呼ぶ。データセットは建て直さない。
+    pub fn miner(&self) -> Result<RandomXMiner, RandomXPowError> {
+        let vm = create_vm(self.vm_flags, None, Some(self.dataset.clone()))
+            .map_err(|e| RandomXPowError::Init(format!("cannot create a fast-mode VM: {e}")))?;
+        Ok(RandomXMiner {
+            seed_height: self.seed_height,
+            seed: self.seed,
+            flags: self.vm_flags,
+            large_pages: self.large_pages,
+            vm,
+        })
+    }
+
+    /// データセットを大きなページで確保できたか。
+    ///
+    /// 偽でも動く。大きなページの分だけ速さを取り逃がしている。
+    pub fn uses_large_pages(&self) -> bool {
+        self.large_pages
+    }
+
+    /// このデータセットが対応するシードのブロック高さ。
+    pub fn seed_height(&self) -> u64 {
+        self.seed_height
+    }
+
+    /// このデータセットが用いているシード。
+    pub fn seed(&self) -> Hash {
+        self.seed
+    }
+}
+
+impl std::fmt::Debug for SharedDataset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedDataset")
+            .field("seed_height", &self.seed_height)
+            .field("vm_flags", &self.vm_flags)
+            .field("large_pages", &self.large_pages)
+            .finish()
+    }
+}
+
 /// fast モードの RandomX 採掘器。
 ///
-/// 2 GB のデータセットを構築して用いる。light モード
-/// ([`RandomXVerifier`]) より速い。
+/// 2 GB のデータセットを用いる。light モード ([`RandomXVerifier`]) より
+/// 速い。複数のスレッドで掘るときは [`SharedDataset`] を 1 つ建てて、
+/// スレッドごとに [`SharedDataset::miner`] を呼ぶ。
 ///
 /// # 何倍速いかは書かない
 ///
@@ -407,66 +599,27 @@ pub const DATASET_BYTES: u64 = 2_181_038_080;
 ///
 /// データセット 2 GB に加えて、構築の材料であるキャッシュ 256 MB を
 /// 抱えたままになる (`RandomXDataset` がキャッシュを保持する)。
-/// **確保できなければ誤りを返す。** 落ちはしないので、呼び出し側で light
-/// モードに退避できる。
+/// **スレッドが何本でもこの 1 組で済む。** スレッドごとに増えるのは
+/// VM のスクラッチパッド 2 MB だけである。
 pub struct RandomXMiner {
     seed_height: u64,
     seed: Hash,
     flags: RandomXFlag,
-    dataset: RandomXDataset,
+    large_pages: bool,
+    /// データセットへの参照は VM が持っている。VM が生きている間は
+    /// データセットも解放されない。
     vm: RandomXVM,
 }
 
 impl RandomXMiner {
-    /// シードを指定して採掘器を作る。データセットを構築する。
+    /// シードを指定して採掘器を 1 つ作る。データセットを構築する。
     ///
-    /// 引数の意味は [`RandomXVerifier::new`] と同じである。
+    /// 引数の意味は [`RandomXVerifier::new`] と同じである。1 スレッドで
+    /// 掘るとき、あるいは試験のためのものである。複数のスレッドで掘る
+    /// なら [`SharedDataset`] を使うこと。これを本数だけ呼ぶと、
+    /// データセットも本数だけ建つ。
     pub fn new(seed: &Hash, seed_height: u64) -> Result<RandomXMiner, RandomXPowError> {
-        // キャッシュのフラグで意味を持つのは FLAG_JIT・FLAG_LARGE_PAGES と
-        // Argon2 の実装選択だけである。いずれも速さの指定であって、でき
-        // あがるキャッシュの中身は変わらない。JIT を拒む環境では最初の
-        // 候補がすぐ失敗するので、ここを順に試すのは安い。
-        let (_, cache) = try_each(&flag_ladder(false), |flags| {
-            RandomXCache::new(flags, seed.as_bytes())
-                .map_err(|e| format!("cannot allocate the cache: {e}"))
-        })?;
-        // データセットのフラグで意味を持つのは FLAG_LARGE_PAGES だけである。
-        // 用いないので FLAG_DEFAULT でよい。
-        //
-        // start は 0 でなければならない。0 以外を渡すと、先頭が未初期化の
-        // ままのデータセットができ、他の実装と食い違うハッシュを黙って返す。
-        let dataset = RandomXDataset::new(RandomXFlag::FLAG_DEFAULT, cache, 0)
-            .map_err(|e| RandomXPowError::Init(format!("cannot allocate the dataset: {e}")))?;
-        RandomXMiner::sharing_dataset_with(seed, seed_height, dataset)
-    }
-
-    /// すでにあるデータセットを使って、もう 1 個の採掘器を作る。
-    ///
-    /// **同じスレッドの中でしか使えない。** [`RandomXDataset`] は `Send`
-    /// ではないので、別のスレッドへ渡すことはできない (モジュールの説明を
-    /// 参照)。2 GB を建て直さずに VM をもう 1 個持ちたいときに使う。
-    ///
-    /// `seed` と `seed_height` は、そのデータセットを作ったときと同じ値を
-    /// 渡すこと。食い違わせると、[`RandomXMiner::seed`] が嘘をつく。
-    ///
-    /// データセットは作り直さないので、ここで試すのは VM のフラグだけで
-    /// ある。データセットの中身はシードだけで決まり、フラグには依らない。
-    pub fn sharing_dataset_with(
-        seed: &Hash,
-        seed_height: u64,
-        dataset: RandomXDataset,
-    ) -> Result<RandomXMiner, RandomXPowError> {
-        let steps = flag_ladder(true);
-        let (flags, vm) = try_each(&steps, |flags| {
-            create_vm(flags, None, Some(dataset.clone()))
-        })?;
-        Ok(RandomXMiner {
-            seed_height,
-            seed: *seed,
-            flags,
-            dataset,
-            vm,
-        })
+        SharedDataset::new(seed, seed_height)?.miner()
     }
 
     /// この採掘器が実際に用いているフラグ。
@@ -481,9 +634,9 @@ impl RandomXMiner {
         self.flags.contains(RandomXFlag::FLAG_JIT)
     }
 
-    /// この採掘器のデータセット。別スレッドの採掘器と共有するために取る。
-    pub fn dataset(&self) -> RandomXDataset {
-        self.dataset.clone()
+    /// データセットを大きなページで確保できたか。
+    pub fn uses_large_pages(&self) -> bool {
+        self.large_pages
     }
 
     /// この採掘器が対応するシードのブロック高さ。
@@ -593,10 +746,15 @@ const _: () = {
          on the scratchpad, which is undefined behaviour."
     );
     assert!(
-        !Probe::<RandomXDataset>::IS_SEND,
-        "randomx-rs has made RandomXDataset Send. This module's description \
-         says a dataset cannot cross threads, so fix that. Multi-threaded \
-         fast mining becomes possible."
+        !Probe::<RandomXDataset>::IS_SEND && !Probe::<RandomXDataset>::IS_SYNC,
+        "randomx-rs has made RandomXDataset Send or Sync. The two \
+         `unsafe impl` lines on SharedDataset are no longer needed: remove \
+         them and go back to #![forbid(unsafe_code)] in lib.rs."
+    );
+    // 採掘スレッドへ渡すのはこれである。渡せなくなったら採掘が組めない。
+    assert!(
+        Probe::<SharedDataset>::IS_SEND && Probe::<SharedDataset>::IS_SYNC,
+        "SharedDataset can no longer cross threads"
     );
 
     // 上から自動で従うが、本モジュールが公開しているのはこちらなので
@@ -766,6 +924,20 @@ mod tests {
             light.len(),
             "the candidates contain duplicates: {light:?}"
         );
+    }
+
+    #[test]
+    fn large_pages_are_tried_first_and_given_up_on_quietly() {
+        let base = flag_ladder(false);
+        let steps = with_large_pages(&base);
+        // 大きなページを付けたものが先、付けないものが後。
+        assert_eq!(steps.len(), base.len() * 2);
+        for (pair, &flags) in steps.chunks(2).zip(&base) {
+            assert_eq!(pair[0], flags | RandomXFlag::FLAG_LARGE_PAGES);
+            assert_eq!(pair[1], flags);
+        }
+        // 最後は必ず大きなページを要求しない。取れない機械でも止まらない。
+        assert_eq!(*steps.last().unwrap(), RandomXFlag::FLAG_DEFAULT);
     }
 
     #[test]

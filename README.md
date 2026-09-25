@@ -166,21 +166,20 @@ count.
     --mine --payout <address> --mining-threads 4
 ```
 
-**More threads means more memory.** A RandomX miner cannot share its dataset
-across threads, so each thread builds its own.
+In fast mode **all threads share one 2 GB dataset**, so adding threads costs
+almost no memory (2 MB each). In light mode each thread needs its own 256 MB.
 
-| Mode | Per thread | With 4 threads |
+| Mode | 1 thread | 4 threads |
 | --- | ---: | ---: |
 | light | 256 MB | 1 GB |
-| fast | 2 GB | 8 GB |
+| fast | 2 GB | 2 GB |
 
-Passing `--fast` together with `--mining-threads 0` still gives you one thread.
-The node will not go allocating 2 GB per core when it does not know how much
-memory the machine has. If you do want several fast threads, say how many.
+So with `--fast` you can simply pass `--mining-threads 0` to use every core.
 
-Several light threads and one fast thread both land around 2 GB. **Which is
-faster depends on the machine.** Measure one light thread with `hashrate` above
-and multiply by the thread count to compare.
+The dataset goes into large pages when the OS allows it, which is faster. It
+needs a one-time setting on your machine; see "大きなページ (large pages)" in
+[docs/COMMANDS.md](docs/COMMANDS.md). Without it, mining still works on normal
+pages.
 
 ```sh
 cargo build --release -p oag-node

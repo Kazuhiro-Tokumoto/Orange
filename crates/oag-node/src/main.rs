@@ -43,18 +43,18 @@ enum Command {
         /// Building the dataset takes about a minute. If 2 GB cannot be
         /// allocated, it continues in light mode. **Validation is always light.**
         ///
+        /// The dataset is put in large pages when the OS allows it, which is
+        /// faster. See "large pages" in docs/COMMANDS.md.
+        ///
         /// How much faster depends on the machine. To measure locally:
         /// `cargo run --release -p oag-pow --features randomx --example hashrate`
         #[arg(long)]
         fast: bool,
         /// How many threads to mine with. Default 1. `0` matches the core count.
         ///
-        /// **More threads means more memory.** A RandomX miner cannot cross
-        /// threads, so each builds its own: 256 MB per thread in light mode and
-        /// 2 GB per thread in fast mode.
-        ///
-        /// Passing `0` still gives one thread in fast mode, so it does not go
-        /// allocating 2 GB per core without knowing how much memory there is.
+        /// In fast mode all threads share one 2 GB dataset, so more threads
+        /// cost almost no extra memory. In light mode each thread needs its
+        /// own 256 MB.
         #[arg(long, default_value_t = 1)]
         mining_threads: usize,
         /// The address the reward is paid to.

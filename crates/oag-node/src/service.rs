@@ -36,7 +36,7 @@ use oag_net::message::NetAddress;
 use oag_net::message::MAX_HEADERS;
 use oag_net::message::{SERVICE_FULL_NODE, SERVICE_LIMITED, SERVICE_NONE};
 use oag_net::sync::{BlockDownload, PeerId, TxRequests};
-use oag_pow::randomx::{RandomXMiner, RandomXVerifier};
+use oag_pow::randomx::{RandomXVerifier, SharedDataset};
 use oag_primitives::{Amount, Hash, Network};
 use oag_store::{BlockSummary, IndexStats, TxLocation};
 use std::collections::VecDeque;
@@ -78,14 +78,18 @@ const SHUTDOWN_ATTEMPTS: usize = 100;
 
 /// 採掘のやり方。
 ///
-/// スレッドを増やすと、その数だけ RandomX の採掘器が要る。**採掘器は
-/// スレッドをまたげない**ので、共有はできない (`oag-miner` の `pool`
-/// モジュールを見よ)。memory は掛け算で効く。
+/// スレッドを増やすと、その数だけ RandomX の VM が要る。VM はスクラッチ
+/// パッドを書き換えるので共有できない (`oag-miner` の `pool` モジュールを
+/// 見よ)。**fast モードのデータセット (2 GB) は全スレッドで 1 本を共有
+/// する** (`oag_pow::randomx::SharedDataset`)。
 ///
-/// | モード | 1 スレッドあたり | 4 スレッドなら |
+/// | モード | 1 スレッド | 4 スレッドなら |
 /// | --- | ---: | ---: |
 /// | light | 256 MB | 1 GB |
-/// | fast | 2 GB | 8 GB |
+/// | fast | 2 GB | 2 GB |
+///
+/// light は相変わらず本数の掛け算である。キャッシュを共有していない
+/// ためである。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MiningMode {
     /// fast モード (2 GB) を使うか。
@@ -125,17 +129,14 @@ impl MiningMode {
 
     /// 実際に起こすスレッドの数。
     ///
-    /// `threads` が `0` のときだけ機械を見る。**fast モードでは増やさない。**
-    /// 1 本あたり 2 GB 要るのに、積んでいる量が分からないためである。
-    /// 増やしたければ本数を明示する。
+    /// `threads` が `0` のときだけ機械を見て、コアの数にする。
+    ///
+    /// fast モードでも同じである。データセットは全スレッドで 1 本を共有
+    /// するので、コアの数だけ建てても 2 GB のままである (以前は 1 本
+    /// あたり 2 GB 要ったので、fast では増やさなかった)。
     pub fn resolved_threads(self) -> NonZeroUsize {
-        if let Some(threads) = NonZeroUsize::new(self.threads) {
-            return threads;
-        }
-        if self.fast {
-            return NonZeroUsize::MIN;
-        }
-        std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
+        NonZeroUsize::new(self.threads)
+            .unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
     }
 }
 
@@ -670,8 +671,9 @@ impl NodeHandle {
     /// かかり、その間ノードは他の要求に応えない。** 確保できなければ
     /// light モードで掘る。
     ///
-    /// スレッドを増やすと、その数だけ採掘器を建てる。**memory は掛け算で
-    /// 効く。**
+    /// スレッドを増やすと、その数だけ VM を建てる。fast モードの
+    /// データセットは全スレッドで 1 本を共有するので、**fast なら memory は
+    /// 本数に比例しない。** light は 1 本あたり 256 MB の掛け算である。
     ///
     /// [`RandomXMiner`]: oag_pow::randomx::RandomXMiner
     pub async fn start_mining(
@@ -1167,25 +1169,51 @@ impl Service {
         self.retire_pool();
 
         let threads = self.mode.resolved_threads();
-        let fast = self.mode.fast;
-        if fast {
+
+        // fast モードなら、データセットを**ここで 1 本だけ**建てる。
+        // 全スレッドがそれを共有し、それぞれ自分の VM だけを建てる。
+        // 建てられなければ (2 GB を確保できない)、全員 light で掘る。
+        let shared = if self.mode.fast {
             crate::log_mine!(
-                "building {threads} fast-mode datasets \
-                 ({:.1} GB in total, takes about a minute)",
-                DATASET_GIB * threads.get() as f64
+                "building the fast-mode dataset \
+                 ({DATASET_GIB:.1} GB, shared by {threads} threads, takes about a minute)"
             );
-        }
+            match SharedDataset::new(&seed, epoch) {
+                Ok(shared) => {
+                    if !shared.uses_large_pages() {
+                        crate::log_mine!(
+                            "large pages are not available, so the dataset uses normal pages \
+                             (see \"large pages\" in docs/COMMANDS.md)"
+                        );
+                    }
+                    Some(shared)
+                }
+                Err(e) => {
+                    crate::log_warn!(
+                        "cannot build the fast-mode dataset, so mining in light mode (256 MB \
+                         per thread) instead: {e}\n\
+                         Check how much memory is installed."
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let fast = shared.is_some();
+        let large_pages = shared.as_ref().is_some_and(SharedDataset::uses_large_pages);
 
         // **採掘器の作り方を渡す。採掘器そのものは渡せない。**
-        // RandomX の VM もデータセットもスレッドをまたげないので、
-        // それぞれの作業スレッドが自分の分を建てる。
+        // VM はスクラッチパッドを書き換えるのでスレッドをまたげない。
+        // それぞれの作業スレッドが、共有のデータセットの上に自分の VM を
+        // 建てる。
         let fell_back = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&fell_back);
         let factory: HasherFactory = Arc::new(move |_| {
-            if fast {
-                match RandomXMiner::new(&seed, epoch) {
+            if let Some(shared) = &shared {
+                match shared.miner() {
                     Ok(miner) => return Ok(Box::new(miner) as Box<dyn PowHasher>),
-                    // 2 GB を確保できない。この 1 本は light で掘る。
+                    // VM を建てられない。この 1 本は light で掘る。
                     Err(_) => {
                         counter.fetch_add(1, Ordering::SeqCst);
                     }
@@ -1199,17 +1227,19 @@ impl Service {
         match MiningPool::spawn(threads, factory) {
             Ok(pool) => {
                 let light = fell_back.load(Ordering::SeqCst);
+                let pages = if large_pages { ", large pages" } else { "" };
                 let kind = if !fast {
                     "light mode".to_string()
                 } else if light == 0 {
-                    "fast mode".to_string()
+                    format!("fast mode{pages}")
                 } else {
-                    format!("{} fast, {light} light", threads.get() - light)
+                    format!("{} fast, {light} light{pages}", threads.get() - light)
                 };
                 crate::log_mine!("mining with {threads} threads ({kind})");
                 if fast && light > 0 {
                     crate::log_warn!(
-                        "threads that could not allocate 2 GB mine in light mode (256 MB) instead.\n\
+                        "threads that could not create a fast-mode VM mine in light mode \
+                         (256 MB each) instead.\n\
                          Reduce the thread count, or check how much memory is installed."
                     );
                 }
@@ -1968,11 +1998,11 @@ mod tests {
     }
 
     #[test]
-    fn asking_the_machine_does_not_multiply_the_dataset() {
-        // fast は 1 本あたり 2 GB 要る。コア数だけ建てれば 16 コアで
-        // 32 GB である。**本数を明示しない限り増やさない。**
+    fn asking_the_machine_in_fast_mode_also_gives_the_core_count() {
+        // データセットは共有するので、コアの数だけ建てても 2 GB で済む。
         let mode = MiningMode::fast().with_threads(0);
-        assert_eq!(mode.resolved_threads().get(), 1);
+        let wanted = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+        assert_eq!(mode.resolved_threads().get(), wanted);
     }
 
     #[test]

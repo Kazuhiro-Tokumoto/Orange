@@ -1374,27 +1374,32 @@ Publishing it means creating a fork yourself. This implementation stamps
 templates with a generation number and discards mismatches (the `pool` module in
 `oag-miner`).
 
-Memory **multiplies by the thread count**, because there is nothing to share.
+The fast-mode dataset **SHOULD be shared by all threads, one copy**. Each extra
+thread only adds its VM's 2 MB scratchpad. Light mode multiplies by the thread
+count in this implementation, because the cache is not shared.
 
-| Mode | Per thread | With 4 threads |
+| Mode | 1 thread | With 4 threads |
 | --- | ---: | ---: |
 | light | 256 MB | 1 GB |
-| fast | 2 GB | 8 GB |
+| fast | 2 GB | 2 GB |
 
 The light verifier used for validation is needed separately, one of them. A
-mining thread's miner cannot be reused for validation (it cannot cross threads).
+mining thread's miner cannot be reused for validation (a VM cannot cross
+threads).
 
-> **How this implementation is built**: in `randomx-rs` 1.6.0, neither
-> `RandomXDataset` nor `RandomXVM` is `Send`, because both hold raw pointers. So
-> "build one 2 GB dataset and reuse it across threads" is not achievable without
-> writing `unsafe`. Every crate carries `#![forbid(unsafe_code)]`, so it is not
-> written.
+> **How this implementation is built**: in `randomx-rs` 1.6.0, `RandomXDataset`
+> is not `Send`, because it holds a raw pointer. `SharedDataset` in `oag-pow`
+> wraps it and carries two lines of `unsafe impl Send / Sync`. **Those two lines
+> are the only `unsafe` written anywhere in the workspace.** `oag-pow` alone is
+> lowered to `#![deny(unsafe_code)]`; every other crate keeps
+> `#![forbid(unsafe_code)]`. What those lines take responsibility for (read-only
+> after initialisation, RandomX's own benchmark uses it the same way, freed
+> exactly once through `Arc`) is written on `SharedDataset`.
 >
-> Instead, **the miner is not passed around — the recipe for building one is.**
-> All that crosses a thread boundary is the seed value; the miner is built on
-> each worker thread and never leaves it. Since nothing is shared, memory scales
-> with the thread count. That is the table above. Had sharing been possible, any
-> number of fast threads would have fit in 2 GB.
+> The VM is not wrapped. **The miner is still not passed around — the recipe
+> is.** The recipe carries the `SharedDataset` across the thread boundary, and
+> each worker thread builds its own VM on top of it. For the history, see
+> [§19](#multi-threaded-mining-shares-the-dataset).
 
 ### 11.3 Seed epochs
 
@@ -1457,6 +1462,20 @@ compares the output of every candidate.
 
 The interpreter is roughly ten times slower. Falling back SHOULD be reported to
 the operator.
+
+**Large pages SHOULD be tried, and given up on quietly.** Fast mode reads all
+over a 2 GB dataset, which is more than 4 KB pages' TLB can cover. The cache and
+the dataset are first allocated with `FLAG_LARGE_PAGES`, and allocated again
+without it if that fails. Large pages are almost never available without setup
+on the OS side (`vm.nr_hugepages` on Linux, the "Lock pages in memory" right on
+Windows), so **failing to get them MUST NOT be an error**. The flag is a speed
+setting; the hash does not change.
+
+They are not used for the VM's scratchpad. If allocating a VM fails, NULL comes
+back and, by the rule below, cannot be freed. If it holds a reference to the
+shared dataset, 2 GB is never freed again. For the same reason, the flags for
+building VMs on the shared dataset are decided once, before building it, with a
+light VM on the cache.
 
 **A VM that was NULL MUST NOT be freed.** C++'s `randomx_destroy_vm` begins with
 `assert(machine != nullptr)`. That line disappears under `NDEBUG`, but the
@@ -3081,7 +3100,6 @@ The main choices and the reasons for them.
 | A transaction index on by default | every node would pay 37 GB a year when blocks are full. Consensus requires only the UTXO set, and a wallet need only record the transactions relevant to itself. Operators who need it enable `--index` |
 | A maximum reorg depth | a network split deeper than the cap never rejoins. Leaving the attack possible is better than creating the possibility of a permanent split |
 | Extending coinbase maturity | pushing back a reorg takes cumulative work, not time, and in block count 120 is already deeper than Bitcoin's 100. Extending it changes only how long you wait for the reward, not the cost of a reorg |
-| Using `unsafe` to share the dataset | mining across threads works without sharing. Pass the recipe to the thread, not the miner. There is no need to wait for upstream to add `Send`. The price is memory per thread and nothing else |
 | Requiring a rate increase for replacement | BIP125 rules 3 and 4 look only at totals, so a large low-rate transaction can evict a small high-rate one. Adding a rule of our own here makes mempool contents diverge between nodes, which feeds directly into compact-block hit rates. The weakness is accepted in favour of compatibility |
 
 ---
@@ -3135,7 +3153,7 @@ entries. At this chain's 60-second interval the same approach does not hold.
 | Transaction index | **not provided.** Added as an optional feature when needed | below |
 | Coinbase maturity | **stays at 120 blocks.** Unchanged | below |
 | Maximum reorg depth | **not provided.** Pruning rollback data and block bodies is an option the operator chooses | below |
-| Multi-threaded mining | **included.** The dataset is not shared; one per thread | [§11.2](#112-modes) |
+| Multi-threaded mining | **included.** All threads share one dataset (from 0.1.1; 0.1.0 built one per thread) | [§11.2](#112-modes) |
 | Resident size of the block index | **not proportional to height.** Storage holds the objects; only tip candidates and a bounded cache stay resident | below |
 
 #### The block index's resident size is not proportional to height
@@ -3176,7 +3194,35 @@ return an error. Conflating them means treating a perfectly good block as unknow
 and silently leaving the chain (the same mistake as the seed resolution in
 [§11.3](#113-seed-epochs)).
 
-#### Multi-threaded mining does not share the dataset
+#### Multi-threaded mining shares the dataset
+
+**This decision was reversed in 0.1.1.** "The 0.1.0 decision" below is kept as
+the record of the time.
+
+##### Why it was reversed in 0.1.1
+
+It said "the price is memory and nothing else", but that memory was too much.
+
+- Mining fast mode with 6 threads takes **12 GB**. A user really did mine with 6
+  threads. Monero and XMRig need 2 GB for the same thread count.
+- Building the dataset (about a minute) also runs once per thread, again every
+  epoch.
+- Speeding it up with large pages would need large pages multiplied by the
+  thread count too. 12 GB of large pages is practically unobtainable on Windows.
+
+So option (b) was taken, but without a thin crate: `SharedDataset` in `oag-pow`
+carries just two lines of `unsafe impl Send / Sync`. No `unsafe` body (code that
+touches pointers) was written. What was written is only the declaration "this
+type may cross threads", and its grounds are listed on the type.
+
+The recipe mechanism stays. The recipe carries the `SharedDataset` across, and
+the VM is built on each worker thread. Only the inside of the recipe changed.
+
+Option (a) remains open too. If upstream adds `Send` / `Sync`, the two lines are
+no longer needed, and a `const _` in `oag-pow` will fail the build to make it
+known.
+
+##### The 0.1.0 decision
 
 The question was: "`RandomXDataset` is not `Send`, so 2 GB cannot be shared. What
 now?" The options were (a) ask `randomx-rs` to add `Send`, (b) allow `unsafe` in
