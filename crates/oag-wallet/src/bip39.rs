@@ -25,7 +25,7 @@
 //! 有効なウォレットを作る。利用者から見えるのは残高 0 のウォレットだけで、
 //! どこにも誤りは表示されない。呼び出し側はこの性質を利用者に伝えること。
 //!
-//! [`docs/SPEC.md`]: https://github.com/Kazuhiro-Tokumoto/Orange/blob/main/docs/SPEC.md
+//! [`docs/SPEC.md`]: https://github.com/manh923/Orange/blob/main/docs/SPEC.md
 
 use sha2::{Digest, Sha256, Sha512};
 use std::sync::OnceLock;

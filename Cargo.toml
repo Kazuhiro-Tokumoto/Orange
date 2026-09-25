@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
 license = "MIT"
-repository = "https://github.com/Kazuhiro-Tokumoto/Orange"
+repository = "https://github.com/manh923/Orange"
 authors = ["Orange contributors"]
 
 [workspace.dependencies]

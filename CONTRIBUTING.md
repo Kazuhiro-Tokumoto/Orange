@@ -6,7 +6,7 @@
 
 This chain has only a handful of nodes right now. The moment you connect, you
 are part of the network. Whether it worked or not, one line in an
-[Issue](https://github.com/Kazuhiro-Tokumoto/Orange/issues) shows us something
+[Issue](https://github.com/manh923/Orange/issues) shows us something
 we cannot see from here.
 
 Email is fine too: `contact@oagcoin.org`

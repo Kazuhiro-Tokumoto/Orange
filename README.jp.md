@@ -14,7 +14,7 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 > **通貨としての価格は存在しません。** 自分で掘って自分で試す段階です。
 >
 > **組み立て済みのものを
-> [最新のリリース](https://github.com/Kazuhiro-Tokumoto/Orange/releases/latest)
+> [最新のリリース](https://github.com/manh923/Orange/releases/latest)
 > に置いています。** Rust は要りません。詳しくは
 > [出来合いを落とす](#出来合いを落とす)。
 
@@ -47,7 +47,7 @@ RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロ�
 
 ## 出来合いを落とす
 
-[最新のリリース](https://github.com/Kazuhiro-Tokumoto/Orange/releases/latest)
+[最新のリリース](https://github.com/manh923/Orange/releases/latest)
 に組み立て済みのものを置いています。展開して叩くだけです。**Rust もコンパイラも
 要りません。**
 
@@ -644,12 +644,12 @@ MSRV (最低必要バージョン) は **1.90** で、CI が毎回検証して�
 
 今このネットワークにはノードが数台しかありません。繋いだ時点であなたは
 一角です。動いた・動かなかったのどちらでも、
-[Issue](https://github.com/Kazuhiro-Tokumoto/Orange/issues) に一行あると、
+[Issue](https://github.com/manh923/Orange/issues) に一行あると、
 こちらからは見えないものが見えます。
 
 | | |
 |---|---|
-| 報告・質問・指摘 | [Issues](https://github.com/Kazuhiro-Tokumoto/Orange/issues) |
+| 報告・質問・指摘 | [Issues](https://github.com/manh923/Orange/issues) |
 | それ以外・雑談 | `contact@oagcoin.org` |
 | 脆弱性 | [`SECURITY.jp.md`](SECURITY.jp.md) (**公開の Issue には書かないでください**) |
 

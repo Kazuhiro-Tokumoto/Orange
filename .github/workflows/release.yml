@@ -176,7 +176,7 @@ jobs:
             | ラズパイ / ARM | `orange-linux-aarch64.tar.gz` |
 
             macOS 向けの出来合いは配っていません。ソースから建ててください。
-            手順は [README](https://github.com/Kazuhiro-Tokumoto/Orange#readme)
+            手順は [README](https://github.com/manh923/Orange#readme)
             にあります。
 
             ### 動かす
@@ -196,4 +196,4 @@ jobs:
             ### コマンド一覧
 
             同梱の `COMMANDS.md`、または
-            [docs/COMMANDS.md](https://github.com/Kazuhiro-Tokumoto/Orange/blob/main/docs/COMMANDS.md)。
+            [docs/COMMANDS.md](https://github.com/manh923/Orange/blob/main/docs/COMMANDS.md)。

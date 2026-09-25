@@ -13,7 +13,7 @@
 
 [Unit]
 Description=Orange (OAG) node
-Documentation=https://github.com/Kazuhiro-Tokumoto/Orange/blob/main/docs/COMMANDS.md
+Documentation=https://github.com/manh923/Orange/blob/main/docs/COMMANDS.md
 # The node resolves the seed hostnames at startup, so it wants DNS to work.
 # It survives starting too early -- it just retries -- but this is tidier.
 Wants=network-online.target

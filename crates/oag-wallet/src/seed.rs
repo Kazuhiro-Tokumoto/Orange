@@ -18,7 +18,7 @@
 //! 控えは BIP39 の 12 語であり、そこから BIP39 の 64 バイトの種を作り、
 //! BIP32 でこの経路をたどる。
 //!
-//! [`docs/SPEC.md`]: https://github.com/Kazuhiro-Tokumoto/Orange/blob/main/docs/SPEC.md
+//! [`docs/SPEC.md`]: https://github.com/manh923/Orange/blob/main/docs/SPEC.md
 
 use crate::bip32::{Bip32Error, ExtendedKey, HARDENED};
 use crate::bip39::Mnemonic;

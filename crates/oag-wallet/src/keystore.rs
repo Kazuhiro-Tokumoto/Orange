@@ -48,7 +48,7 @@
 //! 新しいウォレットへ送金し直すこと。テストネット公開前であり、
 //! 守るべき資金が存在しない間に済ませる。
 //!
-//! [`docs/SPEC.md`]: https://github.com/Kazuhiro-Tokumoto/Orange/blob/main/docs/SPEC.md
+//! [`docs/SPEC.md`]: https://github.com/manh923/Orange/blob/main/docs/SPEC.md
 
 use crate::bip39::{Bip39Error, Mnemonic};
 use crate::seed::{Seed, SeedError, SEED_LEN};

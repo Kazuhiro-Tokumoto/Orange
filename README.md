@@ -15,7 +15,7 @@ Based on [chroma](https://github.com/kusogakiller/chroma).
 > it yourself and try it yourself.
 >
 > **Prebuilt binaries are on the
-> [latest release](https://github.com/Kazuhiro-Tokumoto/Orange/releases/latest).**
+> [latest release](https://github.com/manh923/Orange/releases/latest).**
 > You do not need Rust to try it — see
 > [Getting the binaries](#getting-the-binaries).
 
@@ -71,7 +71,7 @@ subcommand and flag on one page, plus the RPC methods and the port numbers.
 
 ## Getting the binaries
 
-Prebuilt binaries are on the [latest release](https://github.com/Kazuhiro-Tokumoto/Orange/releases/latest).
+Prebuilt binaries are on the [latest release](https://github.com/manh923/Orange/releases/latest).
 Unpack one and run it. **You do not need Rust or a compiler.**
 
 | Machine | File |
@@ -732,12 +732,12 @@ requires it.
 
 There are only a handful of nodes on this network right now. The moment you
 connect, you are one of them. Whether it worked or not, one line in an
-[Issue](https://github.com/Kazuhiro-Tokumoto/Orange/issues) shows us something
+[Issue](https://github.com/manh923/Orange/issues) shows us something
 we cannot see from here.
 
 | | |
 |---|---|
-| Reports, questions, corrections | [Issues](https://github.com/Kazuhiro-Tokumoto/Orange/issues) |
+| Reports, questions, corrections | [Issues](https://github.com/manh923/Orange/issues) |
 | Anything else | `contact@oagcoin.org` |
 | Vulnerabilities | [`SECURITY.md`](SECURITY.md) (**please do not open a public Issue**) |
 

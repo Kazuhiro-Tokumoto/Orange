@@ -6,7 +6,7 @@
 
 このチェーンは今のところノードが数台しかありません。あなたが繋いだ時点で
 ネットワークの一角です。動いた・動かなかったのどちらでも、
-[Issue](https://github.com/Kazuhiro-Tokumoto/Orange/issues) に一行書いて
+[Issue](https://github.com/manh923/Orange/issues) に一行書いて
 もらえると、こちらからは見えないものが見えます。
 
 メールでも構いません。`contact@oagcoin.org`
