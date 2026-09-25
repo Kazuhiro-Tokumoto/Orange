@@ -752,6 +752,37 @@ Consensus bugs come in a shape where "the spec is right but the implementations
 disagree", and that shape is **invisible forever while only one implementation
 exists.**
 
+## Official places
+
+There are two: this repository, and the
+[announcement thread on bitcointalk](https://bitcointalk.org/index.php?topic=5594978.0).
+**There is no official Discord, Telegram or token sale, and nobody from the
+project will message you first.**
+
+No exchange listing is official either. If someone lists OAG, they do it on
+their own and with their own money. The project neither pays for a listing nor
+vouches for one.
+
+### Telling the author apart
+
+The author is whoever holds the key that block 1 paid. Anyone who says they
+speak for the project somewhere else can prove it by signing a message with
+that address:
+
+```sh
+oag-wallet verify --address <the address block 1 paid> \
+    --signature <hex> --message "<the message, exactly>"
+```
+
+- **Look the address up yourself.** It is in your own node's explorer at
+  `/block/1`, in the coinbase transaction. Never take it from the person making
+  the claim.
+- **Read the message, not just the result.** A signature vouches only for the
+  message it signs. It should name the place being vouched for and a recent
+  date. An old signature pasted into a new place proves nothing.
+
+No signature, no claim.
+
 ## License
 
 MIT. Full text in [`LICENSE`](LICENSE).
