@@ -9,7 +9,7 @@ use oag_net::magic::magic_for;
 use oag_net::transport::Listener;
 use oag_node::node::{self, AssumeValidSetting, Node, NodeOptions};
 use oag_node::service::{MiningMode, NodeEvent, NodeHandle, NodeService};
-use oag_node::{accept_loop, dial};
+use oag_node::{accept_loop, keep_dialling};
 use oag_primitives::{Address, Hash, Network, SecretKey};
 use oag_store::Store;
 use std::net::SocketAddr;
@@ -514,7 +514,7 @@ fn run() -> Result<(), String> {
                 if no_discovery {
                     // 名指しされた相手だけに繋ぐ。住所帳もシードも使わない。
                     for addr in connect {
-                        tokio::spawn(dial(handle.clone(), addr));
+                        tokio::spawn(keep_dialling(handle.clone(), addr));
                     }
                 } else {
                     let outbound = oag_node::connect::Outbound::new();

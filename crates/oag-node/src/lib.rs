@@ -73,6 +73,20 @@ pub async fn dial(handle: NodeHandle, addr: SocketAddr) {
     }
 }
 
+/// 相手に繋ぎに行き、切れたら繋ぎ直す。**戻らない。**
+///
+/// `--no-discovery` で名指しした相手用である。住所帳を使わないので、
+/// 切れた相手を補充する仕組みが他に無い。**返事の無い相手は `ping` で
+/// 切る** ([`peer`]) ので、繋ぎ直さないと二度と繋がらない。
+pub async fn keep_dialling(handle: NodeHandle, addr: SocketAddr) {
+    /// 切れてから繋ぎ直すまでの間。
+    const REDIAL: std::time::Duration = std::time::Duration::from_secs(5);
+    loop {
+        dial(handle.clone(), addr).await;
+        tokio::time::sleep(REDIAL).await;
+    }
+}
+
 /// RPC の待ち受けを起こす。
 ///
 /// 使い捨ての合言葉を作り、データディレクトリの `.cookie` に書き出す。

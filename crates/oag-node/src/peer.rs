@@ -25,6 +25,25 @@
 //! 4. `block` が届いたら取り込み、次の分を求める
 //!
 //! 相手からの `getheaders` や `getdata` にも同じ作業の中で応える。
+//!
+//! # 死んだ接続を見つける
+//!
+//! TCP は、相手が黙って消えたこと (電源断・スリープ・NAT の期限切れ・
+//! 回線の瞬断) を報せてくれない。何も送らずに待っていると、**死んだ
+//! 接続を「繋がっている」と思ったまま待ち続ける。** 0.1.1 までがそうで、
+//! ピアが 1 本しか無いノードが 37 分間ブロックを受け取らず、古い先端の上で
+//! 掘り続けた。
+//!
+//! 次の 3 つで塞ぐ。
+//!
+//! - `PING_INTERVAL_SECS` ごとに `ping` を送り、`PONG_TIMEOUT_SECS` 返事が
+//!   無ければ切る (`Liveness`)。0.1.0 のノードも `ping` には `pong` を返す
+//! - 送るのに `WRITE_TIMEOUT` 以上かかったら切る。死んだ相手への送信は、
+//!   送り側のバッファが埋まると永久に終わらない
+//! - 先端が `QUIET_TIP_SECS` 動かなければ、相手に `getheaders` を送り直す。
+//!   相手の `inv` を取りこぼしていても、それで追いつく
+//!
+//! 外向きの接続は、切れれば [`crate::connect`] が補充する。
 
 use crate::service::NodeHandle;
 use oag_net::message::{
@@ -47,6 +66,26 @@ const SEND_QUEUE: usize = 256;
 /// 取りこぼしの回収と、止まった同期のやり直しを担う。報せが届けば
 /// それで動くため、これは保険である。
 const TICK: Duration = Duration::from_secs(2);
+
+/// 生存確認 (`ping`) を送る間隔 (秒)。
+const PING_INTERVAL_SECS: i64 = 60;
+
+/// `ping` にこの秒数だけ返事が無ければ、相手は消えたと見て切る。
+///
+/// 短すぎると、大きなブロックを捌いていて返事が遅れた相手まで切る。
+/// ブロックは 1 分に 1 個なので、5 分は 5 個分の遅れにあたる。
+const PONG_TIMEOUT_SECS: i64 = 300;
+
+/// 1 通を送り終えるまでの上限。
+///
+/// 最大のブロック (200 KB) でも、毎秒 2 KB 出れば間に合う。
+const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 先端がこの秒数だけ動かなければ、相手に続きを聞き直す。
+///
+/// 目標のブロック間隔の 5 倍。平均どおりに掘れていれば、5 分ブロックが
+/// 出ないことはまず無い (e^-5 ≈ 0.7%)。
+const QUIET_TIP_SECS: i64 = 300;
 
 /// このノードの名乗り。
 const USER_AGENT: &str = concat!("/oag-node:", env!("CARGO_PKG_VERSION"), "/");
@@ -153,10 +192,20 @@ async fn session(
     let (in_tx, mut in_rx) = mpsc::channel::<Message>(SEND_QUEUE);
 
     // 送る作業。
+    //
+    // 送れなくなったら抜ける。受け口が閉じるので、本体の作業は次に送ろう
+    // としたところで切れたと気づく。
     let sender = tokio::spawn(async move {
         while let Some(message) = out_rx.recv().await {
-            if writer.send(&message).await.is_err() {
-                break;
+            match tokio::time::timeout(WRITE_TIMEOUT, writer.send(&message)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    crate::log_warn!(
+                        "sending took more than {WRITE_TIMEOUT:?}, so dropping the peer"
+                    );
+                    break;
+                }
             }
         }
     });
@@ -183,6 +232,7 @@ async fn session(
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    let started = now();
     let mut state = Session {
         peer,
         source,
@@ -190,8 +240,11 @@ async fn session(
         asked_headers_at: 0,
         addr_requests: 0,
         rejected_txs: 0,
-        last_body_at: now(),
+        last_body_at: started,
         stall_reported: false,
+        // nonce は見分けがつけばよい。推測されて困るものではない。
+        liveness: Liveness::new(started, handle.nonce() ^ peer.rotate_left(32)),
+        last_tip_at: started,
     };
 
     // 相手が先を行っていれば、まずヘッダを求める。
@@ -227,6 +280,7 @@ async fn session(
             event = events.recv() => {
                 match event {
                     Ok(crate::service::NodeEvent::NewTip { hash, from, .. }) => {
+                        state.last_tip_at = now();
                         // 新しい先端を持っていることを知らせる。
                         // **くれた相手には言わない。** 相手は既に持って
                         // いるので、先端が動かず中継もしない。送るだけ無駄。
@@ -295,6 +349,76 @@ struct Session {
     last_body_at: i64,
     /// 止まっていることを既に報せたか。**1 回だけ出す。**
     stall_reported: bool,
+    /// 相手が生きているかの見張り。
+    liveness: Liveness,
+    /// 最後に先端が動いた時刻。誰がくれたか、自分で掘ったかは問わない。
+    last_tip_at: i64,
+}
+
+/// 相手が生きているかの見張り。
+///
+/// 時刻は壁時計 (秒) である。機械がスリープから戻ると一気に進み、返事を
+/// 待っていた `ping` が時間切れになって切れる。スリープの間に相手が
+/// 消えていてもおかしくないので、それで正しい。時計が戻ったときは、
+/// 経過が負になるだけで切りはしない。
+#[derive(Debug)]
+struct Liveness {
+    /// 最後に `ping` を送った時刻。
+    pinged_at: i64,
+    /// 返事を待っている `ping` の nonce。
+    waiting: Option<u64>,
+    /// 次に使う nonce。
+    next_nonce: u64,
+}
+
+/// [`Liveness::check`] の答え。
+#[derive(Debug, PartialEq, Eq)]
+enum Check {
+    /// 何もしなくてよい。
+    Quiet,
+    /// この nonce で `ping` を送る。
+    Ping(u64),
+    /// この秒数だけ返事が無い。切る。
+    Silent(i64),
+}
+
+impl Liveness {
+    fn new(now: i64, first_nonce: u64) -> Liveness {
+        Liveness {
+            pinged_at: now,
+            waiting: None,
+            next_nonce: first_nonce,
+        }
+    }
+
+    /// 今すべきことを答える。`ping` を送るなら、送ったものとして覚える。
+    fn check(&mut self, now: i64) -> Check {
+        let since = now - self.pinged_at;
+        if self.waiting.is_some() {
+            if since >= PONG_TIMEOUT_SECS {
+                return Check::Silent(since);
+            }
+            return Check::Quiet;
+        }
+        if since < PING_INTERVAL_SECS {
+            return Check::Quiet;
+        }
+        let nonce = self.next_nonce;
+        self.next_nonce = self.next_nonce.wrapping_add(1);
+        self.pinged_at = now;
+        self.waiting = Some(nonce);
+        Check::Ping(nonce)
+    }
+
+    /// `pong` が来た。待っていたものでなければ無視する。
+    ///
+    /// 頼んでいない `pong` や古い nonce の `pong` で、生きていることには
+    /// しない。
+    fn pong(&mut self, nonce: u64) {
+        if self.waiting == Some(nonce) {
+            self.waiting = None;
+        }
+    }
 }
 
 /// この秒数だけ本体が来なければ、止まっていると見て記録に出す。
@@ -364,9 +488,39 @@ impl Session {
         handle: &NodeHandle,
         out: &mpsc::Sender<Message>,
     ) -> Result<(), String> {
+        self.check_alive(out).await?;
         self.report_stall(handle).await?;
         self.maybe_request_headers(handle, out).await?;
+        self.poll_quiet_tip(handle, out).await?;
         self.request_bodies(handle, out).await
+    }
+
+    /// 要れば `ping` を送る。返事が来ないまま時間が過ぎていれば切る。
+    async fn check_alive(&mut self, out: &mpsc::Sender<Message>) -> Result<(), String> {
+        match self.liveness.check(now()) {
+            Check::Quiet => Ok(()),
+            Check::Ping(nonce) => send(out, Message::Ping(nonce)).await,
+            Check::Silent(waited) => Err(format!("no reply to ping for {waited} seconds")),
+        }
+    }
+
+    /// 先端がしばらく動かなければ、相手に続きを聞き直す。
+    ///
+    /// 相手が先へ進んだことは、相手の `inv` で知る。**`inv` を取りこぼすと、
+    /// 相手が先を行っていることに気づかないまま待ち続ける。** 相手の側で
+    /// 報せが溢れたときなどに起きる。`getheaders` で確かめれば、相手も同じ
+    /// 先端なら空の `headers` が返るだけである。
+    async fn poll_quiet_tip(
+        &mut self,
+        handle: &NodeHandle,
+        out: &mpsc::Sender<Message>,
+    ) -> Result<(), String> {
+        let now = now();
+        if now - self.last_tip_at < QUIET_TIP_SECS || now - self.asked_headers_at < QUIET_TIP_SECS {
+            return Ok(());
+        }
+        self.asked_headers_at = now;
+        self.request_headers(handle, out).await
     }
 
     /// 遅れているのに本体が来ないことを、1 度だけ報せる。
@@ -400,7 +554,10 @@ impl Session {
     ) -> Result<(), String> {
         match message {
             Message::Ping(nonce) => send(out, Message::Pong(nonce)).await,
-            Message::Pong(_) => Ok(()),
+            Message::Pong(nonce) => {
+                self.liveness.pong(nonce);
+                Ok(())
+            }
 
             // ハンドシェイクは済んでいる。重ねて来たら断る。
             Message::Version(_) | Message::Verack => {
@@ -627,4 +784,92 @@ async fn send(out: &mpsc::Sender<Message>, message: Message) -> Result<(), Strin
     out.send(message)
         .await
         .map_err(|_| "the send channel is closed".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const T0: i64 = 1_800_000_000;
+
+    #[test]
+    fn it_pings_only_after_the_interval() {
+        let mut live = Liveness::new(T0, 7);
+        assert_eq!(live.check(T0), Check::Quiet);
+        assert_eq!(live.check(T0 + PING_INTERVAL_SECS - 1), Check::Quiet);
+        assert_eq!(live.check(T0 + PING_INTERVAL_SECS), Check::Ping(7));
+    }
+
+    #[test]
+    fn it_does_not_ping_again_while_waiting() {
+        let mut live = Liveness::new(T0, 7);
+        assert_eq!(live.check(T0 + PING_INTERVAL_SECS), Check::Ping(7));
+        // 返事を待っている間は、間隔が過ぎても重ねて送らない。
+        let later = T0 + PING_INTERVAL_SECS + PING_INTERVAL_SECS * 2;
+        assert_eq!(live.check(later), Check::Quiet);
+    }
+
+    #[test]
+    fn a_silent_peer_is_dropped_after_the_timeout() {
+        let mut live = Liveness::new(T0, 7);
+        let sent = T0 + PING_INTERVAL_SECS;
+        assert_eq!(live.check(sent), Check::Ping(7));
+        assert_eq!(live.check(sent + PONG_TIMEOUT_SECS - 1), Check::Quiet);
+        assert_eq!(
+            live.check(sent + PONG_TIMEOUT_SECS),
+            Check::Silent(PONG_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn the_right_pong_keeps_the_peer() {
+        let mut live = Liveness::new(T0, 7);
+        let sent = T0 + PING_INTERVAL_SECS;
+        assert_eq!(live.check(sent), Check::Ping(7));
+        live.pong(7);
+        // 返事が来たので、時間切れにはならない。次の ping は間隔どおり。
+        assert_eq!(live.check(sent + PONG_TIMEOUT_SECS), Check::Ping(8));
+    }
+
+    #[test]
+    fn a_wrong_or_unasked_pong_is_ignored() {
+        let mut live = Liveness::new(T0, 7);
+        // 頼んでいない pong。
+        live.pong(7);
+        let sent = T0 + PING_INTERVAL_SECS;
+        assert_eq!(live.check(sent), Check::Ping(7));
+        // 違う nonce の pong では生きていることにしない。
+        live.pong(6);
+        live.pong(8);
+        assert_eq!(
+            live.check(sent + PONG_TIMEOUT_SECS),
+            Check::Silent(PONG_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn waking_from_sleep_drops_a_peer_that_was_being_waited_on() {
+        let mut live = Liveness::new(T0, 7);
+        let sent = T0 + PING_INTERVAL_SECS;
+        assert_eq!(live.check(sent), Check::Ping(7));
+        // 機械が 1 時間眠っていた。
+        assert_eq!(live.check(sent + 3600), Check::Silent(3600));
+    }
+
+    #[test]
+    fn a_clock_going_backwards_does_not_drop_the_peer() {
+        let mut live = Liveness::new(T0, 7);
+        let sent = T0 + PING_INTERVAL_SECS;
+        assert_eq!(live.check(sent), Check::Ping(7));
+        assert_eq!(live.check(sent - 3600), Check::Quiet);
+    }
+
+    #[test]
+    fn the_nonce_wraps_around() {
+        let mut live = Liveness::new(T0, u64::MAX);
+        let first = T0 + PING_INTERVAL_SECS;
+        assert_eq!(live.check(first), Check::Ping(u64::MAX));
+        live.pong(u64::MAX);
+        assert_eq!(live.check(first + PING_INTERVAL_SECS), Check::Ping(0));
+    }
 }

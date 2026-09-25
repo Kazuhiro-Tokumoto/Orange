@@ -2340,6 +2340,27 @@ handed to a peer that has not identified itself.
 The random value in `version` is used to detect self-connection. If a peer's
 `version` carries the same value as ours, the connection is to ourselves.
 
+#### Keep-alive (since 0.1.2)
+
+TCP does not report a peer that vanished silently (power loss, sleep, an
+expired NAT entry). A node that only waits keeps believing a dead connection
+is alive. Up to 0.1.1 this really happened: a node with a single peer
+received no block for 37 minutes.
+
+- After the handshake, send `ping` every 60 seconds. Do not send another
+  while waiting for a reply
+- On `ping`, reply with `pong` carrying the same nonce MUST (since 0.1.0)
+- If no `pong` with the awaited nonce arrives within 300 seconds, disconnect.
+  A `pong` with another nonce, or one never asked for, does not count
+- If one message cannot be sent within 120 seconds, disconnect
+- If the tip has not moved for 300 seconds, send `getheaders` to the peer
+  again, which catches up even if its `inv` was missed
+- If the tip has not moved for 30 minutes, ask the seed again for more
+  candidates ([§14.6](#146-peer-discovery))
+
+Dropped outbound connections are replaced from the address book. Peers named
+with `--no-discovery` are redialled 5 seconds after they drop.
+
 ### 14.9 Compact blocks
 
 Rather than sending a whole block, **do not send what the peer already has.**

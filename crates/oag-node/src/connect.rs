@@ -16,6 +16,20 @@
 //! ([`crate::addrbook::AddressBook::candidates`]) ので、この本数は
 //! そのまま**別々のネットワークの数**になる。
 //!
+//! # 先端が止まったとき
+//!
+//! 住所帳に候補があるとシードは引かない。すると、**繋いでいる相手が揃って
+//! 止まっていても (相手自身が孤立している、など)、同じ相手とだけ繋がり
+//! 続ける。** 1 分に 1 個のはずのブロックが `STALE_TIP_SECS` 来なければ、
+//! シードを引き直して候補を足す。
+//!
+//! ネットワーク全体で本当に誰も掘っていないときもここに来る。そのときは
+//! 引き直しても何も変わらないが、害も無い。30 分に 1 回、名前を引くだけで
+//! ある。
+//!
+//! 死んだ接続そのものは [`crate::peer`] の `ping` が見つけて切る。こちらは
+//! 生きているが止まっている相手のためのものである。
+//!
 //! # 相手から繋がれた接続は数えない
 //!
 //! 攻撃者は好きなだけ繋いでこられる。それを本数に数えると、繋いでくる
@@ -48,6 +62,9 @@ const DIALS_PER_REVIEW: usize = 2;
 
 /// 繋ぐ試みの待ち時間。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 先端がこの秒数だけ動かなければ、シードを引き直す。目標間隔の 30 倍。
+const STALE_TIP_SECS: i64 = 30 * 60;
 
 /// いま繋いでいる・繋ぎに行っている外向きの住所。
 #[derive(Debug, Clone, Default)]
@@ -108,6 +125,9 @@ pub async fn maintain(handle: NodeHandle, outbound: Outbound, fixed: Vec<SocketA
     // interval の 1 回目は即座に来る。書き出しは今すぐでなくてよい。
     save.tick().await;
 
+    let mut events = handle.subscribe();
+    let mut stale = StaleTip::new(now());
+
     loop {
         tokio::select! {
             _ = review.tick() => {
@@ -117,9 +137,32 @@ pub async fn maintain(handle: NodeHandle, outbound: Outbound, fixed: Vec<SocketA
                         spawn_dial(handle.clone(), outbound.clone(), *addr);
                     }
                 }
+                if let Some(quiet) = stale.due(now()) {
+                    crate::log_warn!(
+                        "no new block for {} minutes with {} outbound peers, \
+                         so asking the seed for more",
+                        quiet / 60,
+                        outbound.len()
+                    );
+                    if let Err(e) = pull_seeds(&handle).await {
+                        crate::log_warn!("cannot add the seed's addresses: {e}");
+                        return;
+                    }
+                }
                 if let Err(e) = top_up(&handle, &outbound).await {
                     crate::log_warn!("cannot choose a destination: {e}");
                     return;
+                }
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(crate::service::NodeEvent::NewTip { .. }) => stale.moved(now()),
+                    Ok(_) => {}
+                    // 取り落とした中に先端の報せがあったかもしれない。
+                    // 動いたものとして扱う。引き直しが 30 分遅れるだけである。
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => stale.moved(now()),
+                    // ノードが止まった。
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 }
             }
             _ = save.tick() => {
@@ -144,19 +187,9 @@ async fn top_up(handle: &NodeHandle, outbound: &Outbound) -> Result<(), String> 
     if picked.is_empty() && busy.is_empty() {
         // 住所帳に当てが無く、1 本も繋がっていない。ここで初めてシードを
         // 引く。**繋がっている間は引かない。**
-        let seeded = crate::seeds::resolve(handle.network()).await;
-        if seeded.is_empty() {
+        if !pull_seeds(handle).await? {
             return Ok(());
         }
-        let at = now();
-        let addrs = seeded
-            .iter()
-            .map(|a| oag_net::message::NetAddress::from_socket(*a, 0, at))
-            .collect();
-        // 出どころは指定しない。シードが答えた住所は、それぞれ自分の
-        // 括りでバケットが決まる。**シードを 1 つの出どころとして扱うと、
-        // 答え全体が 64 バケットに押し込まれる。**
-        handle.add_addresses(addrs, None).await?;
         picked = handle.address_candidates(want, busy).await?;
     }
 
@@ -164,6 +197,62 @@ async fn top_up(handle: &NodeHandle, outbound: &Outbound) -> Result<(), String> 
         spawn_dial(handle.clone(), outbound.clone(), addr);
     }
     Ok(())
+}
+
+/// シードを引き、答えを住所帳に足す。1 件でも得られたら真。
+async fn pull_seeds(handle: &NodeHandle) -> Result<bool, String> {
+    let seeded = crate::seeds::resolve(handle.network()).await;
+    if seeded.is_empty() {
+        return Ok(false);
+    }
+    let at = now();
+    let addrs = seeded
+        .iter()
+        .map(|a| oag_net::message::NetAddress::from_socket(*a, 0, at))
+        .collect();
+    // 出どころは指定しない。シードが答えた住所は、それぞれ自分の
+    // 括りでバケットが決まる。**シードを 1 つの出どころとして扱うと、
+    // 答え全体が 64 バケットに押し込まれる。**
+    handle.add_addresses(addrs, None).await?;
+    Ok(true)
+}
+
+/// 先端が止まっていないかの見張り。
+///
+/// 時刻は壁時計 (秒) である。
+#[derive(Debug)]
+struct StaleTip {
+    /// 最後に先端が動いた時刻。
+    moved_at: i64,
+    /// 最後にシードを引き直した時刻。
+    pulled_at: i64,
+}
+
+impl StaleTip {
+    fn new(now: i64) -> StaleTip {
+        StaleTip {
+            moved_at: now,
+            pulled_at: now,
+        }
+    }
+
+    /// 先端が動いた。
+    fn moved(&mut self, now: i64) {
+        self.moved_at = now;
+    }
+
+    /// シードを引き直す時なら、止まっている秒数を返す。引き直したものと
+    /// して覚える。
+    ///
+    /// 止まっている間も [`STALE_TIP_SECS`] に 1 回だけ引く。
+    fn due(&mut self, now: i64) -> Option<i64> {
+        let quiet = now - self.moved_at;
+        if quiet < STALE_TIP_SECS || now - self.pulled_at < STALE_TIP_SECS {
+            return None;
+        }
+        self.pulled_at = now;
+        Some(quiet)
+    }
 }
 
 /// 1 本繋ぎに行き、切れるまで面倒を見る。
@@ -226,6 +315,39 @@ mod tests {
         out.remove(&addr(1));
         assert!(out.is_empty());
         assert!(out.insert(addr(1)));
+    }
+
+    const T0: i64 = 1_800_000_000;
+
+    #[test]
+    fn a_moving_tip_never_pulls_the_seed() {
+        let mut stale = StaleTip::new(T0);
+        for minute in 1..=120 {
+            let now = T0 + minute * 60;
+            stale.moved(now);
+            assert_eq!(stale.due(now), None, "pulled at minute {minute}");
+        }
+    }
+
+    #[test]
+    fn a_stuck_tip_pulls_the_seed_once_per_period() {
+        let mut stale = StaleTip::new(T0);
+        assert_eq!(stale.due(T0 + STALE_TIP_SECS - 1), None);
+        assert_eq!(stale.due(T0 + STALE_TIP_SECS), Some(STALE_TIP_SECS));
+        // 止まったままでも、次は 1 周期あとまで引かない。
+        assert_eq!(stale.due(T0 + STALE_TIP_SECS + 5), None);
+        assert_eq!(stale.due(T0 + 2 * STALE_TIP_SECS - 1), None);
+        assert_eq!(stale.due(T0 + 2 * STALE_TIP_SECS), Some(2 * STALE_TIP_SECS));
+    }
+
+    #[test]
+    fn a_tip_that_moves_again_resets_the_wait() {
+        let mut stale = StaleTip::new(T0);
+        assert_eq!(stale.due(T0 + STALE_TIP_SECS), Some(STALE_TIP_SECS));
+        let moved = T0 + STALE_TIP_SECS + 60;
+        stale.moved(moved);
+        assert_eq!(stale.due(moved + STALE_TIP_SECS - 1), None);
+        assert_eq!(stale.due(moved + STALE_TIP_SECS), Some(STALE_TIP_SECS));
     }
 
     #[test]
