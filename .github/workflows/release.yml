@@ -182,7 +182,7 @@ jobs:
             ### 動かす
 
             ```
-            oag-node run --datadir ./orange-data
+            oag-node run --network mainnet --datadir ./orange-data
             ```
 
             繋ぎ先は自動で探します。設定は要りません。
