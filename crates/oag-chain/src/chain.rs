@@ -31,8 +31,8 @@ use crate::index::{BlockIndex, BlockIndexEntry, BlockStatus, EntryCache};
 use crate::store::ChainStore;
 use oag_consensus::params;
 use oag_consensus::validate::{
-    median_time_past, validate_block, validate_header, BlockContext, HeaderContext, PowVerifier,
-    SignatureChecks, ValidationError,
+    median_time_past, validate_block, validate_header, AcceptAnyPow, BlockContext, HeaderContext,
+    PowVerifier, SignatureChecks, ValidationError,
 };
 use oag_consensus::{Block, BlockHeader};
 use oag_pow::lwma::{self, LwmaError};
@@ -683,7 +683,7 @@ impl<S: ChainStore> Chain<S> {
         self.index.record(&entry);
         self.entries.borrow_mut().put(entry);
 
-        self.activate_best_chain(pow, now)
+        self.activate_best_chain(now)
     }
 
     /// ヘッダだけを受け取る (headers-first 同期)。
@@ -787,11 +787,7 @@ impl<S: ChainStore> Chain<S> {
     }
 
     /// 最良のチェーンへ切り替える。
-    fn activate_best_chain(
-        &mut self,
-        pow: &dyn PowVerifier,
-        now: i64,
-    ) -> Result<AcceptOutcome, ChainError> {
+    fn activate_best_chain(&mut self, now: i64) -> Result<AcceptOutcome, ChainError> {
         loop {
             let tip_work = self.tip()?.cumulative_work;
 
@@ -815,7 +811,7 @@ impl<S: ChainStore> Chain<S> {
                 return Ok(AcceptOutcome::SideChain);
             };
 
-            match self.switch_to(target, pow, now) {
+            match self.switch_to(target, now) {
                 Ok(reorg) if reorg.disconnected.is_empty() && reorg.connected.len() == 1 => {
                     // 先端が進んだので、今の先端を下回るものを落とす。
                     // **切り替えた直後に落とす**ことで、抱えるのは常に
@@ -844,12 +840,7 @@ impl<S: ChainStore> Chain<S> {
     }
 
     /// `target` をアクティブチェーンの先端にする。
-    fn switch_to(
-        &mut self,
-        target: Hash,
-        pow: &dyn PowVerifier,
-        now: i64,
-    ) -> Result<Reorg, ConnectFailure> {
+    fn switch_to(&mut self, target: Hash, now: i64) -> Result<Reorg, ConnectFailure> {
         let fail = |hash: Hash, error: ChainError| ConnectFailure { hash, error };
 
         // target からアクティブチェーンに合流するまで遡る。
@@ -895,7 +886,7 @@ impl<S: ChainStore> Chain<S> {
 
         let mut connected = Vec::new();
         for hash in &to_connect {
-            match self.connect_block(*hash, pow, now) {
+            match self.connect_block(*hash, now) {
                 Ok(()) => connected.push(*hash),
                 Err(error) => {
                     if let Err(rollback) = self.rollback(&connected, &disconnected) {
@@ -938,12 +929,23 @@ impl<S: ChainStore> Chain<S> {
     }
 
     /// ブロックを 1 つ接続する。本体の検証はここで行う。
-    fn connect_block(
-        &mut self,
-        hash: Hash,
-        pow: &dyn PowVerifier,
-        now: i64,
-    ) -> Result<(), ChainError> {
+    ///
+    /// # PoW はここでは確かめない
+    ///
+    /// インデックスに載っているブロックは、載る時点で PoW を確かめてある
+    /// ([`Chain::validated_entry`])。そのときの検証器は、**そのブロック自身の
+    /// 高さ**のシードで組まれている。
+    ///
+    /// ここで確かめ直していたのが 0.1.1 までの誤りだった。1 度の切り替えで
+    /// 繋ぐブロックは何個もあり、シードのエポックをまたぐことがある。
+    /// 受け取った側が渡す検証器は 1 つで、**引き金になったブロックの**
+    /// エポックのものである。他のエポックのブロックは PoW が必ず合わず、
+    /// 正しいブロックに無効の印が付いた。印は永続化され子孫へ広がるので、
+    /// ノードは正しいチェーンへ二度と戻れなくなった。
+    ///
+    /// 確かめ直す意味もない。ヘッダはハッシュで本体と結び付いており、
+    /// 本体が届いてもヘッダは変わらない。
+    fn connect_block(&mut self, hash: Hash, now: i64) -> Result<(), ChainError> {
         let block = self
             .store
             .block(&hash)
@@ -972,7 +974,7 @@ impl<S: ChainStore> Chain<S> {
                 utxo: &view,
                 signature_checks: self.signature_checks_for(&hash, height)?,
             };
-            validate_block(&block, &ctx, pow)?;
+            validate_block(&block, &ctx, &AcceptAnyPow)?;
         }
 
         self.store.connect_block(&block).map_err(Self::store_err)?;
@@ -1106,6 +1108,53 @@ impl<S: ChainStore> Chain<S> {
             frontier.extend_from_slice(&children);
         }
         Ok(())
+    }
+
+    /// 無効の印をすべて外し、最良のチェーンへの切り替えをやり直す。
+    /// 外した件数を返す。
+    ///
+    /// # なぜ要るのか
+    ///
+    /// 0.1.1 までは、初期同期でシードのエポックをまたぐと、正しいブロックに
+    /// 無効の印が付くことがあった (`connect_block` の説明を見よ)。印は
+    /// 永続化されるので、直した版に上げても外れない。そのノードは、正しい
+    /// チェーンの続きを送ってくる相手を全員切り続ける。
+    ///
+    /// # 外して困らない理由
+    ///
+    /// 本当に無効なブロックなら、繋ごうとした時点でまた印が付く。かかるのは
+    /// そのブロックを 1 度検証し直す手間だけである。PoW を満たさないヘッダは
+    /// そもそもインデックスに載らないので、ここで蘇ることはない。
+    pub fn reconsider_invalid(&mut self, now: i64) -> Result<usize, ChainError> {
+        let mut invalid = Vec::new();
+        self.store
+            .for_each_index_entry(&mut |entry| {
+                if entry.status == BlockStatus::Invalid {
+                    invalid.push(entry);
+                }
+            })
+            .map_err(Self::store_err)?;
+        if invalid.is_empty() {
+            return Ok(0);
+        }
+
+        for mut entry in invalid.iter().cloned() {
+            // 印は本体の有無を覚えていない。記憶域に聞いて戻す。
+            let has_body = self
+                .store
+                .block(&entry.hash)
+                .map_err(Self::store_err)?
+                .is_some();
+            entry.status = if has_body {
+                BlockStatus::HeaderValid
+            } else {
+                BlockStatus::HeaderOnly
+            };
+            self.put_entry(&entry)?;
+        }
+
+        self.activate_best_chain(now)?;
+        Ok(invalid.len())
     }
 }
 

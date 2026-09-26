@@ -247,6 +247,24 @@ impl Node {
         };
         let mut chain = Chain::open(store, genesis, network.genesis_difficulty(), retarget)?;
         chain.set_assume_valid(options.assume_valid.resolve(network));
+
+        // 0.1.1 までは、初期同期でシードのエポックをまたぐと、正しいブロックに
+        // 無効の印が付くことがあった (`Chain::reconsider_invalid`)。印は
+        // 永続化されるので、上げただけでは外れない。**開くたびに外して見直す。**
+        // 本当に無効なものは、繋ぎ直そうとした時点でまた印が付く。
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let reconsidered = chain.reconsider_invalid(now)?;
+        if reconsidered > 0 {
+            crate::log_warn!(
+                "reconsidered {reconsidered} blocks that were marked invalid \
+                 (height now {})",
+                chain.tip()?.height()
+            );
+        }
+
         let addresses = AddressBook::open(network, &data_dir.join("peers.json"));
         Ok(Node {
             chain,

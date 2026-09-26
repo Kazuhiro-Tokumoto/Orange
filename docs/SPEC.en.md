@@ -1018,6 +1018,19 @@ verification MUST come last.**
 
 In addition, a per-peer rate limit on header receipt MUST be applied.
 
+**PoW is checked once, when the header enters the index (since 0.1.2).** It is
+not checked again when the body is connected. The header is bound to the body
+by its hash, so the body arriving does not change the header.
+
+Up to 0.1.1, PoW was checked again at connection. One switch can connect
+blocks that span a seed epoch ([§11.3](#113-seed-epochs)), but the verifier
+was prepared only for the epoch of the block that triggered the switch.
+Blocks from other epochs always failed PoW, and correct blocks were marked
+invalid. The mark is persisted and spreads to descendants, so a node in its
+initial sync could never return to the correct chain. A 0.1.2 node clears the
+invalid marks and reconsiders them every time it starts. A block that really
+is invalid is marked again when it is connected.
+
 ### 10.6 Choosing the longest chain
 
 The chain with the greatest cumulative work (the sum of each block's
