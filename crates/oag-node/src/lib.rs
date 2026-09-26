@@ -42,9 +42,26 @@ use std::sync::Arc;
 ///
 /// 待ち受けが壊れるまで戻らない。
 pub async fn accept_loop(handle: NodeHandle, listener: Listener) {
+    // 断っている最中か。記録を 1 度ずつ出すために覚える。
+    let mut refusing = false;
     loop {
         match listener.accept().await {
             Ok(conn) => {
+                // **同期の最中は繋がれても応えない。** 追いつくまで渡せる
+                // ものが無く、相手の外向きの枠を 1 本無駄にさせるだけである。
+                // 名乗り合う前に閉じるので、相手は住所帳でこちらを減点しない。
+                if handle.is_syncing().await.unwrap_or(false) {
+                    if !refusing {
+                        crate::log_peer!("syncing, so not accepting connections until caught up");
+                        refusing = true;
+                    }
+                    drop(conn);
+                    continue;
+                }
+                if refusing {
+                    crate::log_peer!("caught up, so accepting connections again");
+                    refusing = false;
+                }
                 let handle = handle.clone();
                 tokio::spawn(async move {
                     if let Err(e) = peer::run(handle, conn).await {

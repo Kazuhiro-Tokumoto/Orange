@@ -258,7 +258,15 @@ async fn session(
         // こちらの住所も名乗る。**名乗らないと誰にも見つけてもらえない。**
         // 名乗る住所は運用者が --external-addr で明示したものに限る。
         // 自分の外向きの住所は自分では分からない。
-        let own = handle.own_addresses().await?;
+        //
+        // **同期の最中は名乗らない。** 繋がれても応えないので
+        // (`crate::accept_loop`)、名乗れば相手に無駄足を踏ませる。追いついた
+        // あとに繋ぐ相手には名乗る。
+        let own = if handle.is_syncing().await? {
+            Vec::new()
+        } else {
+            handle.own_addresses().await?
+        };
         if !own.is_empty() {
             let at = now();
             let addrs = own

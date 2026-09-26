@@ -30,6 +30,17 @@
 //! 死んだ接続そのものは [`crate::peer`] の `ping` が見つけて切る。こちらは
 //! 生きているが止まっている相手のためのものである。
 //!
+//! # 同期の最中
+//!
+//! 同期の最中 ([`NodeHandle::is_syncing`]) は、外へは [`SYNC_OUTBOUND`] 本
+//! しか繋がない。追いつくまでは他のノードに渡せるものが無く、繋ぐ本数を
+//! 増やしても同期は速くならない。追いついたら [`TARGET_OUTBOUND`] 本まで
+//! 足す。
+//!
+//! 1 本にしないのは、その 1 本が止まっていると同期も止まるためである。
+//! 2 本とも止まって先端が `STALE_TIP_SECS` 動かなければ、同期の最中でも
+//! 制限を外す。
+//!
 //! # 相手から繋がれた接続は数えない
 //!
 //! 攻撃者は好きなだけ繋いでこられる。それを本数に数えると、繋いでくる
@@ -47,6 +58,9 @@ use std::time::Duration;
 
 /// 保ちたい外向きの接続の本数。
 pub const TARGET_OUTBOUND: usize = 8;
+
+/// 同期の最中に保つ外向きの接続の本数。
+pub const SYNC_OUTBOUND: usize = 2;
 
 /// 繋ぎ先を見直す間隔。
 const REVIEW: Duration = Duration::from_secs(5);
@@ -127,6 +141,8 @@ pub async fn maintain(handle: NodeHandle, outbound: Outbound, fixed: Vec<SocketA
 
     let mut events = handle.subscribe();
     let mut stale = StaleTip::new(now());
+    // 同期の最中だったか。切り替わったときに 1 度だけ記録に出す。
+    let mut was_syncing = false;
 
     loop {
         tokio::select! {
@@ -149,7 +165,33 @@ pub async fn maintain(handle: NodeHandle, outbound: Outbound, fixed: Vec<SocketA
                         return;
                     }
                 }
-                if let Err(e) = top_up(&handle, &outbound).await {
+                let syncing = match handle.is_syncing().await {
+                    Ok(syncing) => syncing,
+                    Err(e) => {
+                        crate::log_warn!("cannot read the sync state: {e}");
+                        return;
+                    }
+                };
+                if syncing != was_syncing {
+                    if syncing {
+                        crate::log_peer!(
+                            "syncing, so keeping {SYNC_OUTBOUND} outbound peers until caught up"
+                        );
+                    } else {
+                        crate::log_peer!(
+                            "caught up, so connecting to up to {TARGET_OUTBOUND} peers"
+                        );
+                    }
+                    was_syncing = syncing;
+                }
+                // 同期の最中でも、先端が長く止まっていれば制限を外す。
+                // 繋いでいる相手が揃って止まっているのかもしれない。
+                let cap = if syncing && stale.quiet_for(now()) < STALE_TIP_SECS {
+                    SYNC_OUTBOUND
+                } else {
+                    TARGET_OUTBOUND
+                };
+                if let Err(e) = top_up(&handle, &outbound, cap).await {
                     crate::log_warn!("cannot choose a destination: {e}");
                     return;
                 }
@@ -175,13 +217,15 @@ pub async fn maintain(handle: NodeHandle, outbound: Outbound, fixed: Vec<SocketA
     }
 }
 
-/// 足りない分を繋ぎに行く。
-async fn top_up(handle: &NodeHandle, outbound: &Outbound) -> Result<(), String> {
+/// `cap` 本に足りない分を繋ぎに行く。
+///
+/// 超えている分は切らない。同期に入る前に繋いだ相手も、同期の役に立つ。
+async fn top_up(handle: &NodeHandle, outbound: &Outbound, cap: usize) -> Result<(), String> {
     let busy = outbound.addrs();
-    if busy.len() >= TARGET_OUTBOUND {
+    if busy.len() >= cap {
         return Ok(());
     }
-    let want = (TARGET_OUTBOUND - busy.len()).min(DIALS_PER_REVIEW);
+    let want = (cap - busy.len()).min(DIALS_PER_REVIEW);
 
     let mut picked = handle.address_candidates(want, busy.clone()).await?;
     if picked.is_empty() && busy.is_empty() {
@@ -239,6 +283,11 @@ impl StaleTip {
     /// 先端が動いた。
     fn moved(&mut self, now: i64) {
         self.moved_at = now;
+    }
+
+    /// 先端が止まっている秒数。
+    fn quiet_for(&self, now: i64) -> i64 {
+        now - self.moved_at
     }
 
     /// シードを引き直す時なら、止まっている秒数を返す。引き直したものと
@@ -348,6 +397,14 @@ mod tests {
         stale.moved(moved);
         assert_eq!(stale.due(moved + STALE_TIP_SECS - 1), None);
         assert_eq!(stale.due(moved + STALE_TIP_SECS), Some(STALE_TIP_SECS));
+    }
+
+    #[test]
+    fn quiet_time_counts_from_the_last_move() {
+        let mut stale = StaleTip::new(T0);
+        assert_eq!(stale.quiet_for(T0 + 90), 90);
+        stale.moved(T0 + 60);
+        assert_eq!(stale.quiet_for(T0 + 90), 30);
     }
 
     #[test]

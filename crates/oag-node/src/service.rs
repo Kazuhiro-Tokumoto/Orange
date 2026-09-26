@@ -210,6 +210,8 @@ enum Request {
     Status(oneshot::Sender<Result<NodeStatus, String>>),
     /// 自分の状態を名乗るための、先端の高さ。
     BestHeaderHeight(oneshot::Sender<Result<u64, String>>),
+    /// 初期同期の最中か ([`NodeHandle::is_syncing`])。
+    Syncing(oneshot::Sender<Result<bool, String>>),
     /// ブロックロケータ。
     Locator(oneshot::Sender<Result<Vec<Hash>, String>>),
     /// `getheaders` への応答。
@@ -519,6 +521,26 @@ impl NodeHandle {
     /// 最良ヘッダの高さ。
     pub async fn best_header_height(&self) -> Result<u64, String> {
         self.ask(Request::BestHeaderHeight).await
+    }
+
+    /// 同期の最中か。知っているヘッダより、繋いだ本体が
+    /// [`SYNC_BEHIND`] を超えて遅れていれば真。
+    ///
+    /// 同期の最中は、繋がれても応えず ([`crate::accept_loop`])、外へも
+    /// 同期に要る本数しか繋がない ([`crate::connect`])。追いつくまで
+    /// 他のノードに渡せるものが無く、ブロックを配ることもできない。
+    ///
+    /// # なぜ「先端が古いか」で決めないのか
+    ///
+    /// 誰も掘らない時間が続いたあとに全員が再起動すると、全員の先端が
+    /// 古くなる。先端の古さで決めると全員が「同期中」になって誰も繋がれ
+    /// なくなり、ネットワークが立ち上がらない。**先を知っているのに
+    /// 追いついていない**ときだけを同期中とすれば、先を知らせてくれた相手は
+    /// 必ずいるので、そうはならない。
+    ///
+    /// 軽量モードは本体を持たないので、同期中とはみなさない。
+    pub async fn is_syncing(&self) -> Result<bool, String> {
+        self.ask(Request::Syncing).await
     }
 
     /// ブロックロケータ。
@@ -863,7 +885,9 @@ struct Service {
 }
 
 /// 追いついたとみなす差。これ以内なら 1 ブロックずつ記録に出す。
-const SYNC_BEHIND: u64 = 16;
+///
+/// 同期の最中かどうか ([`NodeHandle::is_syncing`]) も、この差で決める。
+pub const SYNC_BEHIND: u64 = 16;
 
 /// 追いつくまでの間、進み具合を報せる間隔。
 const PROGRESS_EVERY: Duration = Duration::from_secs(2);
@@ -1375,6 +1399,9 @@ impl Service {
                     .map_err(|e| e.to_string());
                 let _ = reply.send(result);
             }
+            Request::Syncing(reply) => {
+                let _ = reply.send(self.syncing());
+            }
             Request::Locator(reply) => {
                 let _ = reply.send(self.locator());
             }
@@ -1647,6 +1674,17 @@ impl Service {
             }
         }
         Ok(out)
+    }
+
+    /// 同期の最中か ([`NodeHandle::is_syncing`])。
+    fn syncing(&self) -> Result<bool, String> {
+        if self.light.is_some() {
+            return Ok(false);
+        }
+        let chain = self.node.chain();
+        let tip = chain.tip().map_err(|e| e.to_string())?.height();
+        let best = chain.best_header().map_err(|e| e.to_string())?.height();
+        Ok(best.saturating_sub(tip) > SYNC_BEHIND)
     }
 
     fn locator(&self) -> Result<Vec<Hash>, String> {

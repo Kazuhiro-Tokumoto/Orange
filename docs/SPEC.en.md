@@ -2374,6 +2374,22 @@ received no block for 37 minutes.
 Dropped outbound connections are replaced from the address book. Peers named
 with `--no-discovery` are redialled 5 seconds after they drop.
 
+#### While syncing (since 0.1.2)
+
+A node is syncing while its connected bodies lag the headers it knows by more
+than 16 blocks. While syncing:
+
+- it does not answer inbound connections; it closes them before the handshake
+- it keeps only 2 outbound connections, and adds up to 8 once caught up. If
+  the tip has not moved for 30 minutes, the limit is lifted even while syncing
+- it does not announce its `--external-addr` address
+
+**This is not decided by the age of the tip.** If nobody mines for a while and
+everyone then restarts, every tip is old. Deciding by age would put every node
+in the syncing state, nobody would accept connections, and the network could
+not start. Counting a node as syncing only when it knows of more than it has
+avoids that: whoever told it about the rest is always there to connect to.
+
 ### 14.9 Compact blocks
 
 Rather than sending a whole block, **do not send what the peer already has.**
