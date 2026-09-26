@@ -3,7 +3,7 @@
 [English](README.md) · [日本語](README.jp.md)
 
 A CPU-mined UTXO blockchain that uses RandomX for proof of work.
-Based on [chroma](https://github.com/kusogakiller/chroma).
+Inspired by [chroma](https://github.com/kusogakiller/chroma).
 
 > **Status: mainnet is live.** The genesis block was fixed in September 2026
 > and mining has continued since. Payments, the browser wallet and the block

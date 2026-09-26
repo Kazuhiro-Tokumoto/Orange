@@ -3,7 +3,7 @@
 [English](README.md) · [日本語](README.jp.md)
 
 RandomX を Proof of Work に用いる、CPU マイニング型の UTXO ブロックチェーン。
-[chroma](https://github.com/kusogakiller/chroma) をベースにしている。
+[chroma](https://github.com/kusogakiller/chroma) に着想を得た。
 
 > **状態: mainnet 稼働中。** 2026 年 9 月にジェネシスを確定させ、以後
 > 採掘が続いています。送金・ブラウザのウォレット・エクスプローラまで
