@@ -216,8 +216,8 @@ async fn overview(handle: &NodeHandle) -> Response {
     ));
 
     // 最近のブロック。
-    body.push_str("<h2>recent blocks</h2><div class=\"wrap\"><table>");
-    body.push_str("<tr><th>height</th><th>time (UTC)</th><th>txs</th><th>size</th><th>difficulty</th><th>hash</th></tr>");
+    body.push_str("<h2>recent blocks</h2><div class=\"wrap\"><table class=\"list\">");
+    body.push_str("<tr class=\"head\"><th>height</th><th>time (UTC)</th><th>txs</th><th>size</th><th>difficulty</th><th>hash</th></tr>");
     // **本体は引かない。** 高さごとに 2 往復して 25 個のブロックを丸ごと
     // 復号すると、満杯の鎖では 5 MB を読んで 16,000 件あまりの取引を組み
     // 立てることになる。表に出すのは 1 行 5 項目だけである。
@@ -229,9 +229,11 @@ async fn overview(handle: &NodeHandle) -> Response {
         let hash = summary.hash.to_string();
         let _ = write!(
             body,
-            "<tr><td><a href=\"/block/{h}\">{h}</a></td><td class=\"mono\">{t}</td>\
-             <td>{n}</td><td>{s} B</td><td>{d}</td>\
-             <td class=\"mono trunc\"><a href=\"/block/{hash}\">{short}</a></td></tr>",
+            "<tr><td data-label=\"height\"><a href=\"/block/{h}\">{h}</a></td>\
+             <td data-label=\"time (UTC)\" class=\"mono\">{t}</td>\
+             <td data-label=\"txs\">{n}</td><td data-label=\"size\" class=\"wide\">{s} B</td>\
+             <td data-label=\"difficulty\" class=\"wide\">{d}</td>\
+             <td data-label=\"hash\" class=\"mono trunc wide\"><a href=\"/block/{hash}\">{short}</a></td></tr>",
             h = summary.height,
             t = utc(summary.header.timestamp),
             n = summary.transactions,
@@ -307,7 +309,7 @@ async fn block_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
         esc(&hash.to_string())
     ));
 
-    body.push_str("<div class=\"wrap\"><table>");
+    body.push_str("<div class=\"wrap\"><table class=\"kv\">");
     row(&mut body, "height", &block.header.height.to_string());
     row(&mut body, "time (UTC)", &utc(block.header.timestamp));
     row(
@@ -511,13 +513,14 @@ async fn address_page(handle: &NodeHandle, key: &str, query: &str) -> Response {
 
     // 保有中の UTXO。
     if !utxos.is_empty() {
-        body.push_str("<h2>unspent outputs</h2><div class=\"wrap\"><table>");
-        body.push_str("<tr><th>transaction</th><th>index</th><th>amount</th><th>height</th><th>kind</th></tr>");
+        body.push_str("<h2>unspent outputs</h2><div class=\"wrap\"><table class=\"list\">");
+        body.push_str("<tr class=\"head\"><th>transaction</th><th>index</th><th>amount</th><th>height</th><th>kind</th></tr>");
         for utxo in &utxos {
             let _ = write!(
                 body,
-                "<tr><td class=\"mono trunc\"><a href=\"/tx/{full}\">{short}</a></td>\
-                 <td>{i}</td><td class=\"num\">{a} OAG</td><td>{h}</td><td>{c}</td></tr>",
+                "<tr><td data-label=\"transaction\" class=\"mono trunc\"><a href=\"/tx/{full}\">{short}</a></td>\
+                 <td data-label=\"index\" class=\"wide\">{i}</td><td data-label=\"amount\" class=\"num\">{a} OAG</td>\
+                 <td data-label=\"height\">{h}</td><td data-label=\"kind\" class=\"wide\">{c}</td></tr>",
                 full = esc(&utxo.outpoint.txid.to_string()),
                 short = esc(&shorten(&utxo.outpoint.txid.to_string())),
                 i = utxo.outpoint.index,
@@ -547,7 +550,7 @@ async fn mempool_page(handle: &NodeHandle) -> Response {
     if txids.is_empty() {
         body.push_str("<p class=\"note\">there are no unconfirmed transactions.</p>");
     } else {
-        body.push_str("<div class=\"wrap\"><table><tr><th>transaction ID</th></tr>");
+        body.push_str("<div class=\"wrap\"><table class=\"list\"><tr class=\"head\"><th>transaction ID</th></tr>");
         for txid in &txids {
             let _ = write!(
                 body,
@@ -599,15 +602,17 @@ fn tx_pager(hash: &Hash, from: usize, upto: usize, total: usize) -> String {
 /// 位置の番号は**ブロック内の通し番号**であり、頁の中の番号ではない。
 /// 0 は必ずコインベースである。
 fn tx_table(block: &Block, network: Network, from: usize, upto: usize) -> String {
-    let mut out = String::from("<div class=\"wrap\"><table>");
-    out.push_str("<tr><th>#</th><th>transaction ID</th><th>in</th><th>out</th><th>total</th></tr>");
+    let mut out = String::from("<div class=\"wrap\"><table class=\"list\">");
+    out.push_str("<tr class=\"head\"><th>#</th><th>transaction ID</th><th>in</th><th>out</th><th>total</th></tr>");
     for (position, tx) in block.transactions[from..upto].iter().enumerate() {
         let position = from + position;
         let total = Amount::sum(tx.outputs.iter().map(|o| o.amount));
         let _ = write!(
             out,
-            "<tr><td>{p}{cb}</td><td class=\"mono trunc\"><a href=\"/tx/{full}\">{short}</a></td>\
-             <td>{i}</td><td>{o}</td><td class=\"num\">{t} OAG</td></tr>",
+            "<tr><td data-label=\"#\">{p}{cb}</td>\
+             <td data-label=\"transaction ID\" class=\"mono trunc\"><a href=\"/tx/{full}\">{short}</a></td>\
+             <td data-label=\"in\">{i}</td><td data-label=\"out\">{o}</td>\
+             <td data-label=\"total\" class=\"num\">{t} OAG</td></tr>",
             p = position,
             cb = if tx.is_coinbase() {
                 " <span class=\"tag\">mined</span>"
@@ -629,8 +634,8 @@ fn tx_table(block: &Block, network: Network, from: usize, upto: usize) -> String
 }
 
 fn history_table(records: &[TxRecord], lock: &Lock, network: Network) -> String {
-    let mut out = String::from("<div class=\"wrap\"><table>");
-    out.push_str("<tr><th>height</th><th>transaction ID</th><th>change</th></tr>");
+    let mut out = String::from("<div class=\"wrap\"><table class=\"list\">");
+    out.push_str("<tr class=\"head\"><th>height</th><th>transaction ID</th><th>change</th></tr>");
     for record in records {
         // このアドレスから見た増減を出す。受け取った出力の合計から、
         // 使った入力の合計を引く。
@@ -652,9 +657,9 @@ fn history_table(records: &[TxRecord], lock: &Lock, network: Network) -> String 
         let class = if delta >= 0 { "plus" } else { "minus" };
         let _ = write!(
             out,
-            "<tr><td><a href=\"/block/{h}\">{h}</a></td>\
-             <td class=\"mono trunc\"><a href=\"/tx/{full}\">{short}</a></td>\
-             <td class=\"num {class}\">{sign}{amount} OAG</td></tr>",
+            "<tr><td data-label=\"height\"><a href=\"/block/{h}\">{h}</a></td>\
+             <td data-label=\"transaction ID\" class=\"mono trunc\"><a href=\"/tx/{full}\">{short}</a></td>\
+             <td data-label=\"change\" class=\"num {class}\">{sign}{amount} OAG</td></tr>",
             h = record.location.height,
             full = esc(&record.txid_text()),
             short = esc(&shorten(&record.txid_text())),
@@ -670,7 +675,7 @@ fn history_table(records: &[TxRecord], lock: &Lock, network: Network) -> String 
 
 fn record_detail(record: &TxRecord, network: Network) -> String {
     let mut out = String::new();
-    out.push_str("<div class=\"wrap\"><table>");
+    out.push_str("<div class=\"wrap\"><table class=\"kv\">");
     row_raw(&mut out, "status", "<span class=\"ok\">confirmed</span>");
     row_raw(
         &mut out,
@@ -702,7 +707,7 @@ fn tx_detail(
 ) -> String {
     let mut out = String::new();
 
-    out.push_str("<div class=\"wrap\"><table>");
+    out.push_str("<div class=\"wrap\"><table class=\"kv\">");
     row(&mut out, "version", &tx.version.to_string());
     row(&mut out, "size", &format!("{} B", group(tx.size() as u64)));
     row(&mut out, "locktime", &tx.locktime.to_string());
@@ -737,14 +742,14 @@ fn tx_detail(
     out.push_str("</table></div>");
 
     // 入力。
-    out.push_str("<h2>inputs</h2><div class=\"wrap\"><table>");
+    out.push_str("<h2>inputs</h2><div class=\"wrap\"><table class=\"list\">");
     if tx.is_coinbase() {
         out.push_str(
             "<tr><td class=\"note\">newly issued by mining. no outputs were spent.</td></tr>",
         );
     } else {
         out.push_str(
-            "<tr><th>source transaction</th><th>index</th><th>address</th><th>amount</th></tr>",
+            "<tr class=\"head\"><th>source transaction</th><th>index</th><th>address</th><th>amount</th></tr>",
         );
         for (n, input) in tx.inputs.iter().enumerate() {
             let prev = spent.get(n).and_then(|s| s.as_ref());
@@ -762,9 +767,10 @@ fn tx_detail(
             };
             let _ = write!(
                 out,
-                "<tr><td class=\"mono trunc\"><a href=\"/tx/{full}\">{short}</a></td><td>{i}</td>\
-                 <td class=\"mono trunc\"><a href=\"/address/{a}\">{a_short}</a></td>\
-                 <td class=\"num\">{amount}</td></tr>",
+                "<tr><td data-label=\"source transaction\" class=\"mono trunc\"><a href=\"/tx/{full}\">{short}</a></td>\
+                 <td data-label=\"index\">{i}</td>\
+                 <td data-label=\"address\" class=\"mono trunc\"><a href=\"/address/{a}\">{a_short}</a></td>\
+                 <td data-label=\"amount\" class=\"num\">{amount}</td></tr>",
                 full = esc(&input.prev_out.txid.to_string()),
                 short = esc(&shorten(&input.prev_out.txid.to_string())),
                 i = input.prev_out.index,
@@ -777,8 +783,8 @@ fn tx_detail(
     out.push_str("</table></div>");
 
     // 出力。
-    out.push_str("<h2>outputs</h2><div class=\"wrap\"><table>");
-    out.push_str("<tr><th>#</th><th>address</th><th>amount</th></tr>");
+    out.push_str("<h2>outputs</h2><div class=\"wrap\"><table class=\"list\">");
+    out.push_str("<tr class=\"head\"><th>#</th><th>address</th><th>amount</th></tr>");
     for (n, output) in tx.outputs.iter().enumerate() {
         let addr = output
             .lock
@@ -788,8 +794,9 @@ fn tx_detail(
             .unwrap_or_else(|| format!("version {} (unknown)", output.lock.version()));
         let _ = write!(
             out,
-            "<tr><td>{n}</td><td class=\"mono trunc\"><a href=\"/address/{a}\">{a_short}</a></td>\
-             <td class=\"num\">{amount} OAG</td></tr>",
+            "<tr><td data-label=\"#\">{n}</td>\
+             <td data-label=\"address\" class=\"mono trunc\"><a href=\"/address/{a}\">{a_short}</a></td>\
+             <td data-label=\"amount\" class=\"num\">{amount} OAG</td></tr>",
             n = n,
             a = esc(&addr),
             a_short = esc(&shorten(&addr)),
@@ -912,6 +919,14 @@ th{color:var(--dim);font-weight:500;font-size:13px}\
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}\
 .break{word-break:break-all;white-space:normal}\
 .trunc{max-width:22ch;overflow:hidden;text-overflow:ellipsis}\
+table.kv{min-width:0}.kv th{width:1%}.kv td{white-space:normal;overflow-wrap:anywhere}\
+@media (max-width:600px){\
+table.list{min-width:0}.list,.list tbody,.list tr,.list td{display:block}.list tr.head{display:none}\
+.list tr{padding:8px 12px;border-bottom:1px solid var(--line)}.list tr:last-child{border-bottom:0}\
+.list td{display:flow-root;padding:2px 0;border:0;white-space:normal;text-align:right;overflow-wrap:anywhere}\
+.list td.trunc{max-width:none;overflow:visible}.list td:not([data-label]){text-align:left}.list td.wide{display:none}\
+.list td[data-label]::before{content:attr(data-label);float:left;margin-right:12px;color:var(--dim);\
+font-family:system-ui,-apple-system,sans-serif;font-size:13px;line-height:24px}}\
 .note{color:var(--dim);font-size:13px}\
 .warn{color:#d97706}.ok{color:#16a34a}\
 .plus{color:#16a34a}.minus{color:#dc2626}\
@@ -1148,19 +1163,19 @@ mod tests {
         let table = tx_table(&block, Network::Mainnet, 2, 5);
 
         assert!(
-            table.contains("<td>2</td>"),
+            table.contains("<td data-label=\"#\">2</td>"),
             "it does not start from the second"
         );
         assert!(
-            table.contains("<td>4</td>"),
+            table.contains("<td data-label=\"#\">4</td>"),
             "the last, fourth one is missing"
         );
         assert!(
-            !table.contains("<td>0</td>"),
+            !table.contains("<td data-label=\"#\">0</td>"),
             "the zeroth, outside the page, is shown"
         );
         assert!(
-            !table.contains("<td>5</td>"),
+            !table.contains("<td data-label=\"#\">5</td>"),
             "a fifth that does not exist is shown"
         );
 
@@ -1210,7 +1225,7 @@ mod tests {
         let block = block_of(3);
         let table = tx_table(&block, Network::Mainnet, 3, 3);
         assert!(table.contains("<th>#</th>"));
-        assert!(!table.contains("<td>0</td>"));
+        assert!(!table.contains("/tx/"));
     }
 
     #[test]
