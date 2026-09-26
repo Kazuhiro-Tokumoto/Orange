@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="Orange (OAG): a CPU-mined UTXO coin using RandomX. No premine, no ICO, 10 OAG a minute with no halving.">
+<title>Orange (OAG)</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%23e8720c'/%3E%3C/svg%3E">
+<script>
+// Pick the language before anything is drawn, so the page never flashes the
+// other one. ?lang= wins, then the last choice, then the browser's language.
+(function () {
+  var lang = null;
+  try { lang = new URLSearchParams(location.search).get("lang"); } catch (e) {}
+  if (lang !== "en" && lang !== "ja") {
+    try { lang = localStorage.getItem("lang"); } catch (e) {}
+  }
+  if (lang !== "en" && lang !== "ja") {
+    lang = /^ja\b/i.test(navigator.language || "") ? "ja" : "en";
+  }
+  document.documentElement.lang = lang;
+})();
+</script>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--dim:#666;--line:#e3e3e3;--accent:#e8720c;--card:#faf9f7;--code:#f3f1ec}
+@media (prefers-color-scheme:dark){:root{--bg:#16150f;--fg:#ececec;--dim:#9a9a9a;--line:#333;--accent:#ff9f45;--card:#1f1e18;--code:#25241d}}
+*{box-sizing:border-box}
+html:lang(ja) [lang=en],html:not(:lang(ja)) [lang=ja]{display:none !important}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.7 system-ui,-apple-system,'Hiragino Sans','Noto Sans JP',sans-serif}
+header{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;
+padding:12px 16px;border-bottom:1px solid var(--line)}
+.brand{font-weight:700;font-size:18px;color:var(--accent);text-decoration:none}
+.brand span{color:var(--dim);font-weight:400;font-size:13px;margin-left:4px}
+nav{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;font-size:14px}
+nav a{color:var(--dim);text-decoration:none}
+nav a:hover{color:var(--accent)}
+#switch{font:inherit;font-size:13px;padding:4px 10px;border:1px solid var(--line);border-radius:999px;
+background:var(--card);color:var(--fg);cursor:pointer}
+main{max-width:820px;margin:0 auto;padding:8px 16px 32px}
+a{color:var(--accent)}
+h1{font-size:34px;line-height:1.2;margin:36px 0 8px}
+h2{font-size:22px;margin:48px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:28px 0 6px}
+.lead{font-size:18px;color:var(--dim);margin:0 0 20px}
+.buttons{display:flex;flex-wrap:wrap;gap:10px;margin:20px 0}
+.btn{display:inline-block;padding:10px 18px;border-radius:10px;border:1px solid var(--line);
+background:var(--card);color:var(--fg);text-decoration:none;font-weight:600}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#1a1000}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:20px 0}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.stat .label{color:var(--dim);font-size:12px}
+.stat .value{font-size:18px;font-weight:600;margin-top:2px}
+.note{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);
+border-radius:8px;padding:12px 14px;margin:16px 0}
+.note p{margin:0}.note p+p{margin-top:8px}
+ol.steps{padding-left:22px}
+ol.steps>li{margin:20px 0}
+ol.steps>li::marker{font-weight:700;color:var(--accent)}
+.box{position:relative;margin:8px 0}
+pre{margin:0;padding:12px 14px;background:var(--code);border:1px solid var(--line);border-radius:8px;
+overflow-x:auto;font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}
+p code,li code,td code{background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+.box pre{padding-right:72px}
+.copy{position:absolute;top:6px;right:6px;font:12px system-ui,sans-serif;padding:3px 9px;border-radius:6px;
+border:1px solid var(--line);background:var(--bg);color:var(--dim);cursor:pointer}
+.wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;margin:10px 0}
+table{border-collapse:collapse;width:100%}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child th,tr:last-child td{border-bottom:0}
+th{color:var(--dim);font-weight:500;font-size:13px;white-space:nowrap}
+.dim{color:var(--dim);font-size:14px}
+footer{max-width:820px;margin:0 auto;padding:24px 16px 40px;color:var(--dim);font-size:13px;border-top:1px solid var(--line)}
+</style>
+</head>
+<body>
+<header>
+  <a class="brand" href="/">Orange <span>OAG</span></a>
+  <nav>
+    <a href="#join"><span lang="en">Join</span><span lang="ja">参加する</span></a>
+    <a href="#node"><span lang="en">Run a node</span><span lang="ja">ノード</span></a>
+    <a href="https://explorer.oagcoin.org/"><span lang="en">Explorer</span><span lang="ja">エクスプローラー</span></a>
+    <a href="https://github.com/manh923/Orange">GitHub</a>
+    <button id="switch" type="button"><span lang="en">日本語</span><span lang="ja">English</span></button>
+  </nav>
+</header>
+
+<main>
+
+<h1>Orange (OAG)</h1>
+<p class="lead" lang="en">A coin you mine with an ordinary CPU. No premine, no ICO, no developer reward — every coin comes out of a block somebody mined.</p>
+<p class="lead" lang="ja">普通の CPU で掘れるコインです。プレマインも ICO も開発者報酬もありません。すべての OAG は、誰かが掘ったブロックから出てきます。</p>
+
+<div class="buttons">
+  <a class="btn primary" href="#join"><span lang="en">Start mining</span><span lang="ja">掘ってみる</span></a>
+  <a class="btn" href="https://explorer.oagcoin.org/"><span lang="en">Block explorer</span><span lang="ja">エクスプローラー</span></a>
+  <a class="btn" href="https://github.com/manh923/Orange/releases/latest"><span lang="en">Download</span><span lang="ja">ダウンロード</span></a>
+</div>
+
+<div class="grid">
+  <div class="stat"><div class="label"><span lang="en">Proof of work</span><span lang="ja">PoW</span></div><div class="value">RandomX (CPU)</div></div>
+  <div class="stat"><div class="label"><span lang="en">Block interval</span><span lang="ja">ブロック間隔</span></div><div class="value"><span lang="en">60 seconds</span><span lang="ja">60 秒</span></div></div>
+  <div class="stat"><div class="label"><span lang="en">Reward</span><span lang="ja">報酬</span></div><div class="value"><span lang="en">10 OAG / block</span><span lang="ja">10 OAG / ブロック</span></div></div>
+  <div class="stat"><div class="label"><span lang="en">Total supply</span><span lang="ja">総発行量</span></div><div class="value">1,000,000,000 OAG</div></div>
+  <div class="stat"><div class="label"><span lang="en">Halving</span><span lang="ja">半減期</span></div><div class="value"><span lang="en">None (~190 years)</span><span lang="ja">なし (約 190 年)</span></div></div>
+  <div class="stat"><div class="label"><span lang="en">Premine</span><span lang="ja">プレマイン</span></div><div class="value"><span lang="en">None</span><span lang="ja">なし</span></div></div>
+</div>
+
+<div class="note">
+  <p lang="en"><b>Mainnet is live, but it is early.</b> There are only a handful of nodes. OAG is not listed on any exchange, so <b>it has no price</b>. This is the stage where you mine it yourself and try it yourself.</p>
+  <p lang="ja"><b>mainnet は動いていますが、まだ始まったばかりです。</b>ノードはごくわずかです。どの取引所にも上場していないので、<b>価格はありません</b>。自分で掘って、自分で試す段階です。</p>
+  <p lang="en">Transactions are transparent: like Bitcoin, anyone can read every amount and address. There are no smart contracts.</p>
+  <p lang="ja">取引は透明です。Bitcoin と同じく、金額もアドレスも誰でも見られます。スマートコントラクトはありません。</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="join"><span lang="en">Join: start mining</span><span lang="ja">参加する: 掘ってみる</span></h2>
+<p lang="en">About ten minutes from download to mining. The commands below are for Linux; on Windows, use PowerShell and type <code>.\oag-node.exe</code> and <code>.\oag-wallet.exe</code> instead.</p>
+<p lang="ja">ダウンロードから採掘まで 10 分ほどです。以下は Linux のコマンドです。Windows では PowerShell を使い、<code>.\oag-node.exe</code> と <code>.\oag-wallet.exe</code> に読み替えてください。</p>
+
+<ol class="steps">
+<li>
+  <b lang="en">Download</b><b lang="ja">ダウンロードする</b>
+  <p lang="en">Pick the file for your machine from the <a href="https://github.com/manh923/Orange/releases/latest">latest release</a>. No Rust or compiler is needed.</p>
+  <p lang="ja"><a href="https://github.com/manh923/Orange/releases/latest">最新のリリース</a>から、自分のマシンに合うファイルを選びます。Rust もコンパイラも要りません。</p>
+  <div class="wrap"><table>
+    <tr><th><span lang="en">Machine</span><span lang="ja">マシン</span></th><th><span lang="en">File</span><span lang="ja">ファイル</span></th></tr>
+    <tr><td>Linux (x86_64)</td><td><code>orange-linux-x86_64.tar.gz</code></td></tr>
+    <tr><td><span lang="en">Raspberry Pi, ARM VPS</span><span lang="ja">ラズパイ、ARM の VPS</span></td><td><code>orange-linux-aarch64.tar.gz</code></td></tr>
+    <tr><td>Windows</td><td><code>orange-windows-x86_64.zip</code></td></tr>
+  </table></div>
+  <div class="box"><pre>curl -LO https://github.com/manh923/Orange/releases/latest/download/orange-linux-x86_64.tar.gz
+curl -LO https://github.com/manh923/Orange/releases/latest/download/orange-linux-x86_64.tar.gz.sha256
+sha256sum -c orange-linux-x86_64.tar.gz.sha256
+tar xzf orange-linux-x86_64.tar.gz
+cd orange-linux-x86_64</pre></div>
+  <p class="dim" lang="en"><code>sha256sum -c</code> should print <code>OK</code>. On macOS, or any machine not listed, <a href="https://github.com/manh923/Orange#macos-or-anything-else">build from source</a>.</p>
+  <p class="dim" lang="ja"><code>sha256sum -c</code> が <code>OK</code> と出れば大丈夫です。macOS や表にないマシンでは<a href="https://github.com/manh923/Orange/blob/main/README.jp.md">ソースから組み立てます</a>。</p>
+</li>
+
+<li>
+  <b lang="en">Make a wallet</b><b lang="ja">財布を作る</b>
+  <div class="box"><pre>./oag-wallet new --network mainnet</pre></div>
+  <p lang="en">It asks for a passphrase and prints a <b>recovery phrase</b>. <b>Write it down on paper.</b> It is the only way to get your coins back if the file is lost, and nobody can recover it for you.</p>
+  <p lang="ja">パスフレーズを聞かれたあと、<b>復元語句</b>が表示されます。<b>紙に書き写してください。</b>ファイルを失くしたときに OAG を取り戻す唯一の手段で、誰にも復元してもらえません。</p>
+</li>
+
+<li>
+  <b lang="en">Run a node and mine</b><b lang="ja">ノードを動かして掘る</b>
+  <div class="box"><pre>./oag-node run --network mainnet --datadir ./oag-data \
+    --mine --fast --mining-threads 0 \
+    --payout $(./oag-wallet address --network mainnet)</pre></div>
+  <p lang="en">It asks for the wallet's passphrase once, finds other nodes by itself and catches up with the chain. Stop it with Ctrl-C.</p>
+  <p lang="ja">財布のパスフレーズを 1 回聞かれます。繋ぎ先は自分で探し、チェーンに追いつきます。止めるときは Ctrl-C です。</p>
+  <ul>
+    <li lang="en"><code>--fast</code> needs <b>2 GB</b> of memory, shared by all threads. Without it, each thread uses 256 MB.</li>
+    <li lang="ja"><code>--fast</code> は <b>2 GB</b> のメモリを使います (全スレッドで共有)。付けなければ 1 スレッドあたり 256 MB です。</li>
+    <li lang="en"><code>--mining-threads 0</code> uses every core. Give a number to leave some for yourself.</li>
+    <li lang="ja"><code>--mining-threads 0</code> ですべてのコアを使います。数を書けば、その本数だけ使います。</li>
+    <li lang="en"><b>Don't forget <code>--network mainnet</code>.</b> Without it, the node quietly runs a private test chain.</li>
+    <li lang="ja"><b><code>--network mainnet</code> を忘れないでください。</b>付けないと、黙って手元だけのテスト用チェーンで動きます。</li>
+  </ul>
+</li>
+
+<li>
+  <b lang="en">Check your balance</b><b lang="ja">残高を見る</b>
+  <p lang="en">While the node is running, from another terminal in the same folder:</p>
+  <p lang="ja">ノードを動かしたまま、同じフォルダで別の端末を開いて:</p>
+  <div class="box"><pre>./oag-wallet balance --network mainnet</pre></div>
+  <p lang="en">A mined reward becomes spendable after <b>120 blocks</b> (about two hours). Each block you mine adds one coin to the wallet, so run <code>./oag-wallet consolidate --network mainnet</code> about once a week to fold them together.</p>
+  <p lang="ja">掘った報酬は <b>120 ブロック後</b> (約 2 時間後) に使えるようになります。1 ブロック掘るごとに財布の中の硬貨が 1 枚増えるので、週に 1 回くらい <code>./oag-wallet consolidate --network mainnet</code> でまとめてください。</p>
+</li>
+
+<li>
+  <b lang="en">Send</b><b lang="ja">送る</b>
+  <div class="box"><pre>./oag-wallet send --network mainnet oag1... 1.5</pre></div>
+  <p lang="en">Add <code>--dry-run</code> to see the transaction without sending it. Every command is on <a href="https://github.com/manh923/Orange/blob/main/docs/COMMANDS.md">COMMANDS.md</a>.</p>
+  <p lang="ja"><code>--dry-run</code> を付けると、送らずに中身だけ確かめられます。すべてのコマンドは <a href="https://github.com/manh923/Orange/blob/main/docs/COMMANDS.md">COMMANDS.md</a> にあります。</p>
+</li>
+</ol>
+
+<h3><span lang="en">Prefer a browser?</span><span lang="ja">ブラウザで使いたいなら</span></h3>
+<p lang="en">Start your node with <code>--wallet</code> and open <code>http://127.0.0.1:25565</code>. The wallet page is served by <b>your own node</b> and runs inside your browser; the keys never reach the node or the network. There is no hosted wallet, and there never will be.</p>
+<p lang="ja">ノードに <code>--wallet</code> を付けて起動し、<code>http://127.0.0.1:25565</code> を開きます。ウォレットの画面は<b>自分のノード</b>が配っていて、ブラウザの中だけで動きます。鍵はノードにもネットワークにも出ていきません。どこかのサイトで動くウォレットはありませんし、これからも作りません。</p>
+
+<!-- ================================================================ -->
+<h2 id="node"><span lang="en">Run a node</span><span lang="ja">ノードを建てる</span></h2>
+<p lang="en"><b>Mining is optional.</b> A node that only validates and relays blocks is what keeps the network alive, and it is cheap: 256 MB of memory for RandomX, a little CPU, and disk.</p>
+<p lang="ja"><b>掘らなくても構いません。</b>ブロックを検証して中継するだけのノードこそがネットワークを支えます。必要なのは RandomX 用のメモリ 256 MB と、少しの CPU とディスクだけです。</p>
+
+<div class="box"><pre>./oag-node run --network mainnet --datadir ./oag-data</pre></div>
+
+<h3><span lang="en">Let others connect</span><span lang="ja">外から繋いでもらう</span></h3>
+<p lang="en">Open <b>9444/tcp</b>. You can sync without it, but then nobody can sync from you. If the node is behind a router, forward the port too.</p>
+<p lang="ja"><b>9444/tcp</b> を開けてください。開けなくても同期はできますが、他の人の同期先にはなれません。ルーターの内側なら、ポートの転送も必要です。</p>
+<div class="box"><pre>sudo ufw allow 9444/tcp</pre></div>
+
+<h3><span lang="en">Leave it running (Linux, systemd)</span><span lang="ja">常時動かす (Linux, systemd)</span></h3>
+<p lang="en">This runs the node in the background at low priority, as an unprivileged user, and brings it back after a reboot. Run it inside the folder you unpacked.</p>
+<p lang="ja">ノードを低い優先度で、権限のないユーザーとして裏で動かし、再起動しても自動で立ち上げます。展開したフォルダの中で実行してください。</p>
+<div class="box"><pre>sudo cp oag-node /usr/local/bin/
+curl -LO https://raw.githubusercontent.com/manh923/Orange/main/contrib/systemd/oag-node.service
+curl -LO https://raw.githubusercontent.com/manh923/Orange/main/contrib/systemd/oag-node.env
+sudo cp oag-node.service /etc/systemd/system/
+sudo cp oag-node.env /etc/default/oag-node
+sudo systemctl enable --now oag-node
+journalctl -u oag-node -f</pre></div>
+<p lang="en">The data lives in <code>/var/lib/oag-node</code>. To change what it runs, edit <code>OAG_FLAGS</code> in <code>/etc/default/oag-node</code> and <code>sudo systemctl restart oag-node</code>.</p>
+<p lang="ja">データは <code>/var/lib/oag-node</code> に置かれます。動かし方を変えるときは <code>/etc/default/oag-node</code> の <code>OAG_FLAGS</code> を書き換えて、<code>sudo systemctl restart oag-node</code> します。</p>
+
+<h3><span lang="en">Three kinds of node</span><span lang="ja">ノードは 3 種類</span></h3>
+<div class="wrap"><table>
+  <tr><th></th><th><span lang="en">Disk</span><span lang="ja">ディスク</span></th><th><span lang="en">What it is for</span><span lang="ja">用途</span></th></tr>
+  <tr><td><span lang="en">full</span><span lang="ja">フル</span><br><code>--network mainnet</code></td>
+      <td><span lang="en">grows forever</span><span lang="ja">増え続ける</span></td>
+      <td><span lang="en">Keeps every block and can hand any of them to anyone. <b>What the network needs most.</b></span><span lang="ja">すべてのブロックを持ち、誰にでも渡せます。<b>ネットワークに一番必要なノードです。</b></span></td></tr>
+  <tr><td><span lang="en">pruned</span><span lang="ja">刈り込み</span><br><code>--prune</code></td>
+      <td><span lang="en">stays bounded</span><span lang="ja">一定で止まる</span></td>
+      <td><span lang="en">Validates exactly as strictly as a full node, but keeps only recent blocks. Run this if disk is the problem.</span><span lang="ja">フルノードとまったく同じ厳しさで検証し、古いブロックだけ捨てます。ディスクが心配ならこれを。</span></td></tr>
+  <tr><td><span lang="en">light</span><span lang="ja">軽量</span><br><code>--light --watch oag1...</code></td>
+      <td><span lang="en">about 53 MB a year</span><span lang="ja">年に約 53 MB</span></td>
+      <td><span lang="en">Watches your own addresses on a small machine. It does not help the network.</span><span lang="ja">小さなマシンで自分のアドレスを見張るためのもので、ネットワークの役には立ちません。</span></td></tr>
+</table></div>
+
+<h3><span lang="en">Your own explorer</span><span lang="ja">自分のエクスプローラー</span></h3>
+<p lang="en">Add <code>--explorer</code> and open <code>http://127.0.0.1:8080</code>. It is the same explorer as <a href="https://explorer.oagcoin.org/">explorer.oagcoin.org</a>, but it reads your own copy of the chain, so you are not trusting anybody else's.</p>
+<p lang="ja"><code>--explorer</code> を付けて <code>http://127.0.0.1:8080</code> を開きます。<a href="https://explorer.oagcoin.org/">explorer.oagcoin.org</a> と同じものですが、自分の手元のチェーンを読むので、他人の言うことを信じる必要がありません。</p>
+
+<!-- ================================================================ -->
+<h2 id="links"><span lang="en">Links</span><span lang="ja">リンク</span></h2>
+<div class="wrap"><table>
+  <tr><th><span lang="en">Block explorer</span><span lang="ja">エクスプローラー</span></th><td><a href="https://explorer.oagcoin.org/">explorer.oagcoin.org</a></td></tr>
+  <tr><th><span lang="en">Source code</span><span lang="ja">ソースコード</span></th><td><a href="https://github.com/manh923/Orange">github.com/manh923/Orange</a></td></tr>
+  <tr><th><span lang="en">Downloads</span><span lang="ja">ダウンロード</span></th><td><a href="https://github.com/manh923/Orange/releases/latest"><span lang="en">Latest release</span><span lang="ja">最新のリリース</span></a></td></tr>
+  <tr><th><span lang="en">Specification</span><span lang="ja">仕様書</span></th><td><a href="https://github.com/manh923/Orange/blob/main/docs/SPEC.en.md">SPEC.en.md</a> · <a href="https://github.com/manh923/Orange/blob/main/docs/SPEC.md">SPEC.md</a> <span class="dim"><span lang="en">(Japanese, normative)</span><span lang="ja">(日本語、こちらが正)</span></span></td></tr>
+  <tr><th><span lang="en">Every command</span><span lang="ja">コマンド一覧</span></th><td><a href="https://github.com/manh923/Orange/blob/main/docs/COMMANDS.md">COMMANDS.md</a></td></tr>
+  <tr><th><span lang="en">Announcement</span><span lang="ja">告知スレッド</span></th><td><a href="https://bitcointalk.org/index.php?topic=5594978.0">bitcointalk</a></td></tr>
+  <tr><th><span lang="en">Questions, reports</span><span lang="ja">質問・報告</span></th><td><a href="https://github.com/manh923/Orange/issues">GitHub Issues</a> <span class="dim"><span lang="en">(English or Japanese)</span><span lang="ja">(日本語でも英語でも)</span></span></td></tr>
+  <tr><th><span lang="en">Anything else</span><span lang="ja">それ以外</span></th><td><code>contact@oagcoin.org</code></td></tr>
+</table></div>
+
+<div class="note">
+  <p lang="en"><b>The official places are the GitHub repository and the bitcointalk thread.</b> There is no official Discord, Telegram or token sale, and nobody from the project will message you first. No exchange listing is official either.</p>
+  <p lang="ja"><b>公式の場所は GitHub のリポジトリと bitcointalk のスレッドだけです。</b>公式の Discord、Telegram、トークンセールはありません。プロジェクトの人間から先に連絡することもありません。取引所への上場も、公式のものはありません。</p>
+  <p lang="en">Only download from the <a href="https://github.com/manh923/Orange/releases/latest">GitHub releases</a>. Anyone who says they speak for the project can prove it by <a href="https://github.com/manh923/Orange#telling-the-author-apart">signing with the address block 1 paid</a>.</p>
+  <p lang="ja">ダウンロードは <a href="https://github.com/manh923/Orange/releases/latest">GitHub のリリース</a>からだけにしてください。プロジェクトの代表を名乗る人は、<a href="https://github.com/manh923/Orange/blob/main/README.jp.md">ブロック 1 の報酬を受け取ったアドレスで署名</a>して証明できます。署名のない名乗りは信じないでください。</p>
+</div>
+
+</main>
+
+<footer>
+  <span lang="en">Orange is free software under the MIT license. This page is <a href="https://github.com/manh923/Orange/blob/main/site/index.html"><code>site/index.html</code></a> in the repository — no trackers, no cookies, nothing loaded from anywhere else.</span>
+  <span lang="ja">Orange は MIT ライセンスの自由ソフトウェアです。このページはリポジトリの <a href="https://github.com/manh923/Orange/blob/main/site/index.html"><code>site/index.html</code></a> そのものです。追跡も Cookie もなく、外から何も読み込んでいません。</span>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var titles = { en: "Orange (OAG)", ja: "Orange (OAG) — CPU で掘れるコイン" };
+
+  function show(lang) {
+    root.lang = lang;
+    document.title = titles[lang];
+  }
+  show(root.lang === "ja" ? "ja" : "en");
+
+  document.getElementById("switch").addEventListener("click", function () {
+    var next = root.lang === "ja" ? "en" : "ja";
+    show(next);
+    try { localStorage.setItem("lang", next); } catch (e) {}
+  });
+
+  // A copy button on every command, so nobody has to select a line by hand.
+  Array.prototype.forEach.call(document.querySelectorAll(".box"), function (box) {
+    if (!navigator.clipboard) return;
+    var pre = box.querySelector("pre");
+    var button = document.createElement("button");
+    button.className = "copy";
+    button.type = "button";
+    button.textContent = "Copy";
+    button.addEventListener("click", function () {
+      navigator.clipboard.writeText(pre.textContent).then(function () {
+        button.textContent = root.lang === "ja" ? "コピーしました" : "Copied";
+        setTimeout(function () { button.textContent = "Copy"; }, 1500);
+      });
+    });
+    box.appendChild(button);
+  });
+})();
+</script>
+</body>
+</html>
