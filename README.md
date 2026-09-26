@@ -753,10 +753,11 @@ exists.**
 
 ## Official places
 
-There are two: this repository, and the
-[announcement thread on bitcointalk](https://bitcointalk.org/index.php?topic=5594978.0).
-**There is no official Discord, Telegram or token sale, and nobody from the
-project will message you first.**
+There are three: this repository, the
+[announcement thread on bitcointalk](https://bitcointalk.org/index.php?topic=5594978.0),
+and the [Discord server](https://discord.gg/72KWbXkn86). **Any other Discord server, and any Telegram
+group, is not official. There is no token sale, and nobody from the project
+will message you first.**
 
 No exchange listing is official either. If someone lists OAG, they do it on
 their own and with their own money. The project neither pays for a listing nor

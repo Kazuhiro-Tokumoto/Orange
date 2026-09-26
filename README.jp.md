@@ -662,10 +662,11 @@ MSRV (最低必要バージョン) は **1.90** で、CI が毎回検証して�
 
 ## 公式の場所
 
-2 つだけです。このリポジトリと、
-[bitcointalk の告知スレッド](https://bitcointalk.org/index.php?topic=5594978.0)
-です。**公式の Discord や Telegram、トークンセールはありません。こちらから
-先に DM を送ることもありません。**
+3 つだけです。このリポジトリと、
+[bitcointalk の告知スレッド](https://bitcointalk.org/index.php?topic=5594978.0)、
+[Discord サーバー](https://discord.gg/72KWbXkn86) です。**これ以外の Discord サーバーや Telegram は
+公式ではありません。トークンセールもありません。こちらから先に DM を送ることも
+ありません。**
 
 取引所への上場にも公式のものはありません。誰かが上場させるなら、それはその人が
 自分の判断と自分のお金でやることです。上場のためにお金を払うことも、上場を
