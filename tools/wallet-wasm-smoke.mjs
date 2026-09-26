@@ -80,4 +80,20 @@ const sweepMs = Date.now() - t2;
 console.log(`consolidate: ${swept.inputs} inputs / ${swept.size} bytes / fee ${swept.fee} OAG`);
 console.log(`             ${sweepMs} ms`);
 
+// Sign a message with an address other than the first, as the Sign tab's
+// picker does. **It must be that address that signed**, not the first.
+const grown = call({ cmd: "grow", accounts: 2 });
+const second = grown.addresses[1];
+const said = call({ cmd: "sign_message", message: "sign", address: second });
+if (said.address !== second) throw new Error("signed with a different address");
+call({ cmd: "verify_message", address: second, signature: said.signature, message: "sign" });
+let first = true;
+try {
+  call({ cmd: "verify_message", address: mine, signature: said.signature, message: "sign" });
+} catch {
+  first = false;
+}
+if (first) throw new Error("the first address matched a signature by the second");
+console.log(`message: signed by the second address, ${said.bytes} bytes`);
+
 console.log("\neverything passed");

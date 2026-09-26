@@ -289,6 +289,7 @@ async function enterWallet(addresses) {
   show("wallet", true);
   tabs(PANES, "tab-recv");
   $("recv-addr").textContent = addresses[addresses.length - 1];
+  fillSignAddresses();
   await refresh();
 }
 
@@ -403,6 +404,7 @@ async function doNewAddress() {
       keepRecord(grown.record);
       state.addresses = grown.addresses;
       $("recv-addr").textContent = grown.addresses[grown.addresses.length - 1];
+      fillSignAddresses();
       await refresh();
     } catch (e) {
       say("bal-sub", e.message, true);
@@ -445,11 +447,29 @@ async function boot() {
 
 // ======== signing a message ========
 
+// Every address of this wallet can sign. The first one is chosen at the
+// start, as the CLI's `sign` does without `--address`; a choice already made
+// is kept when the list grows.
+function fillSignAddresses() {
+  const box = $("sign-addr");
+  const chosen = box.value;
+  box.replaceChildren(
+    ...state.addresses.map((address) => {
+      const option = document.createElement("option");
+      option.value = address;
+      option.textContent = address;
+      return option;
+    }),
+  );
+  if (state.addresses.includes(chosen)) box.value = chosen;
+}
+
 // The message is signed as the UTF-8 bytes of exactly what is in the box.
 // **Nothing is trimmed and no newline is added**, so that the CLI's
 // `--message` and this agree byte for byte.
 function doSign() {
   const message = $("sign-msg").value;
+  const address = $("sign-addr").value;
   show("sign-copy-row", false);
   $("sign-sig").textContent = "";
   if (!message) return say("sign-out", "there is nothing to sign", true);
@@ -457,10 +477,10 @@ function doSign() {
   // One look before it happens. The signature cannot move coins, but it can
   // be shown to others as proof, so it should not leave without being read.
   const shown = message.length > 300 ? `${message.slice(0, 300)}…` : message;
-  if (!confirm(`Sign this?\n\n${shown}\n\nAnyone can then show that this address signed it.`)) return;
+  if (!confirm(`Sign this with ${address}?\n\n${shown}\n\nAnyone can then show that this address signed it.`)) return;
 
   try {
-    const out = call({ cmd: "sign_message", message });
+    const out = call({ cmd: "sign_message", message, address });
     say("sign-out", `${out.address} signed ${out.bytes} bytes`);
     $("sign-sig").textContent = out.signature;
     show("sign-copy-row", true);

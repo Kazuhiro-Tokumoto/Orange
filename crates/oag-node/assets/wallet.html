@@ -219,10 +219,12 @@ footer{padding:20px 16px;color:var(--dim);font-size:12px;text-align:center;borde
       Sign a message to show you hold this address. <b>This moves no coins</b>,
       and the signature cannot stand in for a transaction.
     </p>
+    <label for="sign-addr">Address</label>
+    <select id="sign-addr" class="mono"></select>
     <label for="sign-msg">Message</label>
     <textarea id="sign-msg" autocomplete="off" spellcheck="false" placeholder="signed exactly as typed, with no trailing newline"></textarea>
     <div class="row" style="margin-top:14px"><button id="do-sign" class="primary">Sign</button></div>
-    <p id="sign-out" class="note"></p>
+    <p id="sign-out" class="note" style="overflow-wrap:anywhere"></p>
     <p id="sign-sig" class="mono"></p>
     <div class="row hidden" id="sign-copy-row">
       <button id="do-copysig">Copy the signature</button>
